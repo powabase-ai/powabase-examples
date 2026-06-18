@@ -172,6 +172,16 @@ class PowabaseClient:
                 if line:
                     yield line
 
+    async def run_agent(
+        self, agent_id: str, message: str, *, session_id: str | None = None
+    ) -> Any:
+        """Synchronous run — no tools, no ReAct loop. Use for plain LLM tasks
+        (e.g. brief generation). For any tool use, use run_agent_stream/collect."""
+        body: dict[str, Any] = {"message": message}
+        if session_id:
+            body["session_id"] = session_id
+        return await self._request("POST", f"/api/agents/{agent_id}/run", json=body)
+
     async def get_run(self, run_id: str) -> Any:
         """Highest-signal way to debug a finished/failed run."""
         return await self._request("GET", f"/api/agents/runs/{run_id}")

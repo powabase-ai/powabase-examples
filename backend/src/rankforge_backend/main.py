@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .db import Database
 from .powabase import PowabaseClient
-from .routes import business_profiles, health, research
+from .routes import brief, business_profiles, health, research
 
 
 @asynccontextmanager
@@ -60,6 +60,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(business_profiles.router)
     app.include_router(research.router)
+    app.include_router(brief.router)
     return app
 
 

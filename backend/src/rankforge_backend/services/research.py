@@ -3,8 +3,6 @@ web_scrape, runs it for a topic scoped to a brand, parses its structured output,
 and stores a research_run.
 """
 
-import json
-import re
 from typing import Any
 from uuid import UUID
 
@@ -13,6 +11,7 @@ from psycopg.types.json import Json
 from ..db import Database
 from ..models.research import ResearchResult
 from ..powabase import PowabaseClient
+from ..util import extract_json as _extract_json
 from . import business_profiles as brands
 
 RESEARCH_AGENT_NAME = "rankforge-research"
@@ -96,18 +95,6 @@ def _build_message(brand: dict[str, Any], topic: str, locale: str, depth: str) -
         "Output ONLY a single ```json block matching exactly this shape:\n"
         f"{_SCHEMA_HINT}"
     )
-
-
-def _extract_json(content: str) -> dict[str, Any]:
-    """Pull the JSON object from the agent's final message (fenced or bare)."""
-    fenced = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
-    raw = fenced.group(1) if fenced else None
-    if raw is None:
-        start, end = content.find("{"), content.rfind("}")
-        if start == -1 or end <= start:
-            raise ValueError("no JSON object found in agent output")
-        raw = content[start : end + 1]
-    return json.loads(raw)
 
 
 async def run_research(
