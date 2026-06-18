@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { Globe, Pencil, Plus, Target, Trash2, Users } from "lucide-react";
+import Link from "next/link";
+import { ArrowRight, Globe, Pencil, Plus, Target, Trash2, Users } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -136,6 +137,12 @@ export default function Home() {
                   <span className="inline-flex items-center gap-1.5">
                     <Users className="size-3.5" /> {b.competitors.length} competitors
                   </span>
+                  <Link
+                    href={`/brands/${b.id}`}
+                    className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-[rgb(var(--accent-gold-hover))] hover:underline"
+                  >
+                    Open workspace <ArrowRight className="size-3.5" />
+                  </Link>
                 </CardContent>
               </Card>
             ))}

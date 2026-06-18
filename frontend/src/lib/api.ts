@@ -81,3 +81,74 @@ export const brandsApi = {
   remove: (id: string) =>
     request<void>(`/api/business-profiles/${id}`, { method: "DELETE" }),
 };
+
+// --- Research (Stage A) ---
+export interface SerpResult {
+  rank?: number | null;
+  title?: string | null;
+  url?: string | null;
+  snippet?: string | null;
+}
+
+export interface ResearchRun {
+  id: string;
+  business_id?: string | null;
+  topic: string;
+  locale: string;
+  serp: {
+    results?: SerpResult[];
+    paa?: string[];
+    related_queries?: string[];
+  };
+  competitors: Array<Record<string, unknown>>;
+  clusters: Array<Record<string, unknown>>;
+  intent?: string | null;
+  agent_run_id?: string | null;
+  created_at: string;
+}
+
+export const researchApi = {
+  listByBrand: (businessId: string) =>
+    request<ResearchRun[]>(`/api/research?business_id=${businessId}`),
+  get: (id: string) => request<ResearchRun>(`/api/research/${id}`),
+  run: (data: { business_id: string; topic: string; locale?: string; depth?: string }) =>
+    request<ResearchRun>("/api/research", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+// --- Brief (Stage B) ---
+export interface Brief {
+  id: string;
+  business_id?: string | null;
+  research_run_id?: string | null;
+  topic: string;
+  primary_keyword?: string | null;
+  secondary_keywords: string[];
+  target_word_count?: number | null;
+  headings: string[];
+  entities: string[];
+  questions: string[];
+  link_suggestions: { internal?: string[]; external?: string[] };
+  suggested_title?: string | null;
+  suggested_meta?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const briefsApi = {
+  listByBrand: (businessId: string) =>
+    request<Brief[]>(`/api/briefs?business_id=${businessId}`),
+  get: (id: string) => request<Brief>(`/api/briefs/${id}`),
+  generate: (researchRunId: string) =>
+    request<Brief>("/api/briefs", {
+      method: "POST",
+      body: JSON.stringify({ research_run_id: researchRunId }),
+    }),
+  update: (id: string, data: Partial<Omit<Brief, "id" | "created_at" | "updated_at">>) =>
+    request<Brief>(`/api/briefs/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+};
