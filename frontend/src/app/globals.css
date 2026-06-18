@@ -1,12 +1,137 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* ============================================
+   RankForge Design System — Synapse Warm Cream
+   (shared design language with Judocu: warm cream,
+   dark-navy primary, burnt-orange accent)
+   ============================================ */
 
 :root {
-  --background: #0a0a0a;
-  --foreground: #ededed;
+  /* Background layers */
+  --bg-base: 252 250 247;             /* #FCFAF7 - cream */
+  --bg-default: 255 255 255;          /* #FFF */
+  --bg-surface-100: 255 255 255;      /* cards, sidebar */
+  --bg-surface-200: 250 250 250;      /* hover */
+  --bg-surface-300: 245 245 245;      /* compact/muted */
+  --bg-overlay: 255 255 255;          /* modals/popovers */
+
+  /* Foreground/Text */
+  --fg-default: 36 35 45;             /* #24232d - dark navy text */
+  --fg-light: 102 102 102;            /* #666 */
+  --fg-lighter: 102 102 102;
+  --fg-muted: 190 190 190;
+
+  /* Brand (Dark Navy primary) */
+  --brand-default: 36 35 45;          /* #24232d */
+  --brand-hover: 54 53 65;
+  --brand-active: 72 71 85;
+  --brand-muted: 247 234 223;         /* #F7EADF - selected state */
+
+  /* Accent (Burnt Orange) */
+  --brand-accent: 231 149 61;         /* #E7953D */
+  --accent-gold: 231 149 61;
+  --accent-gold-hover: 210 130 45;
+  --accent-gold-muted: 250 242 235;   /* #FAF2EB */
+
+  /* Borders */
+  --border-default: 240 240 240;
+  --border-light: 245 245 245;
+  --border-strong: 224 224 224;       /* #E0E0E0 */
+
+  /* Status */
+  --warning: 245 158 11;
+  --destructive: 195 61 51;           /* #c33d33 */
+  --success: 0 163 68;                /* #00a344 */
+
+  /* Radii — 4px standard */
+  --radius: 4px;
+}
+
+.dark {
+  --bg-base: 30 29 37;
+  --bg-default: 36 35 45;
+  --bg-surface-100: 42 41 53;
+  --bg-surface-200: 54 53 65;
+  --bg-surface-300: 72 71 85;
+  --bg-overlay: 42 41 53;
+
+  --fg-default: 252 250 247;
+  --fg-light: 210 208 215;
+  --fg-lighter: 170 168 178;
+  --fg-muted: 120 118 130;
+
+  --brand-default: 231 149 61;        /* orange as primary in dark */
+  --brand-hover: 245 170 90;
+  --brand-active: 210 130 45;
+  --brand-muted: 60 45 30;
+
+  --accent-gold: 231 149 61;
+  --accent-gold-hover: 245 170 90;
+  --accent-gold-muted: 50 38 22;
+
+  --border-default: 54 53 65;
+  --border-light: 42 41 53;
+  --border-strong: 72 71 85;
+
+  --warning: 251 191 36;
+  --destructive: 220 90 80;
+  --success: 74 222 128;
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-background: rgb(var(--bg-base));
+  --color-foreground: rgb(var(--fg-default));
+  --color-card: rgb(var(--bg-surface-100));
+  --color-card-foreground: rgb(var(--fg-default));
+  --color-popover: rgb(var(--bg-overlay));
+  --color-popover-foreground: rgb(var(--fg-default));
+  --color-primary: rgb(var(--brand-default));
+  --color-primary-foreground: rgb(255 255 255);
+  --color-secondary: rgb(var(--bg-surface-200));
+  --color-secondary-foreground: rgb(var(--fg-default));
+  --color-muted: rgb(var(--bg-surface-200));
+  --color-muted-foreground: rgb(var(--fg-lighter));
+  --color-accent: rgb(var(--accent-gold-muted));
+  --color-accent-foreground: rgb(var(--fg-default));
+  --color-gold: rgb(var(--accent-gold));
+  --color-gold-foreground: rgb(255 255 255);
+  --color-destructive: rgb(var(--destructive));
+  --color-destructive-foreground: rgb(255 255 255);
+  --color-border: rgb(var(--border-default));
+  --color-input: rgb(var(--border-default));
+  --color-ring: rgb(var(--brand-default));
+
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: var(--font-inter), system-ui, sans-serif;
+  --font-serif: var(--font-source-serif), "Georgia", serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+
+html {
+  @apply antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-font-smoothing: antialiased;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  @apply bg-[rgb(var(--bg-base))] text-[rgb(var(--fg-default))];
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* Serif for display headings, matching Judocu */
+.font-display {
+  font-family: var(--font-serif);
+}
+
+::selection {
+  background: rgb(var(--brand-accent) / 0.2);
 }
