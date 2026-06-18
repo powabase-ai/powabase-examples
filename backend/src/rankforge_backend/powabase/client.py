@@ -13,6 +13,7 @@ Conventions baked in (see the `powabase` skill for the why):
   the canonical flow from the skill, kept thin on purpose.
 """
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -68,6 +69,86 @@ class PowabaseClient:
     async def get_agents(self) -> Any:
         """Verify connectivity / list agents. Good for a health check."""
         return await self._request("GET", "/api/agents")
+
+    async def create_agent(
+        self,
+        *,
+        name: str,
+        model: str,
+        system_prompt: str,
+        settings: dict[str, Any] | None = None,
+    ) -> Any:
+        """Create an agent. Note: tuning fields (temperature etc.) must nest in
+        `settings` — top-level is silently dropped."""
+        body: dict[str, Any] = {
+            "name": name,
+            "model": model,
+            "system_prompt": system_prompt,
+        }
+        if settings:
+            body["settings"] = settings
+        return await self._request("POST", "/api/agents", json=body)
+
+    async def attach_builtin_tool(self, agent_id: str, tool_name: str) -> Any:
+        """Attach a builtin tool. The live API requires BOTH tool_type and
+        tool_name (tool_name alone → 400)."""
+        return await self._request(
+            "POST",
+            f"/api/agents/{agent_id}/tools",
+            json={"tool_type": "builtin", "tool_name": tool_name},
+        )
+
+    async def delete_agent(self, agent_id: str) -> Any:
+        return await self._request("DELETE", f"/api/agents/{agent_id}")
+
+    async def run_agent_collect(
+        self, agent_id: str, message: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Run an agent via /run/stream and collect the result.
+
+        Consumes the SSE stream and returns the final assembled content plus tool
+        activity and ids. Use this (not /run) whenever the agent has tools.
+        """
+        result: dict[str, Any] = {
+            "content": "",
+            "run_id": None,
+            "session_id": session_id,
+            "tool_results": [],
+            "error": None,
+        }
+        parts: list[str] = []
+        async for line in self.run_agent_stream(
+            agent_id, message, session_id=session_id
+        ):
+            if not line.startswith("data:"):
+                continue
+            try:
+                evt = json.loads(line[len("data:") :].strip())
+            except json.JSONDecodeError:
+                continue
+            kind = evt.get("event")
+            if kind == "start":
+                result["run_id"] = evt.get("run_id")
+                result["session_id"] = evt.get("session_id")
+            elif kind == "content_delta":
+                parts.append(evt.get("delta", ""))
+            elif kind == "tool_result":
+                result["tool_results"].append(
+                    {
+                        "tool": evt.get("tool_name"),
+                        "preview": evt.get("result_preview"),
+                    }
+                )
+            elif kind == "complete":
+                if evt.get("content"):
+                    result["content"] = evt["content"]
+                result["run_id"] = evt.get("run_id", result["run_id"])
+                result["session_id"] = evt.get("session_id", result["session_id"])
+            elif kind == "error":
+                result["error"] = evt
+        if not result["content"]:
+            result["content"] = "".join(parts)
+        return result
 
     async def run_agent_stream(
         self, agent_id: str, message: str, *, session_id: str | None = None

@@ -25,6 +25,11 @@ class Database:
             min_size=min_size,
             max_size=max_size,
             kwargs={"row_factory": dict_row},
+            # Validate (and transparently replace) a pooled connection before
+            # handing it out. Long-running ops (research/generation runs) can
+            # outlast the pooler's idle timeout, leaving stale connections —
+            # without this you get "server closed the connection unexpectedly".
+            check=ConnectionPool.check_connection,
             open=False,
         )
 
