@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "powabase": {
+      "source": "powabase-ai/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/powabase/SKILL.md",
+      "computedHash": "1e04beffc9bfc726c62ab4f1689e735697b5c0ae2c19062b0f410e4dbf031d55"
+    }
+  }
+}

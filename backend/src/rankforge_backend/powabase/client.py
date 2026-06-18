@@ -1,0 +1,136 @@
+"""Async client for the Powabase `/api/*` surface.
+
+Scope: only the endpoints RankForge needs — agents (research), workflows
+(generation pipeline), and knowledge bases / sources (brand grounding). For app
+data, use direct Postgres (`db.py`) instead.
+
+Conventions baked in (see the `powabase` skill for the why):
+- Two headers on every call: `apikey` AND `Authorization: Bearer <key>` — sending
+  one is the #1 cause of 401s.
+- Service Role (Secret) key, server-side only.
+- The `/api/*` surface is still evolving; verify exact request/response shapes
+  against https://docs.powabase.ai before trusting a field. Endpoints below are
+  the canonical flow from the skill, kept thin on purpose.
+"""
+
+from collections.abc import AsyncIterator
+from typing import Any
+
+import httpx
+
+
+class PowabaseError(RuntimeError):
+    """Raised for non-2xx responses from the Powabase API."""
+
+    def __init__(self, status_code: int, body: Any):
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"Powabase API error {status_code}: {body}")
+
+
+class PowabaseClient:
+    """Thin async wrapper over the Powabase REST API.
+
+    Lifecycle: create once, reuse the underlying httpx client, `await aclose()` on
+    shutdown.
+    """
+
+    def __init__(self, base_url: str, service_role_key: str, *, timeout: float = 60.0):
+        if not base_url or not service_role_key:
+            raise ValueError("base_url and service_role_key are required")
+        self._base_url = base_url.rstrip("/")
+        self._headers = {
+            "apikey": service_role_key,
+            "Authorization": f"Bearer {service_role_key}",
+            "Content-Type": "application/json",
+        }
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url, headers=self._headers, timeout=timeout
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    # --- low-level ---
+    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        resp = await self._client.request(method, path, **kwargs)
+        if resp.status_code >= 400:
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            raise PowabaseError(resp.status_code, body)
+        if resp.content:
+            return resp.json()
+        return None
+
+    # --- agents (research) ---
+    async def get_agents(self) -> Any:
+        """Verify connectivity / list agents. Good for a health check."""
+        return await self._request("GET", "/api/agents")
+
+    async def run_agent_stream(
+        self, agent_id: str, message: str, *, session_id: str | None = None
+    ) -> AsyncIterator[str]:
+        """Stream an agent run (the tool-bearing path — required for web tools/KB).
+
+        Yields raw SSE lines; parse with an SSE reader at the call site.
+        `/run` (non-stream) has no tools and no ReAct loop — don't use it for
+        research.
+        """
+        payload: dict[str, Any] = {"message": message}
+        if session_id:
+            payload["session_id"] = session_id
+        async with self._client.stream(
+            "POST", f"/api/agents/{agent_id}/run/stream", json=payload
+        ) as resp:
+            if resp.status_code >= 400:
+                body = await resp.aread()
+                raise PowabaseError(resp.status_code, body.decode(errors="replace"))
+            async for line in resp.aiter_lines():
+                if line:
+                    yield line
+
+    async def get_run(self, run_id: str) -> Any:
+        """Highest-signal way to debug a finished/failed run."""
+        return await self._request("GET", f"/api/agents/runs/{run_id}")
+
+    # --- workflows (generation pipeline) ---
+    async def execute_workflow(self, workflow_id: str, inputs: dict[str, Any]) -> Any:
+        """Kick off the generation workflow. Rate-limited 20/min/user → 429."""
+        return await self._request(
+            "POST", f"/api/workflows/{workflow_id}/execute", json={"inputs": inputs}
+        )
+
+    # --- knowledge bases / sources (brand grounding) ---
+    async def upload_source(self, file_name: str, content: bytes, mime: str) -> Any:
+        """Upload a source file (multipart). Poll get_source() until `extracted`."""
+        files = {"file": (file_name, content, mime)}
+        # multipart: drop the JSON content-type for this call
+        headers = {k: v for k, v in self._headers.items() if k != "Content-Type"}
+        resp = await self._client.post(
+            "/api/sources/upload", files=files, headers=headers
+        )
+        if resp.status_code >= 400:
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            raise PowabaseError(resp.status_code, body)
+        return resp.json()
+
+    async def get_source(self, source_id: str) -> Any:
+        return await self._request("GET", f"/api/sources/{source_id}")
+
+    async def create_kb(self, name: str) -> Any:
+        return await self._request(
+            "POST", "/api/knowledge-bases", json={"name": name}
+        )
+
+    async def add_source_to_kb(self, kb_id: str, source_id: str) -> Any:
+        """Triggers indexing. 400s unless the source is `extracted`."""
+        return await self._request(
+            "POST",
+            f"/api/knowledge-bases/{kb_id}/sources",
+            json={"source_id": source_id},
+        )
