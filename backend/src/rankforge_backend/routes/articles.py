@@ -1,0 +1,49 @@
+"""Article (Stage C) endpoints — async generation + status polling."""
+
+import asyncio
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from ..db import Database
+from ..models.article import Article, ArticleGenerate, ArticleSummary
+from ..powabase import PowabaseClient
+from ..services import generation as svc
+from .business_profiles import get_db
+from .research import get_powabase
+
+router = APIRouter(prefix="/api/articles", tags=["articles"])
+
+_bg_tasks: set[asyncio.Task] = set()
+
+
+@router.post("", response_model=Article, status_code=status.HTTP_201_CREATED)
+async def generate_article(
+    payload: ArticleGenerate,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+):
+    """Generate a draft from a brief. Returns immediately; poll GET /api/articles/{id}."""
+    brief = svc.get_brief(db, payload.brief_id)
+    if brief is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "brief not found")
+    article = svc.create_article(db, brief)
+    task = asyncio.create_task(
+        svc.run_generation_task(pb, db, article_id=article["id"], brief=brief)
+    )
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return article
+
+
+@router.get("", response_model=list[ArticleSummary])
+def list_articles(business_id: UUID, db: Database = Depends(get_db)):
+    return svc.list_articles(db, business_id)
+
+
+@router.get("/{article_id}", response_model=Article)
+def get_article(article_id: UUID, db: Database = Depends(get_db)):
+    row = svc.get_article(db, article_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    return row

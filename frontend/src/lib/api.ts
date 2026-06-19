@@ -161,6 +161,52 @@ export const sourcesApi = {
     ),
 };
 
+// --- Articles (Stage C) ---
+export type GenerationStatus =
+  | "queued"
+  | "grounding"
+  | "outlining"
+  | "drafting"
+  | "optimizing"
+  | "done"
+  | "failed";
+
+export interface ArticleSummary {
+  id: string;
+  title: string;
+  status: string;
+  generation_status: GenerationStatus;
+  progress: { phase?: string; total?: number; done?: number; word_count?: number };
+  updated_at: string;
+}
+
+export interface Article extends ArticleSummary {
+  business_id?: string | null;
+  brief_id?: string | null;
+  research_run_id?: string | null;
+  slug?: string | null;
+  generation_error?: string | null;
+  content_md: string;
+  meta_title?: string | null;
+  meta_description?: string | null;
+  seo_score?: Record<string, unknown> | null;
+  geo_score?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export const TERMINAL_GENERATION: GenerationStatus[] = ["done", "failed"];
+
+export const articlesApi = {
+  listByBrand: (businessId: string) =>
+    request<ArticleSummary[]>(`/api/articles?business_id=${businessId}`),
+  get: (id: string) => request<Article>(`/api/articles/${id}`),
+  generate: (briefId: string) =>
+    request<Article>("/api/articles", {
+      method: "POST",
+      body: JSON.stringify({ brief_id: briefId }),
+    }),
+};
+
 // --- Brief (Stage B) ---
 export interface Brief {
   id: string;

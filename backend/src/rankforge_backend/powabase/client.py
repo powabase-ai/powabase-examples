@@ -230,15 +230,39 @@ class PowabaseClient:
             raise PowabaseError(resp.status_code, resp.text)
         return resp.text
 
-    async def create_kb(self, name: str) -> Any:
-        return await self._request(
-            "POST", "/api/knowledge-bases", json={"name": name}
-        )
+    async def create_kb(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        retrieval_config: dict[str, Any] | None = None,
+    ) -> Any:
+        body: dict[str, Any] = {"name": name}
+        if description:
+            body["description"] = description
+        if retrieval_config:
+            body["retrieval_config"] = retrieval_config
+        return await self._request("POST", "/api/knowledge-bases", json=body)
 
     async def add_source_to_kb(self, kb_id: str, source_id: str) -> Any:
-        """Triggers indexing. 400s unless the source is `extracted`."""
+        """Triggers indexing (idempotent re-index). 400s unless `extracted`."""
         return await self._request(
             "POST",
             f"/api/knowledge-bases/{kb_id}/sources",
             json={"source_id": source_id},
         )
+
+    async def list_kb_sources(self, kb_id: str) -> Any:
+        """Indexed sources + their index_status (pending/indexing/indexed/failed)."""
+        return await self._request("GET", f"/api/knowledge-bases/{kb_id}/sources")
+
+    async def search_kb(
+        self, kb_id: str, query: str, *, top_k: int = 5
+    ) -> list[dict[str, Any]]:
+        """Search the KB → list of {score, text, ...source metadata}."""
+        resp = await self._request(
+            "POST",
+            f"/api/knowledge-bases/{kb_id}/search",
+            json={"query": query, "top_k": top_k},
+        )
+        return resp.get("results", []) if isinstance(resp, dict) else []

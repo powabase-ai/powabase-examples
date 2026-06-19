@@ -2,7 +2,15 @@
 
 import * as React from "react";
 import { use } from "react";
-import { ExternalLink, FileText, Loader2, Search, Sparkles } from "lucide-react";
+import { useRouter } from "next/navigation";
+import {
+  ExternalLink,
+  FileText,
+  Loader2,
+  PenLine,
+  Search,
+  Sparkles,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -16,6 +24,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Markdown } from "@/components/Markdown";
+import { useGenerateArticle } from "@/lib/hooks/useArticles";
 import { useBrands } from "@/lib/hooks/useBrands";
 import {
   useBriefs,
@@ -59,6 +68,8 @@ export default function BrandWorkspace({
   const briefs = useBriefs(id);
   const runResearch = useRunResearch(id);
   const generateBrief = useGenerateBrief(id);
+  const generateArticle = useGenerateArticle(id);
+  const router = useRouter();
 
   const [topic, setTopic] = React.useState("");
   const [depth, setDepth] = React.useState("standard");
@@ -90,6 +101,16 @@ export default function BrandWorkspace({
       toast.success("Brief generated");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Brief failed");
+    }
+  }
+
+  async function onGenerateDraft(briefId: string) {
+    try {
+      const a = await generateArticle.mutateAsync(briefId);
+      toast.success("Draft started");
+      router.push(`/brands/${id}/articles/${a.id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't start generation");
     }
   }
 
@@ -205,7 +226,11 @@ export default function BrandWorkspace({
 
               {selected.status === "done" &&
                 (selectedBrief ? (
-                  <BriefView brief={selectedBrief} />
+                  <BriefView
+                    brief={selectedBrief}
+                    onGenerate={() => onGenerateDraft(selectedBrief.id)}
+                    generating={generateArticle.isPending}
+                  />
                 ) : (
                   <Card>
                     <CardContent className="flex items-center justify-between py-6">
@@ -345,13 +370,34 @@ function SourceDialog({
   );
 }
 
-function BriefView({ brief }: { brief: Brief }) {
+function BriefView({
+  brief,
+  onGenerate,
+  generating,
+}: {
+  brief: Brief;
+  onGenerate: () => void;
+  generating: boolean;
+}) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 font-display text-lg">
-          <FileText className="size-4" /> Content brief
-        </CardTitle>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="flex items-center gap-2 font-display text-lg">
+            <FileText className="size-4" /> Content brief
+          </CardTitle>
+          <Button variant="gold" size="sm" onClick={onGenerate} disabled={generating}>
+            {generating ? (
+              <>
+                <Loader2 className="animate-spin" /> Starting…
+              </>
+            ) : (
+              <>
+                <PenLine /> Generate draft
+              </>
+            )}
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
         <Field label="Suggested title">{brief.suggested_title}</Field>
