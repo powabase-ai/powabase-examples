@@ -135,13 +135,31 @@ export const researchApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  sourceMarkdown: (sourceId: string) =>
-    request<{ source_id: string; markdown: string }>(
-      `/api/research/source/${sourceId}/markdown`
-    ),
 };
 
 export const TERMINAL_RESEARCH: ResearchStatus[] = ["done", "failed"];
+
+// --- Sources library ---
+export interface BrandSource {
+  id: string;
+  source_id: string;
+  url?: string | null;
+  title?: string | null;
+  word_count?: number | null;
+  status?: string | null;
+  created_at: string;
+  research_run_id: string;
+  run_topic?: string | null;
+}
+
+export const sourcesApi = {
+  listByBrand: (businessId: string) =>
+    request<BrandSource[]>(`/api/sources?business_id=${businessId}`),
+  markdown: (sourceId: string) =>
+    request<{ source_id: string; markdown: string }>(
+      `/api/sources/${sourceId}/markdown`
+    ),
+};
 
 // --- Brief (Stage B) ---
 export interface Brief {

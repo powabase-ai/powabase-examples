@@ -78,3 +78,17 @@ class ResearchSource(BaseModel):
     word_count: int | None = None
     status: str | None = None
     created_at: datetime
+
+
+class BrandSource(BaseModel):
+    """A scraped source for the centralized library — with its run association."""
+
+    id: UUID
+    source_id: str
+    url: str | None = None
+    title: str | None = None
+    word_count: int | None = None
+    status: str | None = None
+    created_at: datetime
+    research_run_id: UUID
+    run_topic: str | None = None

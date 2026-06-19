@@ -5,9 +5,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   briefsApi,
   researchApi,
+  sourcesApi,
   TERMINAL_RESEARCH,
   type ResearchRun,
 } from "@/lib/api";
+
+export function useBrandSources(businessId: string) {
+  return useQuery({
+    queryKey: ["sources", businessId],
+    queryFn: () => sourcesApi.listByBrand(businessId),
+    enabled: !!businessId,
+  });
+}
 
 export function useResearchRuns(businessId: string) {
   return useQuery({
@@ -35,7 +44,7 @@ export function useRunResearch(businessId: string) {
 export function useSourceMarkdown(sourceId: string | null) {
   return useQuery({
     queryKey: ["source-markdown", sourceId],
-    queryFn: () => researchApi.sourceMarkdown(sourceId as string),
+    queryFn: () => sourcesApi.markdown(sourceId as string),
     enabled: !!sourceId,
     staleTime: 5 * 60_000,
   });

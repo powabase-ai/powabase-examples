@@ -138,6 +138,18 @@ def list_sources(db: Database, run_id: UUID) -> list[dict[str, Any]]:
     )
 
 
+def list_brand_sources(db: Database, business_id: UUID) -> list[dict[str, Any]]:
+    """All scraped sources for a brand, joined to their research run (for the library)."""
+    return db.fetch_all(
+        "select rs.id, rs.source_id, rs.url, rs.title, rs.word_count, rs.status, "
+        "rs.created_at, rs.research_run_id, rr.topic as run_topic "
+        "from public.research_sources rs "
+        "join public.research_runs rr on rr.id = rs.research_run_id "
+        "where rr.business_id = %s order by rs.created_at desc",
+        (business_id,),
+    )
+
+
 # --- the background worker ---
 async def run_research_task(
     client: PowabaseClient,

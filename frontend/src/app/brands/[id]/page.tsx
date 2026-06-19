@@ -2,16 +2,7 @@
 
 import * as React from "react";
 import { use } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import {
-  ArrowLeft,
-  ExternalLink,
-  FileText,
-  Loader2,
-  Search,
-  Sparkles,
-} from "lucide-react";
+import { ExternalLink, FileText, Loader2, Search, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -24,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Markdown } from "@/components/Markdown";
 import { useBrands } from "@/lib/hooks/useBrands";
 import {
   useBriefs,
@@ -60,7 +52,6 @@ export default function BrandWorkspace({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const router = useRouter();
   const { data: brands } = useBrands();
   const brand = brands?.find((b) => b.id === id);
 
@@ -106,31 +97,7 @@ export default function BrandWorkspace({
   const selectedBrief = selectedRun ? briefByRun.get(selectedRun) : undefined;
 
   return (
-    <div className="min-h-screen">
-      <header className="border-b border-border bg-card">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Link href="/" className="text-muted-foreground hover:text-foreground">
-              <ArrowLeft className="size-4" />
-            </Link>
-            <span className="font-display text-lg font-bold tracking-tight">
-              Rank<span className="text-[rgb(var(--accent-gold))]">Forge</span>
-            </span>
-          </div>
-          <select
-            value={id}
-            onChange={(e) => router.push(`/brands/${e.target.value}`)}
-            className="h-9 rounded-md border border-input bg-card px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {brands?.map((b) => (
-              <option key={b.id} value={b.id}>
-                {b.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      </header>
-
+    <div>
       <main className="mx-auto grid max-w-6xl gap-6 px-6 py-8 lg:grid-cols-[380px_1fr]">
         <section className="flex flex-col gap-4">
           <div>
@@ -366,16 +333,12 @@ function SourceDialog({
         <DialogHeader>
           <DialogTitle className="font-display">Scraped page (markdown)</DialogTitle>
         </DialogHeader>
-        <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-[rgb(var(--bg-surface-200))] p-3">
+        <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-card p-4">
           {md.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
           {md.error && (
             <p className="text-sm text-destructive">{(md.error as Error).message}</p>
           )}
-          {md.data && (
-            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
-              {md.data.markdown}
-            </pre>
-          )}
+          {md.data && <Markdown>{md.data.markdown}</Markdown>}
         </div>
       </DialogContent>
     </Dialog>
