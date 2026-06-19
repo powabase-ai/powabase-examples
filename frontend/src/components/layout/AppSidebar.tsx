@@ -20,7 +20,7 @@ export function AppSidebar({ brandId }: { brandId: string }) {
   const { data: brands } = useBrands();
 
   const nav: NavItem[] = [
-    { title: "Workspace", href: `/brands/${brandId}`, icon: Search, exact: true },
+    { title: "Research", href: `/brands/${brandId}`, icon: Search, exact: true },
     { title: "Sources", href: `/brands/${brandId}/sources`, icon: Layers },
     { title: "Settings", href: `/brands/${brandId}/settings`, icon: Settings },
   ];

@@ -37,7 +37,7 @@ export default function SourcesLibrary({
           )}
           {sources?.length === 0 && (
             <p className="p-6 text-sm text-muted-foreground">
-              No sources yet. Run research in the workspace to scrape competitor
+              No sources yet. Run research in the Research tab to scrape competitor
               pages — they&apos;ll appear here.
             </p>
           )}
