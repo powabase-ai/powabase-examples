@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ChevronLeft, Layers, Search, type LucideIcon } from "lucide-react";
+import { ChevronLeft, Layers, Search, Settings, type LucideIcon } from "lucide-react";
 
 import { useBrands } from "@/lib/hooks/useBrands";
 import { cn } from "@/lib/utils";
@@ -22,6 +22,7 @@ export function AppSidebar({ brandId }: { brandId: string }) {
   const nav: NavItem[] = [
     { title: "Workspace", href: `/brands/${brandId}`, icon: Search, exact: true },
     { title: "Sources", href: `/brands/${brandId}/sources`, icon: Layers },
+    { title: "Settings", href: `/brands/${brandId}/settings`, icon: Settings },
   ];
 
   return (
