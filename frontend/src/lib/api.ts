@@ -90,17 +90,36 @@ export interface SerpResult {
   snippet?: string | null;
 }
 
+export interface CompetitorTeardown {
+  url?: string | null;
+  title?: string | null;
+  word_count?: number | null;
+  headings: string[];
+  source_id?: string | null;
+}
+
+export type ResearchStatus =
+  | "queued"
+  | "searching"
+  | "scraping"
+  | "analyzing"
+  | "done"
+  | "failed";
+
 export interface ResearchRun {
   id: string;
   business_id?: string | null;
   topic: string;
   locale: string;
+  status: ResearchStatus;
+  error?: string | null;
+  progress: { phase?: string; total?: number; done?: number };
   serp: {
     results?: SerpResult[];
     paa?: string[];
     related_queries?: string[];
   };
-  competitors: Array<Record<string, unknown>>;
+  competitors: CompetitorTeardown[];
   clusters: Array<Record<string, unknown>>;
   intent?: string | null;
   agent_run_id?: string | null;
@@ -116,7 +135,13 @@ export const researchApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  sourceMarkdown: (sourceId: string) =>
+    request<{ source_id: string; markdown: string }>(
+      `/api/research/source/${sourceId}/markdown`
+    ),
 };
+
+export const TERMINAL_RESEARCH: ResearchStatus[] = ["done", "failed"];
 
 // --- Brief (Stage B) ---
 export interface Brief {

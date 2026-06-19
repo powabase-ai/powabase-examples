@@ -4,11 +4,24 @@ import * as React from "react";
 import { use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, FileText, Loader2, Search, Sparkles } from "lucide-react";
+import {
+  ArrowLeft,
+  ExternalLink,
+  FileText,
+  Loader2,
+  Search,
+  Sparkles,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useBrands } from "@/lib/hooks/useBrands";
@@ -17,8 +30,29 @@ import {
   useGenerateBrief,
   useResearchRuns,
   useRunResearch,
+  useSourceMarkdown,
 } from "@/lib/hooks/useResearch";
-import type { Brief, ResearchRun } from "@/lib/api";
+import type { Brief, CompetitorTeardown, ResearchRun } from "@/lib/api";
+
+function StatusBadge({ run }: { run: ResearchRun }) {
+  if (run.status === "done")
+    return (
+      <span className="inline-flex items-center gap-1 text-[rgb(var(--success))]">
+        ● done
+      </span>
+    );
+  if (run.status === "failed")
+    return <span className="text-destructive">● failed</span>;
+  const label =
+    run.status === "scraping"
+      ? `scraping ${run.progress?.done ?? 0}/${run.progress?.total ?? "?"}`
+      : run.status;
+  return (
+    <span className="inline-flex items-center gap-1 text-[rgb(var(--accent-gold-hover))]">
+      <Loader2 className="size-3 animate-spin" /> {label}
+    </span>
+  );
+}
 
 export default function BrandWorkspace({
   params,
@@ -36,8 +70,9 @@ export default function BrandWorkspace({
   const generateBrief = useGenerateBrief(id);
 
   const [topic, setTopic] = React.useState("");
-  const [depth, setDepth] = React.useState("deep");
+  const [depth, setDepth] = React.useState("standard");
   const [selectedRun, setSelectedRun] = React.useState<string | null>(null);
+  const [sourceForMd, setSourceForMd] = React.useState<string | null>(null);
 
   const briefByRun = React.useMemo(() => {
     const m = new Map<string, Brief>();
@@ -52,9 +87,9 @@ export default function BrandWorkspace({
       const run = await runResearch.mutateAsync({ topic: topic.trim(), depth });
       setSelectedRun(run.id);
       setTopic("");
-      toast.success("Research complete");
+      toast.success("Research started — watch the progress");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Research failed");
+      toast.error(err instanceof Error ? err.message : "Couldn't start research");
     }
   }
 
@@ -97,7 +132,6 @@ export default function BrandWorkspace({
       </header>
 
       <main className="mx-auto grid max-w-6xl gap-6 px-6 py-8 lg:grid-cols-[380px_1fr]">
-        {/* Left: research */}
         <section className="flex flex-col gap-4">
           <div>
             <h1 className="font-display text-2xl font-bold">{brand?.name ?? "Brand"}</h1>
@@ -120,7 +154,7 @@ export default function BrandWorkspace({
                     id="topic"
                     value={topic}
                     onChange={(e) => setTopic(e.target.value)}
-                    placeholder="what is generative engine optimization"
+                    placeholder="best backend as a service"
                   />
                 </div>
                 <div className="grid gap-1.5">
@@ -137,16 +171,12 @@ export default function BrandWorkspace({
                   </select>
                 </div>
                 <Button type="submit" variant="gold" disabled={runResearch.isPending || !topic.trim()}>
-                  {runResearch.isPending ? (
-                    <>
-                      <Loader2 className="animate-spin" /> Researching… (~a minute)
-                    </>
-                  ) : (
-                    <>
-                      <Search /> Run research
-                    </>
-                  )}
+                  <Search /> Run research
                 </Button>
+                <p className="text-xs text-muted-foreground">
+                  Runs in the background — progress shows on the run below; you can keep
+                  working.
+                </p>
               </form>
             </CardContent>
           </Card>
@@ -160,105 +190,101 @@ export default function BrandWorkspace({
               <p className="text-sm text-muted-foreground">No runs yet.</p>
             )}
             {runs.data?.map((r) => (
-              <RunCard
+              <button
                 key={r.id}
-                run={r}
-                active={r.id === selectedRun}
-                hasBrief={briefByRun.has(r.id)}
                 onClick={() => setSelectedRun(r.id)}
-              />
+                className={`rounded-lg border p-3 text-left transition-colors ${
+                  r.id === selectedRun
+                    ? "border-[rgb(var(--accent-gold))] bg-[rgb(var(--accent-gold-muted))]"
+                    : "border-border bg-card hover:bg-secondary"
+                }`}
+              >
+                <div className="line-clamp-1 text-sm font-medium">{r.topic}</div>
+                <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                  <StatusBadge run={r} /> ·
+                  <span>{r.serp?.results?.length ?? 0} SERP</span> ·
+                  <span>{r.competitors.length} sources</span>
+                  {briefByRun.has(r.id) && (
+                    <span className="inline-flex items-center gap-1 text-[rgb(var(--accent-gold-hover))]">
+                      <FileText className="size-3" /> brief
+                    </span>
+                  )}
+                </div>
+              </button>
             ))}
           </div>
         </section>
 
-        {/* Right: selected run + brief */}
         <section className="flex flex-col gap-4">
           {!selected && (
             <Card className="border-dashed">
               <CardContent className="py-16 text-center text-sm text-muted-foreground">
-                Run research or pick a run to see its SERP analysis and brief.
+                Run research or pick a run to see its SERP, scraped sources, and brief.
               </CardContent>
             </Card>
           )}
 
           {selected && (
             <>
-              <RunDetail run={selected} />
-              {selectedBrief ? (
-                <BriefView brief={selectedBrief} />
-              ) : (
+              <RunDetail run={selected} onViewSource={setSourceForMd} />
+
+              {selected.status === "failed" && (
                 <Card>
-                  <CardContent className="flex items-center justify-between py-6">
-                    <p className="text-sm text-muted-foreground">
-                      No brief for this run yet.
-                    </p>
-                    <Button
-                      variant="gold"
-                      disabled={generateBrief.isPending}
-                      onClick={() => onGenerateBrief(selected.id)}
-                    >
-                      {generateBrief.isPending ? (
-                        <>
-                          <Loader2 className="animate-spin" /> Generating…
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles /> Generate brief
-                        </>
-                      )}
-                    </Button>
+                  <CardContent className="py-4 text-sm text-destructive">
+                    Research failed: {selected.error}
                   </CardContent>
                 </Card>
               )}
+
+              {selected.status === "done" &&
+                (selectedBrief ? (
+                  <BriefView brief={selectedBrief} />
+                ) : (
+                  <Card>
+                    <CardContent className="flex items-center justify-between py-6">
+                      <p className="text-sm text-muted-foreground">No brief yet.</p>
+                      <Button
+                        variant="gold"
+                        disabled={generateBrief.isPending}
+                        onClick={() => onGenerateBrief(selected.id)}
+                      >
+                        {generateBrief.isPending ? (
+                          <>
+                            <Loader2 className="animate-spin" /> Generating…
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles /> Generate brief
+                          </>
+                        )}
+                      </Button>
+                    </CardContent>
+                  </Card>
+                ))}
             </>
           )}
         </section>
       </main>
+
+      <SourceDialog sourceId={sourceForMd} onClose={() => setSourceForMd(null)} />
     </div>
   );
 }
 
-function RunCard({
+function RunDetail({
   run,
-  active,
-  hasBrief,
-  onClick,
+  onViewSource,
 }: {
   run: ResearchRun;
-  active: boolean;
-  hasBrief: boolean;
-  onClick: () => void;
+  onViewSource: (id: string) => void;
 }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`rounded-lg border p-3 text-left transition-colors ${
-        active ? "border-[rgb(var(--accent-gold))] bg-[rgb(var(--accent-gold-muted))]" : "border-border bg-card hover:bg-secondary"
-      }`}
-    >
-      <div className="line-clamp-1 text-sm font-medium">{run.topic}</div>
-      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-        <span>{run.intent ?? "—"}</span>·
-        <span>{run.serp?.results?.length ?? 0} SERP</span>·
-        <span>{run.competitors.length} scraped</span>
-        {hasBrief && (
-          <span className="inline-flex items-center gap-1 text-[rgb(var(--accent-gold-hover))]">
-            <FileText className="size-3" /> brief
-          </span>
-        )}
-      </div>
-    </button>
-  );
-}
-
-function RunDetail({ run }: { run: ResearchRun }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle className="font-display text-lg">{run.topic}</CardTitle>
-        <p className="text-xs text-muted-foreground">
-          Intent: {run.intent ?? "—"} · {run.serp?.results?.length ?? 0} results ·{" "}
-          {run.competitors.length} competitors · {run.clusters.length} clusters
+        <p className="flex items-center gap-2 text-xs text-muted-foreground">
+          <StatusBadge run={run} /> · intent: {run.intent ?? "—"} ·{" "}
+          {run.serp?.results?.length ?? 0} results · {run.competitors.length} sources
         </p>
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
@@ -276,13 +302,46 @@ function RunDetail({ run }: { run: ResearchRun }) {
             ))}
           </ul>
         </div>
+
+        {run.competitors.length > 0 && (
+          <div>
+            <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Scraped sources (Powabase)
+            </p>
+            <div className="grid gap-2">
+              {run.competitors.map((c: CompetitorTeardown, i) => (
+                <div key={i} className="rounded-md border border-border p-2.5">
+                  <div className="line-clamp-1 text-sm font-medium">{c.title}</div>
+                  <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+                    <span>{c.word_count ?? "—"} words</span>
+                    <span>{c.headings.length} headings</span>
+                    {c.url && (
+                      <a href={c.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:underline">
+                        <ExternalLink className="size-3" /> page
+                      </a>
+                    )}
+                    {c.source_id && (
+                      <button
+                        onClick={() => onViewSource(c.source_id as string)}
+                        className="ml-auto inline-flex items-center gap-1 text-[rgb(var(--accent-gold-hover))] hover:underline"
+                      >
+                        <FileText className="size-3" /> view scraped text
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {(run.serp?.paa?.length ?? 0) > 0 && (
           <div>
             <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               People also ask
             </p>
             <ul className="grid gap-1 text-muted-foreground">
-              {run.serp.paa!.slice(0, 6).map((q, i) => (
+              {run.serp.paa!.slice(0, 8).map((q, i) => (
                 <li key={i}>{q}</li>
               ))}
             </ul>
@@ -290,6 +349,36 @@ function RunDetail({ run }: { run: ResearchRun }) {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function SourceDialog({
+  sourceId,
+  onClose,
+}: {
+  sourceId: string | null;
+  onClose: () => void;
+}) {
+  const md = useSourceMarkdown(sourceId);
+  return (
+    <Dialog open={!!sourceId} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[85vh] w-[90vw] max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="font-display">Scraped page (markdown)</DialogTitle>
+        </DialogHeader>
+        <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-[rgb(var(--bg-surface-200))] p-3">
+          {md.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+          {md.error && (
+            <p className="text-sm text-destructive">{(md.error as Error).message}</p>
+          )}
+          {md.data && (
+            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+              {md.data.markdown}
+            </pre>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

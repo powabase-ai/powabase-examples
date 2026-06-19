@@ -1,5 +1,6 @@
-"""Live Stage A verification: provision the research agent and run research for a
-real brand + topic, then print the stored research_run.
+"""Live Stage A verification (async Sources-backed flow): create a run, execute the
+research task, then inspect status, competitors (with source ids), the research_sources
+link rows, and one source's scraped markdown.
 
 Usage (from backend/): uv run python scripts/verify_research.py
 """
@@ -21,43 +22,33 @@ async def main() -> None:
     client = PowabaseClient(s.powabase_base_url, s.powabase_service_role_key, timeout=240)
     try:
         existing = brands.list_profiles(db)
-        if existing:
-            brand = existing[0]
-        else:
-            brand = brands.create_profile(
-                db,
-                BusinessProfileCreate(
-                    name="Petal SEO",
-                    domain="petal.org",
-                    niche="GEO/SEO content tooling",
-                    competitors=[{"domain": "surferseo.com"}],
-                ),
-            )
-        print(f"brand: {brand['name']} ({brand['id']})")
-
-        print("running research (quick depth) — this calls web_search + web_scrape…")
-        run = await svc.run_research(
-            client,
-            db,
-            business_id=brand["id"],
-            topic="what is generative engine optimization",
-            depth="quick",
+        brand = existing[0] if existing else brands.create_profile(
+            db, BusinessProfileCreate(name="Petal SEO", niche="GEO/SEO content tooling")
         )
-        serp = run["serp"].get("results", [])
-        print("--- stored research_run ---")
-        print("id:", run["id"])
-        print("intent:", run["intent"])
-        print("serp results:", len(serp))
-        if serp:
-            print("  top:", serp[0].get("title"), "—", serp[0].get("url"))
-        print("paa:", len(run["serp"].get("paa", [])))
-        print("competitors scraped:", len(run["competitors"]))
-        if run["competitors"]:
-            c = run["competitors"][0]
-            print("  ex:", c.get("url"), "words=", c.get("word_count"),
-                  "headings=", len(c.get("headings", [])))
-        print("keyword clusters:", len(run["clusters"]))
-        print("agent_run_id:", run["agent_run_id"])
+        run = svc.create_research_run(
+            db, business_id=brand["id"], topic="best backend as a service", locale="en-US"
+        )
+        print(f"brand: {brand['name']}  run: {run['id']}  status: {run['status']}")
+
+        print("running research task (quick depth)…")
+        await svc.run_research_task(
+            client, db, run_id=run["id"], brand=brand,
+            topic="best backend as a service", locale="en-US", depth="quick",
+        )
+
+        final = svc.get_run(db, run["id"])
+        print("--- final run ---")
+        print("status:", final["status"], "| error:", final["error"])
+        print("intent:", final["intent"], "| serp:", len(final["serp"].get("results", [])))
+        print("competitors:", len(final["competitors"]))
+        for c in final["competitors"]:
+            print(f"   - {c['url']}  words={c['word_count']}  headings={len(c['headings'])}  source={c['source_id']}")
+
+        sources = svc.list_sources(db, run["id"])
+        print("research_sources rows:", len(sources))
+        if sources and sources[0]["source_id"]:
+            md = await client.get_source_markdown(sources[0]["source_id"])
+            print(f"first source markdown: {len(md)} chars; starts: {md[:120]!r}")
     finally:
         await client.aclose()
         db.close()

@@ -213,6 +213,23 @@ class PowabaseClient:
     async def get_source(self, source_id: str) -> Any:
         return await self._request("GET", f"/api/sources/{source_id}")
 
+    async def import_url(self, url: str) -> Any:
+        """Import a web page as a Source (Firecrawl-backed). Returns
+        {count, sources:[{id, name, url}]}. Project-wide dedup: re-importing the
+        same URL reuses the existing source."""
+        return await self._request(
+            "POST", "/api/sources/import-url", json={"mode": "urls", "urls": [url]}
+        )
+
+    async def get_source_markdown(self, source_id: str) -> str:
+        """Fetch a source's extracted markdown derivative (raw text, not JSON)."""
+        resp = await self._client.get(
+            f"/api/sources/{source_id}/derivatives/markdown/download"
+        )
+        if resp.status_code >= 400:
+            raise PowabaseError(resp.status_code, resp.text)
+        return resp.text
+
     async def create_kb(self, name: str) -> Any:
         return await self._request(
             "POST", "/api/knowledge-bases", json={"name": name}

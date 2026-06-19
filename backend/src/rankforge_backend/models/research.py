@@ -1,8 +1,9 @@
 """Research (Stage A) schemas.
 
-`ResearchResult` is what the research agent returns (parsed from its final JSON).
-`ResearchRun` is the stored row. Sub-fields are lenient so partial agent output
-still parses.
+Flow: the SERP agent (Exa web_search) returns `SearchResult`; the backend then
+imports each top competitor URL as a Powabase Source and builds `CompetitorTeardown`
+entries deterministically from the scraped markdown. `ResearchRun` is the stored row
+(async — carries status/progress); `ResearchSource` links a run to a Powabase source.
 """
 
 from datetime import datetime
@@ -18,33 +19,30 @@ class SerpResult(BaseModel):
     snippet: str | None = None
 
 
-class CompetitorTeardown(BaseModel):
-    url: str | None = None
-    title: str | None = None
-    word_count: int | None = None
-    headings: list[str] = Field(default_factory=list)
-    entities: list[str] = Field(default_factory=list)
-    has_schema: bool | None = None
-    published_at: str | None = None
-
-
 class KeywordCluster(BaseModel):
     label: str | None = None
     keywords: list[str] = Field(default_factory=list)
     intent: str | None = None
 
 
-class ResearchResult(BaseModel):
-    """Structured output the research agent produces."""
+class SearchResult(BaseModel):
+    """SERP-agent output (search only — no scraping)."""
 
-    topic: str | None = None
-    locale: str | None = None
     intent: str | None = None
     serp: list[SerpResult] = Field(default_factory=list)
     paa: list[str] = Field(default_factory=list)
     related_queries: list[str] = Field(default_factory=list)
-    competitors: list[CompetitorTeardown] = Field(default_factory=list)
     keyword_clusters: list[KeywordCluster] = Field(default_factory=list)
+
+
+class CompetitorTeardown(BaseModel):
+    """Built by the backend from a scraped Source's markdown."""
+
+    url: str | None = None
+    title: str | None = None
+    word_count: int | None = None
+    headings: list[str] = Field(default_factory=list)
+    source_id: str | None = None
 
 
 class ResearchRunCreate(BaseModel):
@@ -59,10 +57,24 @@ class ResearchRun(BaseModel):
     business_id: UUID | None = None
     topic: str
     locale: str
+    status: str = "done"
+    error: str | None = None
+    progress: dict = Field(default_factory=dict)
     serp: dict = Field(default_factory=dict)
     competitors: list = Field(default_factory=list)
     clusters: list = Field(default_factory=list)
     intent: str | None = None
     agent_run_id: str | None = None
     created_by: UUID | None = None
+    created_at: datetime
+
+
+class ResearchSource(BaseModel):
+    id: UUID
+    research_run_id: UUID
+    source_id: str
+    url: str | None = None
+    title: str | None = None
+    word_count: int | None = None
+    status: str | None = None
     created_at: datetime

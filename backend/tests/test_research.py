@@ -1,4 +1,4 @@
-"""Research — JSON extraction (unit) + route wiring (hermetic)."""
+"""Research — JSON extraction (unit) + async route wiring (hermetic)."""
 
 from unittest.mock import MagicMock
 
@@ -9,6 +9,7 @@ from rankforge_backend.main import create_app
 from rankforge_backend.routes.business_profiles import get_db
 from rankforge_backend.routes.research import get_powabase
 from rankforge_backend.services import research as svc
+from rankforge_backend.util import extract_json
 
 BID = "11111111-1111-1111-1111-111111111111"
 ROW = {
@@ -16,29 +17,30 @@ ROW = {
     "business_id": BID,
     "topic": "generative engine optimization",
     "locale": "en-US",
+    "status": "searching",
+    "error": None,
+    "progress": {},
     "serp": {"results": [], "paa": [], "related_queries": []},
     "competitors": [],
     "clusters": [],
-    "intent": "informational",
-    "agent_run_id": "run_abc",
+    "intent": None,
+    "agent_run_id": None,
     "created_by": None,
     "created_at": "2026-06-18T00:00:00Z",
 }
 
 
 def test_extract_json_fenced():
-    out = svc._extract_json('blah\n```json\n{"topic": "x", "intent": "info"}\n```\ndone')
-    assert out == {"topic": "x", "intent": "info"}
+    assert extract_json('x\n```json\n{"a": 1}\n```') == {"a": 1}
 
 
 def test_extract_json_bare():
-    out = svc._extract_json('here it is: {"topic": "y"} trailing')
-    assert out == {"topic": "y"}
+    assert extract_json('note {"a": 2} end') == {"a": 2}
 
 
 def test_extract_json_missing_raises():
     with pytest.raises(ValueError):
-        svc._extract_json("no json here")
+        extract_json("no json here")
 
 
 def make_client() -> TestClient:
@@ -48,22 +50,22 @@ def make_client() -> TestClient:
     return TestClient(app)
 
 
-def test_create_research_returns_201(monkeypatch):
-    async def fake_run_research(*args, **kwargs):
-        return ROW
+def test_create_research_returns_searching(monkeypatch):
+    async def fake_task(*args, **kwargs):
+        return None
 
-    monkeypatch.setattr(svc, "run_research", fake_run_research)
+    monkeypatch.setattr(svc, "get_brand", lambda db, bid: {"id": BID, "niche": "x"})
+    monkeypatch.setattr(svc, "create_research_run", lambda db, **kw: ROW)
+    monkeypatch.setattr(svc, "run_research_task", fake_task)
+
     client = make_client()
     resp = client.post("/api/research", json={"business_id": BID, "topic": "geo"})
     assert resp.status_code == 201
-    assert resp.json()["intent"] == "informational"
+    assert resp.json()["status"] == "searching"
 
 
 def test_create_research_unknown_brand_404(monkeypatch):
-    async def fake_run_research(*args, **kwargs):
-        raise ValueError("business profile not found")
-
-    monkeypatch.setattr(svc, "run_research", fake_run_research)
+    monkeypatch.setattr(svc, "get_brand", lambda db, bid: None)
     client = make_client()
     resp = client.post("/api/research", json={"business_id": BID, "topic": "geo"})
     assert resp.status_code == 404
