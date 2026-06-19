@@ -26,18 +26,21 @@ export function AppSidebar({ brandId }: { brandId: string }) {
   ];
 
   return (
-    <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col border-r border-border bg-card">
-      <div className="p-4">
-        <Link href="/" className="font-display text-lg font-bold tracking-tight">
-          Rank<span className="text-[rgb(var(--accent-gold))]">Forge</span>
+    <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col bg-[rgb(var(--iron))] text-[rgb(var(--iron-text))]">
+      <div className="px-5 pb-4 pt-5">
+        <Link
+          href="/"
+          className="font-display text-lg font-bold tracking-tight text-[rgb(var(--iron-strong))]"
+        >
+          Rank<span className="text-[rgb(var(--ember))]">Forge</span>
         </Link>
         <select
           value={brandId}
           onChange={(e) => router.push(`/brands/${e.target.value}`)}
-          className="mt-3 h-9 w-full rounded-md border border-input bg-card px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="mt-4 h-9 w-full rounded-md border border-[rgb(var(--iron-line))] bg-[rgb(var(--iron-hover))] px-2.5 text-sm text-[rgb(var(--iron-strong))] outline-none focus-visible:ring-2 focus-visible:ring-[rgb(var(--ember))]"
         >
           {brands?.map((b) => (
-            <option key={b.id} value={b.id}>
+            <option key={b.id} value={b.id} className="bg-[rgb(var(--iron))]">
               {b.name}
             </option>
           ))}
@@ -54,23 +57,28 @@ export function AppSidebar({ brandId }: { brandId: string }) {
               key={item.href}
               href={item.href}
               className={cn(
-                "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                "flex items-center gap-2.5 border-l-2 py-2 pl-3.5 pr-3 text-sm font-medium transition-colors",
                 active
-                  ? "bg-secondary text-foreground"
-                  : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                  ? "border-[rgb(var(--ember))] bg-[rgb(var(--iron-hover))] text-[rgb(var(--iron-strong))]"
+                  : "border-transparent text-[rgb(var(--iron-text))] hover:bg-[rgb(var(--iron-hover))]/60 hover:text-[rgb(var(--iron-strong))]"
               )}
             >
-              <item.icon className="size-4 shrink-0" />
+              <item.icon
+                className={cn(
+                  "size-4 shrink-0",
+                  active && "text-[rgb(var(--ember-bright))]"
+                )}
+              />
               {item.title}
             </Link>
           );
         })}
       </nav>
 
-      <div className="mt-auto p-4">
+      <div className="mt-auto px-5 pb-5">
         <Link
           href="/"
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1 text-xs text-[rgb(var(--iron-text))] transition-colors hover:text-[rgb(var(--iron-strong))]"
         >
           <ChevronLeft className="size-3.5" /> All brands
         </Link>

@@ -60,7 +60,7 @@ export default function SourcesLibrary({
                   </div>
                   <div className="mt-1.5 flex items-center gap-2 text-xs text-muted-foreground">
                     <span className="rounded bg-secondary px-1.5 py-0.5">
-                      {s.word_count ?? "—"} words
+                      <span className="font-data">{s.word_count ?? "—"}</span> words
                     </span>
                     <span className="inline-flex items-center gap-1">
                       <FileText className="size-3" /> {s.run_topic}

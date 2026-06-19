@@ -2,116 +2,89 @@
 @plugin "@tailwindcss/typography";
 
 /* ============================================
-   RankForge Design System — Synapse Warm Cream
-   (shared design language with Judocu: warm cream,
-   dark-navy primary, burnt-orange accent)
+   RankForge — "Forge"
+   Cold graphite steel + molten ember. The contrast of cold tools
+   around a hot working surface. Engineered grotesk type.
    ============================================ */
 
 :root {
-  /* Background layers */
-  --bg-base: 252 250 247;             /* #FCFAF7 - cream */
-  --bg-default: 255 255 255;          /* #FFF */
-  --bg-surface-100: 255 255 255;      /* cards, sidebar */
-  --bg-surface-200: 250 250 250;      /* hover */
-  --bg-surface-300: 245 245 245;      /* compact/muted */
-  --bg-overlay: 255 255 255;          /* modals/popovers */
+  /* Canvas + surfaces (cool, not cream) */
+  --paper: 244 245 248;            /* #F4F5F8 cool canvas */
+  --surface: 255 255 255;          /* cards */
+  --surface-sunken: 236 239 243;   /* #ECEFF3 muted fills */
+  --line: 224 227 233;             /* #E0E3E9 hairline */
 
-  /* Foreground/Text */
-  --fg-default: 36 35 45;             /* #24232d - dark navy text */
-  --fg-light: 102 102 102;            /* #666 */
-  --fg-lighter: 102 102 102;
-  --fg-muted: 190 190 190;
+  /* Ink */
+  --ink: 22 24 29;                 /* #16181D graphite */
+  --muted-ink: 96 102 112;         /* #606670 */
 
-  /* Brand (Dark Navy primary) */
-  --brand-default: 36 35 45;          /* #24232d */
-  --brand-hover: 54 53 65;
-  --brand-active: 72 71 85;
-  --brand-muted: 247 234 223;         /* #F7EADF - selected state */
+  /* Steel (dark sidebar / tools) */
+  --iron: 25 28 34;                /* #191C22 */
+  --iron-hover: 38 42 50;          /* #262A32 */
+  --iron-line: 46 51 60;           /* #2E333C */
+  --iron-text: 165 171 182;        /* muted light on steel */
+  --iron-strong: 240 242 245;      /* bright light on steel */
 
-  /* Accent (Burnt Orange) */
-  --brand-accent: 231 149 61;         /* #E7953D */
-  --accent-gold: 231 149 61;
-  --accent-gold-hover: 210 130 45;
-  --accent-gold-muted: 250 242 235;   /* #FAF2EB */
-
-  /* Borders */
-  --border-default: 240 240 240;
-  --border-light: 245 245 245;
-  --border-strong: 224 224 224;       /* #E0E0E0 */
+  /* Ember (molten accent — heat at the point of work) */
+  --ember: 238 77 45;              /* #EE4D2D */
+  --ember-bright: 251 106 60;      /* #FB6A3C */
+  --ember-deep: 199 60 30;         /* #C73C1E */
+  --ember-tint: 252 234 228;       /* #FCEAE4 faint wash */
 
   /* Status */
-  --warning: 245 158 11;
-  --destructive: 195 61 51;           /* #c33d33 */
-  --success: 0 163 68;                /* #00a344 */
+  --success: 22 150 100;           /* #169664 */
+  --destructive: 220 53 39;        /* #DC3527 */
 
-  /* Radii — 4px standard */
-  --radius: 4px;
+  /* legacy aliases (components reference these names) */
+  --accent-gold: var(--ember);
+  --accent-gold-hover: var(--ember-bright);
+  --accent-gold-muted: var(--ember-tint);
+  --bg-surface-200: var(--surface-sunken);
+
+  --radius: 6px;
 }
 
 .dark {
-  --bg-base: 30 29 37;
-  --bg-default: 36 35 45;
-  --bg-surface-100: 42 41 53;
-  --bg-surface-200: 54 53 65;
-  --bg-surface-300: 72 71 85;
-  --bg-overlay: 42 41 53;
-
-  --fg-default: 252 250 247;
-  --fg-light: 210 208 215;
-  --fg-lighter: 170 168 178;
-  --fg-muted: 120 118 130;
-
-  --brand-default: 231 149 61;        /* orange as primary in dark */
-  --brand-hover: 245 170 90;
-  --brand-active: 210 130 45;
-  --brand-muted: 60 45 30;
-
-  --accent-gold: 231 149 61;
-  --accent-gold-hover: 245 170 90;
-  --accent-gold-muted: 50 38 22;
-
-  --border-default: 54 53 65;
-  --border-light: 42 41 53;
-  --border-strong: 72 71 85;
-
-  --warning: 251 191 36;
-  --destructive: 220 90 80;
-  --success: 74 222 128;
-
+  --paper: 18 20 24;
+  --surface: 25 28 34;
+  --surface-sunken: 38 42 50;
+  --line: 46 51 60;
+  --ink: 240 242 245;
+  --muted-ink: 150 156 166;
   color-scheme: dark;
 }
 
 @theme inline {
-  --color-background: rgb(var(--bg-base));
-  --color-foreground: rgb(var(--fg-default));
-  --color-card: rgb(var(--bg-surface-100));
-  --color-card-foreground: rgb(var(--fg-default));
-  --color-popover: rgb(var(--bg-overlay));
-  --color-popover-foreground: rgb(var(--fg-default));
-  --color-primary: rgb(var(--brand-default));
+  --color-background: rgb(var(--paper));
+  --color-foreground: rgb(var(--ink));
+  --color-card: rgb(var(--surface));
+  --color-card-foreground: rgb(var(--ink));
+  --color-popover: rgb(var(--surface));
+  --color-popover-foreground: rgb(var(--ink));
+  /* default solid = graphite; CTA = ember (the `gold` token, kept for compat) */
+  --color-primary: rgb(var(--ink));
   --color-primary-foreground: rgb(255 255 255);
-  --color-secondary: rgb(var(--bg-surface-200));
-  --color-secondary-foreground: rgb(var(--fg-default));
-  --color-muted: rgb(var(--bg-surface-200));
-  --color-muted-foreground: rgb(var(--fg-lighter));
-  --color-accent: rgb(var(--accent-gold-muted));
-  --color-accent-foreground: rgb(var(--fg-default));
-  --color-gold: rgb(var(--accent-gold));
+  --color-secondary: rgb(var(--surface-sunken));
+  --color-secondary-foreground: rgb(var(--ink));
+  --color-muted: rgb(var(--surface-sunken));
+  --color-muted-foreground: rgb(var(--muted-ink));
+  --color-accent: rgb(var(--ember-tint));
+  --color-accent-foreground: rgb(var(--ember-deep));
+  --color-gold: rgb(var(--ember));
   --color-gold-foreground: rgb(255 255 255);
   --color-destructive: rgb(var(--destructive));
   --color-destructive-foreground: rgb(255 255 255);
-  --color-border: rgb(var(--border-default));
-  --color-input: rgb(var(--border-default));
-  --color-ring: rgb(var(--brand-default));
+  --color-border: rgb(var(--line));
+  --color-input: rgb(var(--line));
+  --color-ring: rgb(var(--ember));
 
   --radius-sm: calc(var(--radius) - 2px);
   --radius-md: var(--radius);
   --radius-lg: calc(var(--radius) + 2px);
-  --radius-xl: calc(var(--radius) + 4px);
+  --radius-xl: calc(var(--radius) + 6px);
 
-  --font-sans: var(--font-inter), system-ui, sans-serif;
-  --font-serif: var(--font-source-serif), "Georgia", serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --font-sans: var(--font-body), system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-mono-jb), ui-monospace, SFMono-Regular, monospace;
 }
 
 html {
@@ -121,17 +94,42 @@ html {
 }
 
 body {
-  @apply bg-[rgb(var(--bg-base))] text-[rgb(var(--fg-default))];
+  background: rgb(var(--paper));
+  color: rgb(var(--ink));
   font-family: var(--font-sans);
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.55;
 }
 
-/* Serif for display headings, matching Judocu */
+/* Engineered display face — tight, with a touch of negative tracking */
 .font-display {
-  font-family: var(--font-serif);
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.018em;
+}
+
+/* Tabular data (word counts, metrics) */
+.font-data {
+  font-family: var(--font-mono), monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 ::selection {
-  background: rgb(var(--brand-accent) / 0.2);
+  background: rgb(var(--ember) / 0.18);
+}
+
+/* Signature: metal glowing at the point of work */
+@keyframes ember-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+.animate-ember {
+  animation: ember-pulse 1.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-ember,
+  .animate-spin {
+    animation: none;
+  }
 }
