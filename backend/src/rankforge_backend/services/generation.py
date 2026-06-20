@@ -85,7 +85,7 @@ def _grounding_block(
     lines = []
     for c in chunks:
         src = url_by_source.get(c.get("source_id")) or c.get("source_id") or "source"
-        lines.append(f"- ({src}) {c.get('text', '')[:700]}")
+        lines.append(f"- ({src}) {c.get('text', '')[:500]}")
     return "\n".join(lines)
 
 

@@ -16,6 +16,16 @@ from . import research as research_svc
 
 _INDEX_TERMINAL = {"indexed", "failed", "cancelled"}
 
+# chunk_embed + hybrid, reranked: retrieve 100 candidates -> zerank -> top 20.
+# zerank needs a platform-level ZeroEntropy key (admin); it FAILS OPEN (falls back
+# to base hybrid truncated to top_k) if the key is absent.
+RERANKER_MODEL = "zerank-2"
+RETRIEVAL_CONFIG: dict[str, Any] = {
+    "method": "hybrid",
+    "top_k": 20,
+    "reranker": {"model": RERANKER_MODEL, "candidate_count": 100},
+}
+
 
 async def ensure_brand_kb(
     client: PowabaseClient, db: Database, business_id: UUID
@@ -25,12 +35,19 @@ async def ensure_brand_kb(
     if brand is None:
         raise ValueError("business profile not found")
     if brand.get("brand_kb_id"):
+        # keep retrieval config (reranker/top_k) current — query-time, no reindex
+        try:
+            await client.update_kb(
+                brand["brand_kb_id"], retrieval_config=RETRIEVAL_CONFIG
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return brand["brand_kb_id"]
 
     kb = await client.create_kb(
         f"{brand['name']} — grounding",
         description="Scraped research sources for grounded, cited drafting.",
-        retrieval_config={"method": "hybrid", "top_k": 6},
+        retrieval_config=RETRIEVAL_CONFIG,
     )
     kb_id = kb.get("id") or kb.get("knowledge_base", {}).get("id")
 
@@ -83,7 +100,7 @@ async def search(
     kb_id: str,
     query: str,
     *,
-    top_k: int = 6,
+    top_k: int = 20,
     source_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     # Resilient: an empty/partial KB should degrade to ungrounded drafting, not fail.

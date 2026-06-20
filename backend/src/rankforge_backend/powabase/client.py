@@ -278,5 +278,26 @@ class PowabaseClient:
         )
         return resp.get("results", []) if isinstance(resp, dict) else []
 
+    async def update_kb(
+        self,
+        kb_id: str,
+        *,
+        retrieval_config: dict[str, Any] | None = None,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> Any:
+        """PATCH a KB. retrieval_config (reranker/method/top_k/query_enrichment) is
+        query-time and takes effect on the next search with no reindex."""
+        body: dict[str, Any] = {}
+        if retrieval_config is not None:
+            body["retrieval_config"] = retrieval_config
+        if name is not None:
+            body["name"] = name
+        if description is not None:
+            body["description"] = description
+        return await self._request(
+            "PATCH", f"/api/knowledge-bases/{kb_id}", json=body
+        )
+
     async def delete_kb(self, kb_id: str) -> Any:
         return await self._request("DELETE", f"/api/knowledge-bases/{kb_id}")
