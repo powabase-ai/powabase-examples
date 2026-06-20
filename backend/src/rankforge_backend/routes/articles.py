@@ -9,8 +9,7 @@ from ..db import Database
 from ..models.article import Article, ArticleGenerate, ArticleSummary
 from ..powabase import PowabaseClient
 from ..services import generation as svc
-from .business_profiles import get_db
-from .research import get_powabase
+from .deps import get_db, get_powabase
 
 router = APIRouter(prefix="/api/articles", tags=["articles"])
 

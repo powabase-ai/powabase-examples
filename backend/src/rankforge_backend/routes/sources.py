@@ -8,8 +8,7 @@ from ..db import Database
 from ..models.research import BrandSource
 from ..powabase import PowabaseClient, PowabaseError
 from ..services import research as svc
-from .business_profiles import get_db
-from .research import get_powabase
+from .deps import get_db, get_powabase
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
 
@@ -26,5 +25,5 @@ async def get_source_markdown(
     try:
         md = await pb.get_source_markdown(source_id)
     except PowabaseError as e:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
     return {"source_id": source_id, "markdown": md}

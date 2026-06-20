@@ -33,11 +33,23 @@ async def ensure_brand_kb(
         retrieval_config={"method": "hybrid", "top_k": 6},
     )
     kb_id = kb.get("id") or kb.get("knowledge_base", {}).get("id")
-    db.execute(
-        "update public.business_profiles set brand_kb_id = %s where id = %s",
+
+    # Compare-and-set: only the first concurrent writer wins. A loser (its UPDATE
+    # matches 0 rows) discards the KB it just created and uses the winner's, so we
+    # never leak a second KB or overwrite an existing mapping.
+    won = db.fetch_one(
+        "update public.business_profiles set brand_kb_id = %s "
+        "where id = %s and brand_kb_id is null returning brand_kb_id",
         (kb_id, business_id),
     )
-    return kb_id
+    if won is not None:
+        return kb_id
+    try:
+        await client.delete_kb(kb_id)
+    except Exception:  # noqa: BLE001
+        pass
+    fresh = brands.get_profile(db, business_id)
+    return fresh["brand_kb_id"]
 
 
 async def index_run_sources(
@@ -67,10 +79,17 @@ async def index_run_sources(
 
 
 async def search(
-    client: PowabaseClient, kb_id: str, query: str, *, top_k: int = 6
+    client: PowabaseClient,
+    kb_id: str,
+    query: str,
+    *,
+    top_k: int = 6,
+    source_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     # Resilient: an empty/partial KB should degrade to ungrounded drafting, not fail.
     try:
-        return await client.search_kb(kb_id, query, top_k=top_k)
+        return await client.search_kb(
+            kb_id, query, top_k=top_k, source_ids=source_ids
+        )
     except Exception:  # noqa: BLE001
         return []

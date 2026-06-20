@@ -30,6 +30,18 @@ def get_profile(db: Database, profile_id: UUID) -> dict[str, Any] | None:
     )
 
 
+def name_exists(db: Database, name: str) -> bool:
+    """Case-insensitive name check (the workspace is shared, so names should be
+    unambiguous even though rows are UUID-keyed)."""
+    return (
+        db.fetch_one(
+            "select 1 from public.business_profiles where lower(name) = lower(%s) limit 1",
+            (name,),
+        )
+        is not None
+    )
+
+
 def create_profile(db: Database, data: BusinessProfileCreate) -> dict[str, Any]:
     return db.fetch_one(
         f"""

@@ -3,27 +3,18 @@
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..db import Database
 from ..models.research import ResearchRun, ResearchRunCreate, ResearchSource
 from ..powabase import PowabaseClient
 from ..services import research as svc
-from .business_profiles import get_db
+from .deps import get_db, get_powabase
 
 router = APIRouter(prefix="/api/research", tags=["research"])
 
 # keep references so background tasks aren't garbage-collected
 _bg_tasks: set[asyncio.Task] = set()
-
-
-def get_powabase(request: Request) -> PowabaseClient:
-    pb = request.app.state.powabase
-    if pb is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "powabase client not configured"
-        )
-    return pb
 
 
 @router.post("", response_model=ResearchRun, status_code=status.HTTP_201_CREATED)

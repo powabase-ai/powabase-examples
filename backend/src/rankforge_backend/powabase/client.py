@@ -257,12 +257,26 @@ class PowabaseClient:
         return await self._request("GET", f"/api/knowledge-bases/{kb_id}/sources")
 
     async def search_kb(
-        self, kb_id: str, query: str, *, top_k: int = 5
+        self,
+        kb_id: str,
+        query: str,
+        *,
+        top_k: int = 5,
+        source_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Search the KB → list of {score, text, ...source metadata}."""
+        """Search the KB → list of {chunk_id, score, text, source_id, meta}.
+
+        `source_ids` restricts retrieval to those sources (verified to filter the
+        candidate set, not post-filter) — used to scope an article to its own
+        research sources within one shared brand KB.
+        """
+        body: dict[str, Any] = {"query": query, "top_k": top_k}
+        if source_ids:
+            body["source_ids"] = source_ids
         resp = await self._request(
-            "POST",
-            f"/api/knowledge-bases/{kb_id}/search",
-            json={"query": query, "top_k": top_k},
+            "POST", f"/api/knowledge-bases/{kb_id}/search", json=body
         )
         return resp.get("results", []) if isinstance(resp, dict) else []
+
+    async def delete_kb(self, kb_id: str) -> Any:
+        return await self._request("DELETE", f"/api/knowledge-bases/{kb_id}")

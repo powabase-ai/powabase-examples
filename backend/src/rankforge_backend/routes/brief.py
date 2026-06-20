@@ -8,8 +8,7 @@ from ..db import Database
 from ..models.brief import Brief, BriefGenerate, BriefUpdate
 from ..powabase import PowabaseClient
 from ..services import brief as svc
-from .business_profiles import get_db
-from .research import get_powabase
+from .deps import get_db, get_powabase
 
 router = APIRouter(prefix="/api/briefs", tags=["briefs"])
 
@@ -23,9 +22,9 @@ async def generate_brief(
     try:
         return await svc.generate_brief(pb, db, research_run_id=payload.research_run_id)
     except ValueError as e:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
     except RuntimeError as e:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
 
 
 @router.get("/{brief_id}", response_model=Brief)

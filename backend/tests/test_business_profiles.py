@@ -33,7 +33,8 @@ def make_client(db: MagicMock) -> TestClient:
 
 def test_create_inserts_and_returns_201():
     db = MagicMock()
-    db.fetch_one.return_value = ROW
+    # first fetch_one = name_exists (None → free), second = insert RETURNING
+    db.fetch_one.side_effect = [None, ROW]
     client = make_client(db)
 
     resp = client.post(
@@ -52,6 +53,14 @@ def test_create_inserts_and_returns_201():
     assert resp.json()["competitors"][0]["domain"] == "rival.com"
     sql = db.fetch_one.call_args.args[0].lower()
     assert "insert into public.business_profiles" in sql
+
+
+def test_create_duplicate_name_returns_409():
+    db = MagicMock()
+    db.fetch_one.return_value = {"exists": 1}  # name_exists → truthy
+    client = make_client(db)
+    resp = client.post("/api/business-profiles", json={"name": "Acme"})
+    assert resp.status_code == 409
 
 
 def test_list_returns_profiles():

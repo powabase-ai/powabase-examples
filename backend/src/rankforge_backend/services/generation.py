@@ -15,6 +15,7 @@ from ..db import Database
 from ..powabase import PowabaseClient
 from . import brief as brief_svc
 from . import grounding
+from . import research as research_svc
 
 WRITER_AGENT_NAME = "rankforge-writer"
 WRITER_MODEL = "claude-sonnet-4-6"
@@ -76,12 +77,14 @@ def parse_sections(headings: list[str]) -> list[dict[str, Any]]:
     return sections
 
 
-def _grounding_block(chunks: list[dict[str, Any]]) -> str:
+def _grounding_block(
+    chunks: list[dict[str, Any]], url_by_source: dict[str, str]
+) -> str:
     if not chunks:
         return "(no grounding sources — write carefully and avoid specific claims)"
     lines = []
     for c in chunks:
-        src = c.get("source_name") or c.get("url") or "source"
+        src = url_by_source.get(c.get("source_id")) or c.get("source_id") or "source"
         lines.append(f"- ({src}) {c.get('text', '')[:700]}")
     return "\n".join(lines)
 
@@ -129,16 +132,24 @@ async def _draft_part(
     ctx: dict[str, Any],
     instruction: str,
     search_query: str,
+    *,
+    source_ids: list[str] | None,
+    url_by_source: dict[str, str],
 ) -> str:
-    chunks = await grounding.search(client, kb_id, search_query) if kb_id else []
+    # Scope retrieval to THIS article's research sources within the shared brand KB.
+    chunks = (
+        await grounding.search(client, kb_id, search_query, source_ids=source_ids)
+        if kb_id
+        else []
+    )
     msg = (
         f"Article topic: {ctx['topic']}\n"
         f"Primary keyword: {ctx.get('primary_keyword') or 'n/a'}\n"
         f"Secondary keywords: {', '.join(ctx.get('secondary_keywords') or [])}\n"
         f"Audience / brand: {ctx.get('audience') or 'n/a'}\n\n"
         f"{instruction}\n\n"
-        f"Grounding excerpts (cite relevant sources inline as Markdown links):\n"
-        f"{_grounding_block(chunks)}\n\n"
+        f"Grounding excerpts (cite the relevant source URL inline as a Markdown link):\n"
+        f"{_grounding_block(chunks, url_by_source)}\n\n"
         "Output only the Markdown."
     )
     res = await client.run_agent(agent_id, msg)
@@ -168,6 +179,20 @@ async def run_generation_task(
             if not indexed:
                 kb_id = None  # no sources to ground on → draft ungrounded
 
+        # scope retrieval to this article's research sources + map ids → urls (cites)
+        source_ids: list[str] | None = None
+        url_by_source: dict[str, str] = {}
+        if research_run_id:
+            run_sources = research_svc.list_sources(db, research_run_id)
+            source_ids = [
+                s["source_id"] for s in run_sources if s.get("source_id")
+            ] or None
+            url_by_source = {
+                s["source_id"]: s["url"]
+                for s in run_sources
+                if s.get("source_id") and s.get("url")
+            }
+
         # 2) outline (from the brief's heading plan)
         _update(db, article_id, generation_status="outlining")
         sections = parse_sections(brief.get("headings") or [])
@@ -191,6 +216,7 @@ async def run_generation_task(
             f'"{title}". Open with a tight, extractable answer to the core question. '
             "Do not include a heading.",
             topic,
+            source_ids=source_ids, url_by_source=url_by_source,
         )
         parts = [f"# {title}", intro]
         _update(db, article_id, progress={"phase": "drafting", "total": total, "done": 1})
@@ -208,6 +234,7 @@ async def run_generation_task(
                 f"Write this section in Markdown, starting with `## {sec['h2']}`. "
                 f"{subs}\nAim for ~250–400 words.",
                 sec["h2"],
+                source_ids=source_ids, url_by_source=url_by_source,
             )
             parts.append(body)
             _update(
@@ -221,6 +248,7 @@ async def run_generation_task(
             "Write a concise conclusion section starting with `## Conclusion` that "
             "summarizes the key takeaways and ends with a clear next step.",
             topic,
+            source_ids=source_ids, url_by_source=url_by_source,
         )
         parts.append(conclusion)
 
