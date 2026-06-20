@@ -9,6 +9,7 @@ from ..db import Database
 from ..models.article import Article, ArticleGenerate, ArticleSummary
 from ..powabase import PowabaseClient
 from ..services import generation as svc
+from ..services import scoring as scoring_svc
 from .deps import get_db, get_powabase
 
 router = APIRouter(prefix="/api/articles", tags=["articles"])
@@ -33,6 +34,19 @@ async def generate_article(
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
     return article
+
+
+@router.post("/{article_id}/score", response_model=Article)
+async def score_article(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+):
+    """Re-run SEO + GEO scoring for an article."""
+    result = await scoring_svc.score_and_store(pb, db, article_id)
+    if result is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    return svc.get_article(db, article_id)
 
 
 @router.get("", response_model=list[ArticleSummary])

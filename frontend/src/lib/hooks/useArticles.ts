@@ -43,3 +43,11 @@ export function useGenerateArticle(businessId: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["articles", businessId] }),
   });
 }
+
+export function useScoreArticle(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => articlesApi.score(id),
+    onSuccess: (data) => qc.setQueryData(["article", id], data),
+  });
+}

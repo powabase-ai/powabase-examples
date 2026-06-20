@@ -256,6 +256,17 @@ async def run_generation_task(
         _update(
             db, article_id,
             content_md=content_md,
+            generation_status="optimizing",
+            progress={"phase": "scoring", "total": total, "done": total},
+        )
+
+        # 6) SEO + GEO scoring (local import avoids a circular dependency)
+        from . import scoring
+
+        await scoring.score_and_store(client, db, article_id)
+
+        _update(
+            db, article_id,
             generation_status="done",
             progress={"phase": "done", "total": total, "done": total,
                       "word_count": len(content_md.split())},

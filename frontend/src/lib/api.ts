@@ -180,6 +180,23 @@ export interface ArticleSummary {
   updated_at: string;
 }
 
+export interface ScoreSignal {
+  key: string;
+  label: string;
+  score: number;
+  weight: number;
+  explanation: string;
+  fixes: string[];
+  method: "deterministic" | "llm";
+}
+
+export interface Score {
+  total: number;
+  target: number;
+  met: boolean;
+  signals: ScoreSignal[];
+}
+
 export interface Article extends ArticleSummary {
   business_id?: string | null;
   brief_id?: string | null;
@@ -189,8 +206,8 @@ export interface Article extends ArticleSummary {
   content_md: string;
   meta_title?: string | null;
   meta_description?: string | null;
-  seo_score?: Record<string, unknown> | null;
-  geo_score?: Record<string, unknown> | null;
+  seo_score?: Score | null;
+  geo_score?: Score | null;
   created_at: string;
 }
 
@@ -205,6 +222,8 @@ export const articlesApi = {
       method: "POST",
       body: JSON.stringify({ brief_id: briefId }),
     }),
+  score: (id: string) =>
+    request<Article>(`/api/articles/${id}/score`, { method: "POST" }),
 };
 
 // --- Brief (Stage B) ---
