@@ -14,6 +14,11 @@ import {
   useOptimizeArticle,
   useUpdateArticle,
 } from "@/lib/hooks/useArticles";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import type { Score, ScoreSignal } from "@/lib/api";
 
@@ -110,9 +115,14 @@ export default function ArticleView({
   }
 
   return (
-    <div className="flex h-screen">
+    <ResizablePanelGroup
+      direction="horizontal"
+      autoSaveId="rankforge:article"
+      className="h-full"
+    >
       {/* Secondary sidebar — SEO / GEO evals */}
-      <aside className="hidden w-72 shrink-0 flex-col border-r border-border bg-card lg:flex">
+      <ResizablePanel defaultSize={26} minSize={16} maxSize={45}>
+        <aside className="flex h-full w-full flex-col bg-card">
         <div className="flex border-b border-border">
           {(["SEO", "GEO"] as const).map((t) => {
             const sc = t === "SEO" ? a?.seo_score : a?.geo_score;
@@ -159,10 +169,12 @@ export default function ArticleView({
             </Button>
           )}
         </div>
-      </aside>
+        </aside>
+      </ResizablePanel>
+      <ResizableHandle />
 
       {/* Content */}
-      <div className="min-w-0 flex-1 overflow-y-auto">
+      <ResizablePanel minSize={45} className="overflow-y-auto">
         <div className="mx-auto max-w-3xl px-8 py-8">
           <div className="mb-4 flex items-center justify-between">
             <Link
@@ -251,7 +263,7 @@ export default function ArticleView({
             </>
           )}
         </div>
-      </div>
-    </div>
+      </ResizablePanel>
+    </ResizablePanelGroup>
   );
 }

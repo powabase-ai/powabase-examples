@@ -3,6 +3,11 @@
 import { use, useEffect } from "react";
 
 import { AppSidebar } from "@/components/layout/AppSidebar";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
 import { LAST_BRAND_KEY } from "@/lib/constants";
 
 export default function BrandLayout({
@@ -14,7 +19,6 @@ export default function BrandLayout({
 }) {
   const { id } = use(params);
 
-  // Remember the last-opened brand so "/" can jump straight back here.
   useEffect(() => {
     try {
       localStorage.setItem(LAST_BRAND_KEY, id);
@@ -24,9 +28,18 @@ export default function BrandLayout({
   }, [id]);
 
   return (
-    <div className="flex min-h-screen">
-      <AppSidebar brandId={id} />
-      <div className="min-w-0 flex-1">{children}</div>
-    </div>
+    <ResizablePanelGroup
+      direction="horizontal"
+      autoSaveId="rankforge:shell"
+      className="h-screen"
+    >
+      <ResizablePanel defaultSize={16} minSize={11} maxSize={26}>
+        <AppSidebar brandId={id} />
+      </ResizablePanel>
+      <ResizableHandle />
+      <ResizablePanel minSize={50} className="overflow-y-auto">
+        {children}
+      </ResizablePanel>
+    </ResizablePanelGroup>
   );
 }

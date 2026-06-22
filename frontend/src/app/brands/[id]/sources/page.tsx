@@ -20,7 +20,7 @@ export default function SourcesLibrary({
   const md = useSourceMarkdown(selected?.source_id ?? null);
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-full flex-col">
       <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border bg-card px-6">
         <Layers className="size-4 text-muted-foreground" />
         <h1 className="font-display text-lg font-bold">Sources</h1>

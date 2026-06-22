@@ -34,7 +34,7 @@ export function AppSidebar({ brandId }: { brandId: string }) {
   ];
 
   return (
-    <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col bg-[rgb(var(--iron))] text-[rgb(var(--iron-text))]">
+    <aside className="flex h-full w-full flex-col bg-[rgb(var(--iron))] text-[rgb(var(--iron-text))]">
       <div className="px-5 pb-4 pt-5">
         <Link
           href="/"
