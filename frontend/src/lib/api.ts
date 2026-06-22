@@ -197,6 +197,20 @@ export interface Score {
   signals: ScoreSignal[];
 }
 
+export interface GroundingFlag {
+  claim: string;
+  issue: string;
+  suggestion: string;
+}
+
+export interface GroundingReport {
+  grounding_score?: number | null;
+  claims_checked?: number;
+  supported?: number;
+  flagged?: GroundingFlag[];
+  error?: string;
+}
+
 export interface Article extends ArticleSummary {
   business_id?: string | null;
   brief_id?: string | null;
@@ -209,6 +223,7 @@ export interface Article extends ArticleSummary {
   seo_score?: Score | null;
   geo_score?: Score | null;
   json_ld?: Record<string, unknown> | null;
+  grounding_report?: GroundingReport | null;
   created_at: string;
 }
 

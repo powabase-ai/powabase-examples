@@ -20,7 +20,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
-import type { Score, ScoreSignal } from "@/lib/api";
+import type { GroundingReport, Score, ScoreSignal } from "@/lib/api";
 
 const PHASE_LABEL: Record<string, string> = {
   grounding: "Grounding in research sources…",
@@ -83,6 +83,53 @@ function EvalBody({ score }: { score: Score }) {
   );
 }
 
+function GroundingBody({ report }: { report: GroundingReport }) {
+  const s = report.grounding_score;
+  const color = s == null ? "var(--muted-ink)" : s >= 80 ? "var(--success)" : "var(--ember)";
+  return (
+    <div>
+      <div className="mb-2 flex items-baseline justify-between">
+        <span className="text-xs uppercase tracking-wide text-muted-foreground">
+          {report.supported ?? 0}/{report.claims_checked ?? 0} claims supported
+        </span>
+        <span className="font-data text-lg font-semibold" style={{ color: `rgb(${color})` }}>
+          {s ?? "—"}
+          {s != null && <span className="text-sm text-muted-foreground">/100</span>}
+        </span>
+      </div>
+      {s != null && (
+        <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-secondary">
+          <div
+            className="h-full rounded-full"
+            style={{ width: `${s}%`, background: `rgb(${color})` }}
+          />
+        </div>
+      )}
+      {report.error && (
+        <p className="mb-3 text-xs text-muted-foreground">{report.error}</p>
+      )}
+      <p className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">
+        Flagged claims
+      </p>
+      {report.flagged && report.flagged.length > 0 ? (
+        report.flagged.map((f, i) => (
+          <div key={i} className="border-t border-border py-2.5 first:border-0">
+            <div className="text-sm font-medium">{f.claim}</div>
+            <div className="text-xs text-muted-foreground">{f.issue}</div>
+            {f.suggestion && (
+              <div className="mt-0.5 text-xs text-[rgb(var(--ember-deep))]">
+                → {f.suggestion}
+              </div>
+            )}
+          </div>
+        ))
+      ) : (
+        <p className="text-sm text-muted-foreground">No unsupported claims flagged.</p>
+      )}
+    </div>
+  );
+}
+
 export default function ArticleView({
   params,
 }: {
@@ -94,7 +141,7 @@ export default function ArticleView({
   const update = useUpdateArticle(articleId);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const [tab, setTab] = useState<"SEO" | "GEO">("SEO");
+  const [tab, setTab] = useState<"SEO" | "GEO" | "Grounding">("SEO");
 
   const generating = a && !["done", "failed"].includes(a.generation_status);
   const schemaTypes =
@@ -124,24 +171,32 @@ export default function ArticleView({
       <ResizablePanel defaultSize={26} minSize={16} maxSize={45}>
         <aside className="flex h-full w-full flex-col bg-card">
         <div className="flex border-b border-border">
-          {(["SEO", "GEO"] as const).map((t) => {
-            const sc = t === "SEO" ? a?.seo_score : a?.geo_score;
-            const active = tab === t;
+          {(["SEO", "GEO", "Grounding"] as const).map((t) => {
+            const sc = t === "SEO" ? a?.seo_score : t === "GEO" ? a?.geo_score : null;
+            const g = t === "Grounding" ? a?.grounding_report?.grounding_score : null;
+            const badge = sc ? sc.total : g ?? null;
+            const color = sc
+              ? scoreColor(sc)
+              : g != null
+                ? g >= 80
+                  ? "var(--success)"
+                  : "var(--ember)"
+                : "var(--muted-ink)";
             return (
               <button
                 key={t}
                 onClick={() => setTab(t)}
                 className={cn(
-                  "flex flex-1 items-center justify-center gap-2 border-b-2 px-4 py-3 text-sm font-semibold transition-colors",
-                  active
+                  "flex flex-1 items-center justify-center gap-1.5 border-b-2 px-2 py-3 text-xs font-semibold transition-colors",
+                  tab === t
                     ? "border-[rgb(var(--ember))] text-foreground"
                     : "border-transparent text-muted-foreground hover:text-foreground"
                 )}
               >
                 {t}
-                {sc && (
-                  <span className="font-data text-xs" style={{ color: `rgb(${scoreColor(sc)})` }}>
-                    {sc.total}
+                {badge != null && (
+                  <span className="font-data" style={{ color: `rgb(${color})` }}>
+                    {badge}
                   </span>
                 )}
               </button>
@@ -149,7 +204,15 @@ export default function ArticleView({
           })}
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {current ? (
+          {tab === "Grounding" ? (
+            a?.grounding_report ? (
+              <GroundingBody report={a.grounding_report} />
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {generating ? "Fact-check runs after generation." : "No fact-check yet."}
+              </p>
+            )
+          ) : current ? (
             <EvalBody score={current} />
           ) : (
             <p className="text-sm text-muted-foreground">

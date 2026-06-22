@@ -32,7 +32,8 @@ _SYSTEM_PROMPT = (
 _ARTICLE_COLUMNS = (
     "id, business_id, brief_id, research_run_id, title, slug, status, "
     "generation_status, generation_error, progress, content_md, meta_title, "
-    "meta_description, seo_score, geo_score, json_ld, created_at, updated_at"
+    "meta_description, seo_score, geo_score, json_ld, grounding_report, "
+    "created_at, updated_at"
 )
 _SUMMARY_COLUMNS = "id, title, status, generation_status, progress, updated_at"
 
@@ -113,7 +114,7 @@ def create_article(db: Database, brief: dict[str, Any]) -> dict[str, Any]:
 
 
 def _update(db: Database, article_id: UUID, **fields: Any) -> None:
-    jsonb = {"progress", "seo_score", "geo_score", "json_ld"}
+    jsonb = {"progress", "seo_score", "geo_score", "json_ld", "grounding_report"}
     sets, params = [], []
     for k, v in fields.items():
         sets.append(f"{k} = %s")
@@ -260,10 +261,11 @@ async def run_generation_task(
             progress={"phase": "scoring", "total": total, "done": total},
         )
 
-        # 6) GEO optimize (JSON-LD) then SEO + GEO scoring
+        # 6) reflect/fact-check, GEO optimize (JSON-LD), then SEO + GEO scoring
         #    (local import avoids a circular dependency)
-        from . import geo_optimize, scoring
+        from . import geo_optimize, quality, scoring
 
+        await quality.reflect(client, db, article_id)
         await geo_optimize.optimize_and_store(client, db, article_id)
         await scoring.score_and_store(client, db, article_id)
 

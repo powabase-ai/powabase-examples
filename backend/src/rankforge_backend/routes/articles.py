@@ -15,6 +15,7 @@ from ..models.article import (
 from ..powabase import PowabaseClient
 from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
+from ..services import quality as quality_svc
 from ..services import scoring as scoring_svc
 from .deps import get_db, get_powabase
 
@@ -61,9 +62,10 @@ async def optimize_article(
     db: Database = Depends(get_db),
     pb: PowabaseClient = Depends(get_powabase),
 ):
-    """Regenerate schema.org JSON-LD (BlogPosting + FAQPage), then re-score."""
+    """Re-run fact-check + JSON-LD + scoring."""
     if await geo_svc.optimize_and_store(pb, db, article_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    await quality_svc.reflect(pb, db, article_id)
     await scoring_svc.score_and_store(pb, db, article_id)
     return svc.get_article(db, article_id)
 
