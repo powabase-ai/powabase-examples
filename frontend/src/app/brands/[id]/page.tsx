@@ -32,6 +32,7 @@ import {
   useResearchRuns,
   useRunResearch,
   useSourceMarkdown,
+  useTemplates,
 } from "@/lib/hooks/useResearch";
 import type { Brief, CompetitorTeardown, ResearchRun } from "@/lib/api";
 
@@ -69,12 +70,14 @@ export default function BrandWorkspace({
   const runResearch = useRunResearch(id);
   const generateBrief = useGenerateBrief(id);
   const generateArticle = useGenerateArticle(id);
+  const { data: templates } = useTemplates();
   const router = useRouter();
 
   const [topic, setTopic] = React.useState("");
   const [depth, setDepth] = React.useState("standard");
   const [selectedRun, setSelectedRun] = React.useState<string | null>(null);
   const [sourceForMd, setSourceForMd] = React.useState<string | null>(null);
+  const [articleType, setArticleType] = React.useState("general");
 
   const briefByRun = React.useMemo(() => {
     const m = new Map<string, Brief>();
@@ -97,7 +100,7 @@ export default function BrandWorkspace({
 
   async function onGenerateBrief(runId: string) {
     try {
-      await generateBrief.mutateAsync(runId);
+      await generateBrief.mutateAsync({ researchRunId: runId, articleType });
       toast.success("Brief generated");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Brief failed");
@@ -233,10 +236,26 @@ export default function BrandWorkspace({
                   />
                 ) : (
                   <Card>
-                    <CardContent className="flex items-center justify-between py-6">
-                      <p className="text-sm text-muted-foreground">No brief yet.</p>
+                    <CardContent className="flex flex-col gap-3 py-5">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm text-muted-foreground">
+                          No brief yet — pick an article type:
+                        </p>
+                        <select
+                          value={articleType}
+                          onChange={(e) => setArticleType(e.target.value)}
+                          className="h-9 rounded-md border border-input bg-card px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          {templates?.map((t) => (
+                            <option key={t.type} value={t.type}>
+                              {t.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
                       <Button
                         variant="gold"
+                        className="self-end"
                         disabled={generateBrief.isPending}
                         onClick={() => onGenerateBrief(selected.id)}
                       >
@@ -385,6 +404,11 @@ function BriefView({
         <div className="flex items-center justify-between gap-2">
           <CardTitle className="flex items-center gap-2 font-display text-lg">
             <FileText className="size-4" /> Content brief
+            {brief.article_type && brief.article_type !== "general" && (
+              <span className="rounded bg-secondary px-1.5 py-0.5 text-xs font-normal capitalize text-muted-foreground">
+                {brief.article_type.replace(/_/g, " ")}
+              </span>
+            )}
           </CardTitle>
           <Button variant="gold" size="sm" onClick={onGenerate} disabled={generating}>
             {generating ? (

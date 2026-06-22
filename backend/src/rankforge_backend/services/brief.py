@@ -12,6 +12,7 @@ from ..models.brief import BriefResult, BriefUpdate
 from ..powabase import PowabaseClient
 from ..util import extract_json
 from . import research as research_svc
+from . import templates as templates_svc
 
 BRIEF_AGENT_NAME = "rankforge-brief"
 BRIEF_MODEL = "claude-sonnet-4-6"
@@ -34,9 +35,9 @@ _SCHEMA_HINT = """{
 }"""
 
 _BRIEF_COLUMNS = (
-    "id, business_id, research_run_id, topic, primary_keyword, secondary_keywords, "
-    "target_word_count, headings, entities, questions, link_suggestions, "
-    "suggested_title, suggested_meta, created_at, updated_at"
+    "id, business_id, research_run_id, article_type, topic, primary_keyword, "
+    "secondary_keywords, target_word_count, headings, entities, questions, "
+    "link_suggestions, suggested_title, suggested_meta, created_at, updated_at"
 )
 _JSONB_FIELDS = {
     "secondary_keywords",
@@ -100,15 +101,30 @@ def _summarize_research(run: dict[str, Any]) -> str:
 
 
 async def generate_brief(
-    client: PowabaseClient, db: Database, *, research_run_id: UUID
+    client: PowabaseClient,
+    db: Database,
+    *,
+    research_run_id: UUID,
+    article_type: str | None = None,
 ) -> dict[str, Any]:
     run = research_svc.get_run(db, research_run_id)
     if run is None:
         raise ValueError("research run not found")
 
+    template = templates_svc.get_template(db, article_type)
+    type_block = ""
+    if template:
+        type_block = (
+            f"\nArticle type: {template['label']}.\n"
+            f"Outline guidance: {template['outline_guidance']}\n"
+            f"Target length: ~{template['default_word_count']} words.\n"
+            "Shape the heading outline to fit this article type.\n"
+        )
+
     agent_id = await ensure_brief_agent(client)
     message = (
-        "Create a content brief from this research.\n\n"
+        "Create a content brief from this research.\n"
+        f"{type_block}\n"
         f"{_summarize_research(run)}\n\n"
         "Output ONLY a single ```json block matching exactly this shape:\n"
         f"{_SCHEMA_HINT}"
@@ -122,15 +138,16 @@ async def generate_brief(
     return db.fetch_one(
         f"""
         insert into public.briefs
-            (business_id, research_run_id, topic, primary_keyword, secondary_keywords,
-             target_word_count, headings, entities, questions, link_suggestions,
-             suggested_title, suggested_meta)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (business_id, research_run_id, article_type, topic, primary_keyword,
+             secondary_keywords, target_word_count, headings, entities, questions,
+             link_suggestions, suggested_title, suggested_meta)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         returning {_BRIEF_COLUMNS}
         """,
         (
             run.get("business_id"),
             research_run_id,
+            article_type,
             run.get("topic"),
             parsed.primary_keyword,
             Json(parsed.secondary_keywords),

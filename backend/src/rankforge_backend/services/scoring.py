@@ -15,6 +15,7 @@ from ..powabase import PowabaseClient
 from ..util import extract_json
 from . import brief as brief_svc
 from . import generation as gen_svc
+from . import templates as templates_svc
 
 SEO_TARGET = 80
 GEO_TARGET = 85
@@ -179,7 +180,11 @@ def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dic
 
 # ---------- GEO ----------
 def score_geo(
-    content_md: str, brief: dict, llm: dict | None, has_structured_data: bool = False
+    content_md: str,
+    brief: dict,
+    llm: dict | None,
+    has_structured_data: bool = False,
+    geo_target: int = GEO_TARGET,
 ) -> dict:
     text = _clean(content_md)
     wc = len(_words(text)) or 1
@@ -244,7 +249,7 @@ def score_geo(
             llm.get("citability_note", "LLM judgment of how quotable/specific claims are."),
             llm.get("citability_fixes", []), method="llm"))
 
-    return _aggregate(sig, GEO_TARGET)
+    return _aggregate(sig, geo_target)
 
 
 JUDGE_AGENT_NAME = "rankforge-geo-judge"
@@ -309,7 +314,12 @@ async def score_and_store(
     seo = score_seo(md, article.get("meta_title") or article.get("title") or "",
                     article.get("meta_description"), brief)
     llm = await judge_geo(client, md)
-    geo = score_geo(md, brief, llm, has_structured_data=bool(article.get("json_ld")))
+    template = templates_svc.get_template(db, brief.get("article_type"))
+    geo = score_geo(
+        md, brief, llm,
+        has_structured_data=bool(article.get("json_ld")),
+        geo_target=template["geo_target"] if template else GEO_TARGET,
+    )
 
     gen_svc._update(db, article_id, seo_score=seo, geo_score=geo)
     return {"seo_score": seo, "geo_score": geo}

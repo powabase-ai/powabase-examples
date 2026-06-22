@@ -22,6 +22,7 @@ class BriefResult(BaseModel):
 
 class BriefGenerate(BaseModel):
     research_run_id: UUID
+    article_type: str | None = None  # content_templates.type
 
 
 class BriefUpdate(BaseModel):
@@ -40,6 +41,7 @@ class Brief(BaseModel):
     id: UUID
     business_id: UUID | None = None
     research_run_id: UUID | None = None
+    article_type: str | None = None
     topic: str
     primary_keyword: str | None = None
     secondary_keywords: list = Field(default_factory=list)

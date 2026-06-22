@@ -6,9 +6,18 @@ import {
   briefsApi,
   researchApi,
   sourcesApi,
+  templatesApi,
   TERMINAL_RESEARCH,
   type ResearchRun,
 } from "@/lib/api";
+
+export function useTemplates() {
+  return useQuery({
+    queryKey: ["templates"],
+    queryFn: () => templatesApi.list(),
+    staleTime: Infinity,
+  });
+}
 
 export function useBrandSources(businessId: string) {
   return useQuery({
@@ -61,7 +70,8 @@ export function useBriefs(businessId: string) {
 export function useGenerateBrief(businessId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (researchRunId: string) => briefsApi.generate(researchRunId),
+    mutationFn: (vars: { researchRunId: string; articleType?: string }) =>
+      briefsApi.generate(vars.researchRunId, vars.articleType),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["briefs", businessId] }),
   });
 }

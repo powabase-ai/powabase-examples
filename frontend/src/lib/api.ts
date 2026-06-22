@@ -243,10 +243,26 @@ export interface ArticleUpdate {
 }
 
 // --- Brief (Stage B) ---
+export interface ContentTemplate {
+  id: string;
+  type: string;
+  label: string;
+  outline_guidance: string;
+  schema_org_type: string;
+  default_word_count?: number | null;
+  geo_target: number;
+  enabled: boolean;
+}
+
+export const templatesApi = {
+  list: () => request<ContentTemplate[]>("/api/templates"),
+};
+
 export interface Brief {
   id: string;
   business_id?: string | null;
   research_run_id?: string | null;
+  article_type?: string | null;
   topic: string;
   primary_keyword?: string | null;
   secondary_keywords: string[];
@@ -265,10 +281,13 @@ export const briefsApi = {
   listByBrand: (businessId: string) =>
     request<Brief[]>(`/api/briefs?business_id=${businessId}`),
   get: (id: string) => request<Brief>(`/api/briefs/${id}`),
-  generate: (researchRunId: string) =>
+  generate: (researchRunId: string, articleType?: string) =>
     request<Brief>("/api/briefs", {
       method: "POST",
-      body: JSON.stringify({ research_run_id: researchRunId }),
+      body: JSON.stringify({
+        research_run_id: researchRunId,
+        article_type: articleType,
+      }),
     }),
   update: (id: string, data: Partial<Omit<Brief, "id" | "created_at" | "updated_at">>) =>
     request<Brief>(`/api/briefs/${id}`, {

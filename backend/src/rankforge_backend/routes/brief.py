@@ -20,7 +20,10 @@ async def generate_brief(
     pb: PowabaseClient = Depends(get_powabase),
 ):
     try:
-        return await svc.generate_brief(pb, db, research_run_id=payload.research_run_id)
+        return await svc.generate_brief(
+            pb, db, research_run_id=payload.research_run_id,
+            article_type=payload.article_type,
+        )
     except ValueError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
     except RuntimeError as e:

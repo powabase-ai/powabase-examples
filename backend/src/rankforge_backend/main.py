@@ -19,6 +19,7 @@ from .routes import (
     health,
     research,
     sources,
+    templates,
 )
 
 
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(brief.router)
     app.include_router(sources.router)
     app.include_router(articles.router)
+    app.include_router(templates.router)
     return app
 
 

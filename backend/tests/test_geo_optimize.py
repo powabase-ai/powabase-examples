@@ -1,6 +1,24 @@
 """GEO optimize — deterministic JSON-LD builder (hermetic)."""
 
-from rankforge_backend.services.geo_optimize import build_article_jsonld
+from rankforge_backend.services.geo_optimize import (
+    build_article_jsonld,
+    build_howto_jsonld,
+    build_itemlist_jsonld,
+)
+
+
+def test_itemlist_and_howto_from_h2s():
+    md = "# Title\n\n## First item\nbody\n\n## Second item\nbody"
+    il = build_itemlist_jsonld(md, "Title")
+    assert il["@type"] == "ItemList"
+    assert [i["name"] for i in il["itemListElement"]] == ["First item", "Second item"]
+    assert il["itemListElement"][0]["position"] == 1
+
+    ho = build_howto_jsonld(md, "Title")
+    assert ho["@type"] == "HowTo"
+    assert ho["step"][1]["name"] == "Second item"
+
+    assert build_itemlist_jsonld("# No h2 here", "x") is None
 
 
 def test_build_article_jsonld():

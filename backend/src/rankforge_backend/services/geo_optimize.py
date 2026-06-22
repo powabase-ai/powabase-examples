@@ -3,6 +3,7 @@ can parse the article. BlogPosting is built deterministically; the FAQ is extrac
 by the JSON judge agent. Stored on articles.json_ld and rendered in the page.
 """
 
+import re
 from typing import Any
 from uuid import UUID
 
@@ -13,6 +14,39 @@ from . import brief as brief_svc
 from . import business_profiles as brands
 from . import generation as gen_svc
 from . import scoring
+from . import templates as templates_svc
+
+
+def _h2s(md: str) -> list[str]:
+    return [m.group(1).strip() for m in re.finditer(r"^##\s+(.+?)\s*$", md, re.MULTILINE)]
+
+
+def build_itemlist_jsonld(content_md: str, name: str | None) -> dict[str, Any] | None:
+    items = _h2s(content_md)
+    if not items:
+        return None
+    return {
+        "@type": "ItemList",
+        "name": name or "",
+        "itemListElement": [
+            {"@type": "ListItem", "position": i + 1, "name": h}
+            for i, h in enumerate(items)
+        ],
+    }
+
+
+def build_howto_jsonld(content_md: str, name: str | None) -> dict[str, Any] | None:
+    steps = _h2s(content_md)
+    if not steps:
+        return None
+    return {
+        "@type": "HowTo",
+        "name": name or "",
+        "step": [
+            {"@type": "HowToStep", "position": i + 1, "name": h}
+            for i, h in enumerate(steps)
+        ],
+    }
 
 
 def _iso(v: Any) -> str | None:
@@ -90,9 +124,20 @@ async def optimize_and_store(
         else None
     )
     author = brand["name"] if brand else None
+    template = templates_svc.get_template(db, brief.get("article_type"))
+    schema_type = template["schema_org_type"] if template else "BlogPosting"
+    content_md = article.get("content_md") or ""
 
-    graph = [build_article_jsonld(article, brief, author)]
-    faq = await build_faq_jsonld(client, article.get("content_md") or "")
+    graph: list[dict[str, Any]] = [build_article_jsonld(article, brief, author)]
+    if schema_type == "ItemList":
+        il = build_itemlist_jsonld(content_md, article.get("title"))
+        if il:
+            graph.append(il)
+    elif schema_type == "HowTo":
+        ho = build_howto_jsonld(content_md, article.get("title"))
+        if ho:
+            graph.append(ho)
+    faq = await build_faq_jsonld(client, content_md)
     if faq:
         graph.append(faq)
     json_ld = {"@context": "https://schema.org", "@graph": graph}
