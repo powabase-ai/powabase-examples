@@ -11,7 +11,7 @@ import { ArticleEditor } from "@/components/ArticleEditor";
 import { Markdown } from "@/components/Markdown";
 import {
   useArticle,
-  useScoreArticle,
+  useOptimizeArticle,
   useUpdateArticle,
 } from "@/lib/hooks/useArticles";
 import type { Score, ScoreSignal } from "@/lib/api";
@@ -83,19 +83,23 @@ export default function ArticleView({
 }) {
   const { id, articleId } = use(params);
   const { data: a, isLoading } = useArticle(articleId);
-  const rescore = useScoreArticle(articleId);
+  const optimize = useOptimizeArticle(articleId);
   const update = useUpdateArticle(articleId);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
 
   const generating = a && !["done", "failed"].includes(a.generation_status);
+  const schemaTypes =
+    ((a?.json_ld?.["@graph"] as Array<{ "@type"?: string }>) ?? [])
+      .map((g) => g["@type"])
+      .filter(Boolean) as string[];
 
   async function save() {
     try {
       await update.mutateAsync({ content_md: draft });
       setEditing(false);
-      toast.success("Saved — re-scoring");
-      rescore.mutate();
+      toast.success("Saved — re-optimizing");
+      optimize.mutate();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Save failed");
     }
@@ -125,11 +129,11 @@ export default function ArticleView({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => rescore.mutate()}
-              disabled={rescore.isPending}
+              onClick={() => optimize.mutate()}
+              disabled={optimize.isPending}
             >
-              {rescore.isPending ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              Re-score
+              {optimize.isPending ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              Optimize
             </Button>
           </div>
         )}
@@ -152,6 +156,17 @@ export default function ArticleView({
           <h1 className="font-display text-3xl font-bold leading-tight">{a.title}</h1>
           {a.meta_description && (
             <p className="mt-2 text-sm text-muted-foreground">{a.meta_description}</p>
+          )}
+          {schemaTypes.length > 0 && (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              schema.org: {schemaTypes.join(" · ")}
+            </p>
+          )}
+          {a.json_ld && (
+            <script
+              type="application/ld+json"
+              dangerouslySetInnerHTML={{ __html: JSON.stringify(a.json_ld) }}
+            />
           )}
 
           {generating && (

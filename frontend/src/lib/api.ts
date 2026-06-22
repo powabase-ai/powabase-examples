@@ -208,6 +208,7 @@ export interface Article extends ArticleSummary {
   meta_description?: string | null;
   seo_score?: Score | null;
   geo_score?: Score | null;
+  json_ld?: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -224,6 +225,8 @@ export const articlesApi = {
     }),
   score: (id: string) =>
     request<Article>(`/api/articles/${id}/score`, { method: "POST" }),
+  optimize: (id: string) =>
+    request<Article>(`/api/articles/${id}/optimize`, { method: "POST" }),
   update: (id: string, data: ArticleUpdate) =>
     request<Article>(`/api/articles/${id}`, {
       method: "PATCH",

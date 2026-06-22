@@ -60,3 +60,11 @@ export function useUpdateArticle(id: string) {
     onSuccess: (data) => qc.setQueryData(["article", id], data),
   });
 }
+
+export function useOptimizeArticle(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => articlesApi.optimize(id),
+    onSuccess: (data) => qc.setQueryData(["article", id], data),
+  });
+}

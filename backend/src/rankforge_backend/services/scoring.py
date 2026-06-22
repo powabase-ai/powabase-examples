@@ -178,7 +178,9 @@ def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dic
 
 
 # ---------- GEO ----------
-def score_geo(content_md: str, brief: dict, llm: dict | None) -> dict:
+def score_geo(
+    content_md: str, brief: dict, llm: dict | None, has_structured_data: bool = False
+) -> dict:
     text = _clean(content_md)
     wc = len(_words(text)) or 1
     lower = text.lower()
@@ -218,11 +220,11 @@ def score_geo(content_md: str, brief: dict, llm: dict | None) -> dict:
         f"{q_ans}/{len(questions)} brief questions appear addressed.",
         ["Answer the remaining PAA-style questions."] if q_cov < 70 else []))
 
-    has_jsonld = "application/ld+json" in content_md or '"@context"' in content_md
     sig.append(_signal(
-        "structured_data", "Structured data (JSON-LD)", 100 if has_jsonld else 0, 0.10,
-        "schema.org JSON-LD present." if has_jsonld else "No schema.org JSON-LD yet.",
-        [] if has_jsonld else ["Emit Article/FAQPage JSON-LD (GEO optimize step)."]))
+        "structured_data", "Structured data (JSON-LD)",
+        100 if has_structured_data else 0, 0.10,
+        "schema.org JSON-LD present." if has_structured_data else "No schema.org JSON-LD yet.",
+        [] if has_structured_data else ["Run GEO optimize to emit Article/FAQPage JSON-LD."]))
 
     lists = len(re.findall(r"^\s*([-*]|\d+\.)\s+", content_md, re.MULTILINE))
     tables = content_md.count("\n|")
@@ -307,7 +309,7 @@ async def score_and_store(
     seo = score_seo(md, article.get("meta_title") or article.get("title") or "",
                     article.get("meta_description"), brief)
     llm = await judge_geo(client, md)
-    geo = score_geo(md, brief, llm)
+    geo = score_geo(md, brief, llm, has_structured_data=bool(article.get("json_ld")))
 
     gen_svc._update(db, article_id, seo_score=seo, geo_score=geo)
     return {"seo_score": seo, "geo_score": geo}
