@@ -1,13 +1,19 @@
 "use client";
 
-import { use } from "react";
+import { use, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { ArrowLeft, Loader2, Pencil, RefreshCw, Save, Sparkles, X } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { ArticleEditor } from "@/components/ArticleEditor";
 import { Markdown } from "@/components/Markdown";
-import { useArticle, useScoreArticle } from "@/lib/hooks/useArticles";
+import {
+  useArticle,
+  useScoreArticle,
+  useUpdateArticle,
+} from "@/lib/hooks/useArticles";
 import type { Score, ScoreSignal } from "@/lib/api";
 
 const PHASE_LABEL: Record<string, string> = {
@@ -78,8 +84,22 @@ export default function ArticleView({
   const { id, articleId } = use(params);
   const { data: a, isLoading } = useArticle(articleId);
   const rescore = useScoreArticle(articleId);
+  const update = useUpdateArticle(articleId);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
 
   const generating = a && !["done", "failed"].includes(a.generation_status);
+
+  async function save() {
+    try {
+      await update.mutateAsync({ content_md: draft });
+      setEditing(false);
+      toast.success("Saved — re-scoring");
+      rescore.mutate();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Save failed");
+    }
+  }
 
   return (
     <div className="mx-auto max-w-3xl px-8 py-8">
@@ -90,20 +110,38 @@ export default function ArticleView({
         >
           <ArrowLeft className="size-4" /> Articles
         </Link>
-        {a && a.generation_status === "done" && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => rescore.mutate()}
-            disabled={rescore.isPending}
-          >
-            {rescore.isPending ? (
-              <Loader2 className="animate-spin" />
-            ) : (
-              <RefreshCw />
-            )}
-            Re-score
-          </Button>
+        {a && a.generation_status === "done" && !editing && (
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setDraft(a.content_md);
+                setEditing(true);
+              }}
+            >
+              <Pencil /> Edit
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => rescore.mutate()}
+              disabled={rescore.isPending}
+            >
+              {rescore.isPending ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              Re-score
+            </Button>
+          </div>
+        )}
+        {editing && (
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => setEditing(false)}>
+              <X /> Cancel
+            </Button>
+            <Button variant="gold" size="sm" onClick={save} disabled={update.isPending}>
+              {update.isPending ? <Loader2 className="animate-spin" /> : <Save />} Save
+            </Button>
+          </div>
         )}
       </div>
 
@@ -145,10 +183,16 @@ export default function ArticleView({
             </div>
           )}
 
-          {a.content_md && (
-            <article className="mt-8">
-              <Markdown>{a.content_md}</Markdown>
-            </article>
+          {editing ? (
+            <div className="mt-8">
+              <ArticleEditor value={a.content_md} onChange={setDraft} />
+            </div>
+          ) : (
+            a.content_md && (
+              <article className="mt-8">
+                <Markdown>{a.content_md}</Markdown>
+              </article>
+            )
           )}
         </>
       )}

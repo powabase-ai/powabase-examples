@@ -10,6 +10,14 @@ class ArticleGenerate(BaseModel):
     brief_id: UUID
 
 
+class ArticleUpdate(BaseModel):
+    title: str | None = None
+    content_md: str | None = None
+    meta_title: str | None = None
+    meta_description: str | None = None
+    status: str | None = None  # draft|in_review|approved|published|archived
+
+
 class Article(BaseModel):
     id: UUID
     business_id: UUID | None = None

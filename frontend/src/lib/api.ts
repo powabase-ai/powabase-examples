@@ -224,7 +224,20 @@ export const articlesApi = {
     }),
   score: (id: string) =>
     request<Article>(`/api/articles/${id}/score`, { method: "POST" }),
+  update: (id: string, data: ArticleUpdate) =>
+    request<Article>(`/api/articles/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
 };
+
+export interface ArticleUpdate {
+  title?: string;
+  content_md?: string;
+  meta_title?: string;
+  meta_description?: string;
+  status?: string;
+}
 
 // --- Brief (Stage B) ---
 export interface Brief {

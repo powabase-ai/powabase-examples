@@ -290,5 +290,31 @@ def list_articles(db: Database, business_id: UUID) -> list[dict[str, Any]]:
     )
 
 
+def update_article(
+    db: Database, article_id: UUID, fields: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Partial update of editable fields. Snapshots the prior content into
+    article_versions when content_md changes (editorial history)."""
+    fields = {k: v for k, v in fields.items() if v is not None}
+    if not fields:
+        return get_article(db, article_id)
+    if "content_md" in fields:
+        cur = get_article(db, article_id)
+        if cur and cur.get("content_md"):
+            db.execute(
+                "insert into public.article_versions (article_id, content_md) "
+                "values (%s, %s)",
+                (article_id, cur["content_md"]),
+            )
+    set_clauses = [f"{k} = %s" for k in fields]
+    set_clauses.append("updated_at = now()")
+    params = [*fields.values(), article_id]
+    return db.fetch_one(
+        f"update public.articles set {', '.join(set_clauses)} "
+        f"where id = %s returning {_ARTICLE_COLUMNS}",
+        tuple(params),
+    )
+
+
 def get_brief(db: Database, brief_id: UUID) -> dict[str, Any] | None:
     return brief_svc.get_brief(db, brief_id)

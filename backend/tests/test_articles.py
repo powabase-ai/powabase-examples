@@ -67,3 +67,18 @@ def test_generate_article_unknown_brief_404(monkeypatch):
     monkeypatch.setattr(svc, "get_brief", lambda db, bid: None)
     resp = make_client().post("/api/articles", json={"brief_id": BRIEF_ID})
     assert resp.status_code == 404
+
+
+def test_update_article_patches():
+    db = MagicMock()
+    db.fetch_one.return_value = {**ARTICLE, "title": "Edited"}
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    resp = TestClient(app).patch(
+        f"/api/articles/{ARTICLE['id']}", json={"title": "Edited"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "Edited"
+    sql = db.fetch_one.call_args.args[0].lower()
+    assert "update public.articles" in sql

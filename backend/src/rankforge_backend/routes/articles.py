@@ -6,7 +6,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..db import Database
-from ..models.article import Article, ArticleGenerate, ArticleSummary
+from ..models.article import (
+    Article,
+    ArticleGenerate,
+    ArticleSummary,
+    ArticleUpdate,
+)
 from ..powabase import PowabaseClient
 from ..services import generation as svc
 from ..services import scoring as scoring_svc
@@ -57,6 +62,16 @@ def list_articles(business_id: UUID, db: Database = Depends(get_db)):
 @router.get("/{article_id}", response_model=Article)
 def get_article(article_id: UUID, db: Database = Depends(get_db)):
     row = svc.get_article(db, article_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    return row
+
+
+@router.patch("/{article_id}", response_model=Article)
+def update_article(
+    article_id: UUID, payload: ArticleUpdate, db: Database = Depends(get_db)
+):
+    row = svc.update_article(db, article_id, payload.model_dump(exclude_unset=True))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     return row

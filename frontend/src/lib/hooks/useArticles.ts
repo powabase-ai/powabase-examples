@@ -7,6 +7,7 @@ import {
   TERMINAL_GENERATION,
   type Article,
   type ArticleSummary,
+  type ArticleUpdate,
 } from "@/lib/api";
 
 export function useArticles(businessId: string) {
@@ -48,6 +49,14 @@ export function useScoreArticle(id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => articlesApi.score(id),
+    onSuccess: (data) => qc.setQueryData(["article", id], data),
+  });
+}
+
+export function useUpdateArticle(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: ArticleUpdate) => articlesApi.update(id, data),
     onSuccess: (data) => qc.setQueryData(["article", id], data),
   });
 }
