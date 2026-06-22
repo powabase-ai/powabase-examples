@@ -27,19 +27,19 @@ export default function BrandLayout({
     }
   }, [id]);
 
+  // h-screen wrapper: react-resizable-panels sets the group's height to 100%,
+  // which needs a parent with a definite height (body is only min-h-full).
   return (
-    <ResizablePanelGroup
-      direction="horizontal"
-      autoSaveId="rankforge:shell"
-      className="h-screen"
-    >
-      <ResizablePanel defaultSize={16} minSize={11} maxSize={26}>
-        <AppSidebar brandId={id} />
-      </ResizablePanel>
-      <ResizableHandle />
-      <ResizablePanel minSize={50} className="overflow-y-auto">
-        {children}
-      </ResizablePanel>
-    </ResizablePanelGroup>
+    <div className="h-screen overflow-hidden">
+      <ResizablePanelGroup direction="horizontal" autoSaveId="rankforge:shell">
+        <ResizablePanel defaultSize={16} minSize={11} maxSize={26}>
+          <AppSidebar brandId={id} />
+        </ResizablePanel>
+        <ResizableHandle />
+        <ResizablePanel minSize={50} className="overflow-y-auto">
+          {children}
+        </ResizablePanel>
+      </ResizablePanelGroup>
+    </div>
   );
 }
