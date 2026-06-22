@@ -237,8 +237,9 @@ export default function ArticleView({
       <ResizableHandle />
 
       {/* Content */}
-      <ResizablePanel minSize={45} className="overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-8 py-8">
+      <ResizablePanel minSize={45}>
+        <div className="h-full overflow-y-auto">
+          <div className="mx-auto max-w-3xl px-8 py-8">
           <div className="mb-4 flex items-center justify-between">
             <Link
               href={`/brands/${id}/articles`}
@@ -325,6 +326,7 @@ export default function ArticleView({
               )}
             </>
           )}
+          </div>
         </div>
       </ResizablePanel>
     </ResizablePanelGroup>

@@ -36,8 +36,9 @@ export default function BrandLayout({
           <AppSidebar brandId={id} />
         </ResizablePanel>
         <ResizableHandle />
-        <ResizablePanel minSize={50} className="overflow-y-auto">
-          {children}
+        <ResizablePanel minSize={50}>
+          {/* Panels set inline overflow:hidden; scroll must live on an inner box. */}
+          <div className="h-full overflow-y-auto">{children}</div>
         </ResizablePanel>
       </ResizablePanelGroup>
     </div>
