@@ -47,3 +47,10 @@ class ArticleSummary(BaseModel):
     generation_status: str
     progress: dict = Field(default_factory=dict)
     updated_at: datetime
+
+
+class ArticleVersion(BaseModel):
+    id: UUID
+    article_id: UUID
+    created_at: datetime
+    word_count: int | None = None

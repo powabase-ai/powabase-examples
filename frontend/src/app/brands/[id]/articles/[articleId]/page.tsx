@@ -2,16 +2,34 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Loader2, Pencil, RefreshCw, Save, Sparkles, X } from "lucide-react";
+import {
+  ArrowLeft,
+  History,
+  Loader2,
+  Pencil,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Sparkles,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ArticleEditor } from "@/components/ArticleEditor";
 import { Markdown } from "@/components/Markdown";
 import {
   useArticle,
+  useArticleVersions,
   useOptimizeArticle,
+  useRestoreVersion,
   useUpdateArticle,
 } from "@/lib/hooks/useArticles";
 import {
@@ -20,6 +38,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
+import { ARTICLE_STATUSES } from "@/lib/api";
 import type { GroundingReport, Score, ScoreSignal } from "@/lib/api";
 
 const PHASE_LABEL: Record<string, string> = {
@@ -139,9 +158,12 @@ export default function ArticleView({
   const { data: a, isLoading } = useArticle(articleId);
   const optimize = useOptimizeArticle(articleId);
   const update = useUpdateArticle(articleId);
+  const versions = useArticleVersions(articleId);
+  const restore = useRestoreVersion(articleId);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [tab, setTab] = useState<"SEO" | "GEO" | "Grounding">("SEO");
+  const [showHistory, setShowHistory] = useState(false);
 
   const generating = a && !["done", "failed"].includes(a.generation_status);
   const dirty = !!a && editing && draft !== a.content_md;
@@ -176,6 +198,24 @@ export default function ArticleView({
   function cancelEdit() {
     if (dirty && !window.confirm("Discard unsaved changes?")) return;
     setEditing(false);
+  }
+
+  function changeStatus(next: string) {
+    update.mutate(
+      { status: next },
+      { onSuccess: () => toast.success(`Marked ${next.replace(/_/g, " ")}`) }
+    );
+  }
+
+  async function doRestore(versionId: string) {
+    try {
+      await restore.mutateAsync(versionId);
+      setShowHistory(false);
+      toast.success("Restored — re-optimizing");
+      optimize.mutate();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Restore failed");
+    }
   }
 
   return (
@@ -265,16 +305,38 @@ export default function ArticleView({
               <ArrowLeft className="size-4" /> Articles
             </Link>
             {a && a.generation_status === "done" && !editing && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setDraft(a.content_md);
-                  setEditing(true);
-                }}
-              >
-                <Pencil /> Edit
-              </Button>
+              <div className="flex items-center gap-2">
+                <select
+                  value={a.status}
+                  onChange={(e) => changeStatus(e.target.value)}
+                  disabled={update.isPending}
+                  className="h-8 rounded-md border border-input bg-card px-2 text-xs font-medium capitalize text-foreground outline-none focus:ring-1 focus:ring-[rgb(var(--ember))]"
+                  aria-label="Article status"
+                >
+                  {ARTICLE_STATUSES.map((s) => (
+                    <option key={s} value={s}>
+                      {s.replace(/_/g, " ")}
+                    </option>
+                  ))}
+                </select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowHistory(true)}
+                >
+                  <History /> History
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setDraft(a.content_md);
+                    setEditing(true);
+                  }}
+                >
+                  <Pencil /> Edit
+                </Button>
+              </div>
             )}
             {editing && (
               <span className="text-xs text-muted-foreground">
@@ -369,6 +431,53 @@ export default function ArticleView({
           </div>
         </div>
       </ResizablePanel>
+
+      <Dialog open={showHistory} onOpenChange={setShowHistory}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Version history</DialogTitle>
+          </DialogHeader>
+          <div className="max-h-[60vh] overflow-y-auto">
+            {versions.isLoading && (
+              <p className="py-4 text-sm text-muted-foreground">Loading…</p>
+            )}
+            {versions.data?.length === 0 && (
+              <p className="py-4 text-sm text-muted-foreground">
+                No prior versions yet. A snapshot is saved each time you edit and
+                save.
+              </p>
+            )}
+            {versions.data?.map((v) => (
+              <div
+                key={v.id}
+                className="flex items-center justify-between gap-3 border-t border-border py-3 first:border-0"
+              >
+                <div className="min-w-0 text-sm">
+                  <div className="font-medium">
+                    {new Date(v.created_at).toLocaleString()}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    <span className="font-data">{v.word_count ?? 0}</span> words
+                  </div>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => doRestore(v.id)}
+                  disabled={restore.isPending}
+                >
+                  {restore.isPending && restore.variables === v.id ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <RotateCcw />
+                  )}
+                  Restore
+                </Button>
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </ResizablePanelGroup>
   );
 }

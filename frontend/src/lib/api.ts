@@ -229,6 +229,28 @@ export interface Article extends ArticleSummary {
 
 export const TERMINAL_GENERATION: GenerationStatus[] = ["done", "failed"];
 
+export type ArticleStatus =
+  | "draft"
+  | "in_review"
+  | "approved"
+  | "published"
+  | "archived";
+
+export const ARTICLE_STATUSES: ArticleStatus[] = [
+  "draft",
+  "in_review",
+  "approved",
+  "published",
+  "archived",
+];
+
+export interface ArticleVersion {
+  id: string;
+  article_id: string;
+  created_at: string;
+  word_count?: number | null;
+}
+
 export const articlesApi = {
   listByBrand: (businessId: string) =>
     request<ArticleSummary[]>(`/api/articles?business_id=${businessId}`),
@@ -246,6 +268,12 @@ export const articlesApi = {
     request<Article>(`/api/articles/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
+    }),
+  versions: (id: string) =>
+    request<ArticleVersion[]>(`/api/articles/${id}/versions`),
+  restoreVersion: (id: string, versionId: string) =>
+    request<Article>(`/api/articles/${id}/versions/${versionId}/restore`, {
+      method: "POST",
     }),
 };
 

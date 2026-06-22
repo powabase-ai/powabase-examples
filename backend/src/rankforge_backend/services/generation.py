@@ -294,6 +294,38 @@ def list_articles(db: Database, business_id: UUID) -> list[dict[str, Any]]:
     )
 
 
+def list_versions(db: Database, article_id: UUID) -> list[dict[str, Any]]:
+    rows = db.fetch_all(
+        "select id, article_id, created_at, content_md from public.article_versions "
+        "where article_id = %s order by created_at desc",
+        (article_id,),
+    )
+    return [
+        {
+            "id": r["id"],
+            "article_id": r["article_id"],
+            "created_at": r["created_at"],
+            "word_count": len((r["content_md"] or "").split()),
+        }
+        for r in rows
+    ]
+
+
+def restore_version(
+    db: Database, article_id: UUID, version_id: UUID
+) -> dict[str, Any] | None:
+    """Restore a prior version. update_article snapshots the current content first,
+    so a restore is itself undoable."""
+    v = db.fetch_one(
+        "select content_md from public.article_versions "
+        "where id = %s and article_id = %s",
+        (version_id, article_id),
+    )
+    if v is None:
+        return None
+    return update_article(db, article_id, {"content_md": v["content_md"]})
+
+
 def update_article(
     db: Database, article_id: UUID, fields: dict[str, Any]
 ) -> dict[str, Any] | None:

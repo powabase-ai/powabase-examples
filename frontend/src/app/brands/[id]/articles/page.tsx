@@ -1,12 +1,14 @@
 "use client";
 
-import { use } from "react";
+import { use, useState } from "react";
 import Link from "next/link";
-import { Loader2, PenLine } from "lucide-react";
+import { Loader2, PenLine, Search } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { useArticles } from "@/lib/hooks/useArticles";
-import type { ArticleSummary } from "@/lib/api";
+import { ARTICLE_STATUSES, type ArticleStatus, type ArticleSummary } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 function GenBadge({ a }: { a: ArticleSummary }) {
   if (a.generation_status === "done")
@@ -31,15 +33,52 @@ export default function ArticlesList({
 }) {
   const { id } = use(params);
   const { data: articles, isLoading } = useArticles(id);
+  const [q, setQ] = useState("");
+  const [status, setStatus] = useState<ArticleStatus | "all">("all");
+
+  const filtered = articles?.filter(
+    (a) =>
+      (status === "all" || a.status === status) &&
+      a.title.toLowerCase().includes(q.toLowerCase())
+  );
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-8">
-      <div className="mb-6 flex items-center gap-2">
+      <div className="mb-4 flex items-center gap-2">
         <PenLine className="size-5 text-muted-foreground" />
         <h1 className="font-display text-2xl font-bold">Articles</h1>
       </div>
 
+      <div className="mb-5 flex flex-col gap-3">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+          <Input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search articles…"
+            className="pl-8"
+          />
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {(["all", ...ARTICLE_STATUSES] as const).map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatus(s)}
+              className={cn(
+                "rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors",
+                status === s
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-secondary text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {s === "all" ? "All" : s.replace(/_/g, " ")}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+
       {articles?.length === 0 && (
         <Card className="border-dashed">
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
@@ -48,9 +87,12 @@ export default function ArticlesList({
           </CardContent>
         </Card>
       )}
+      {articles && articles.length > 0 && filtered?.length === 0 && (
+        <p className="text-sm text-muted-foreground">No articles match.</p>
+      )}
 
       <div className="grid gap-3">
-        {articles?.map((a) => (
+        {filtered?.map((a) => (
           <Link key={a.id} href={`/brands/${id}/articles/${a.id}`}>
             <Card className="transition-colors hover:border-[rgb(var(--ember))]/40">
               <CardContent className="flex items-center justify-between gap-4 py-4">
@@ -66,7 +108,7 @@ export default function ArticlesList({
                   </div>
                 </div>
                 <span className="shrink-0 rounded bg-secondary px-2 py-0.5 text-xs capitalize text-muted-foreground">
-                  {a.status}
+                  {a.status.replace(/_/g, " ")}
                 </span>
               </CardContent>
             </Card>

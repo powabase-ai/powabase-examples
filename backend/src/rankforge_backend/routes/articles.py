@@ -11,6 +11,7 @@ from ..models.article import (
     ArticleGenerate,
     ArticleSummary,
     ArticleUpdate,
+    ArticleVersion,
 )
 from ..powabase import PowabaseClient
 from ..services import generation as svc
@@ -90,4 +91,21 @@ def update_article(
     row = svc.update_article(db, article_id, payload.model_dump(exclude_unset=True))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    return row
+
+
+@router.get("/{article_id}/versions", response_model=list[ArticleVersion])
+def list_versions(article_id: UUID, db: Database = Depends(get_db)):
+    return svc.list_versions(db, article_id)
+
+
+@router.post(
+    "/{article_id}/versions/{version_id}/restore", response_model=Article
+)
+def restore_version(
+    article_id: UUID, version_id: UUID, db: Database = Depends(get_db)
+):
+    row = svc.restore_version(db, article_id, version_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "version not found")
     return row

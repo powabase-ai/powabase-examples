@@ -68,3 +68,22 @@ export function useOptimizeArticle(id: string) {
     onSuccess: (data) => qc.setQueryData(["article", id], data),
   });
 }
+
+export function useArticleVersions(id: string) {
+  return useQuery({
+    queryKey: ["versions", id],
+    queryFn: () => articlesApi.versions(id),
+    enabled: !!id,
+  });
+}
+
+export function useRestoreVersion(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (versionId: string) => articlesApi.restoreVersion(id, versionId),
+    onSuccess: (data) => {
+      qc.setQueryData(["article", id], data);
+      qc.invalidateQueries({ queryKey: ["versions", id] });
+    },
+  });
+}
