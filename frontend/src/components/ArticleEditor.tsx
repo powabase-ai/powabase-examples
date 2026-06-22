@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import LinkExt from "@tiptap/extension-link";
@@ -49,7 +50,7 @@ function Tb({
   );
 }
 
-function Toolbar({ editor }: { editor: Editor }) {
+function Toolbar({ editor, actions }: { editor: Editor; actions?: ReactNode }) {
   const setLink = () => {
     const prev = editor.getAttributes("link").href as string | undefined;
     const url = window.prompt("Link URL", prev ?? "https://");
@@ -75,6 +76,7 @@ function Toolbar({ editor }: { editor: Editor }) {
       <span className="mx-1 h-5 w-px bg-border" />
       <Tb label="Undo" icon={Undo} onClick={() => editor.chain().focus().undo().run()} />
       <Tb label="Redo" icon={Redo} onClick={() => editor.chain().focus().redo().run()} />
+      {actions && <div className="ml-auto flex items-center gap-2">{actions}</div>}
     </div>
   );
 }
@@ -82,9 +84,11 @@ function Toolbar({ editor }: { editor: Editor }) {
 export function ArticleEditor({
   value,
   onChange,
+  actions,
 }: {
   value: string;
   onChange: (md: string) => void;
+  actions?: ReactNode;
 }) {
   const editor = useEditor({
     immediatelyRender: false, // Next.js SSR
@@ -107,7 +111,7 @@ export function ArticleEditor({
 
   return (
     <div className="rounded-md border border-border bg-card">
-      <Toolbar editor={editor} />
+      <Toolbar editor={editor} actions={actions} />
       <EditorContent editor={editor} />
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Loader2, Pencil, RefreshCw, Save, Sparkles, X } from "lucide-react";
 import { toast } from "sonner";
@@ -144,6 +144,18 @@ export default function ArticleView({
   const [tab, setTab] = useState<"SEO" | "GEO" | "Grounding">("SEO");
 
   const generating = a && !["done", "failed"].includes(a.generation_status);
+  const dirty = !!a && editing && draft !== a.content_md;
+
+  // Warn before leaving with unsaved edits.
+  useEffect(() => {
+    if (!dirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
   const schemaTypes =
     ((a?.json_ld?.["@graph"] as Array<{ "@type"?: string }>) ?? [])
       .map((g) => g["@type"])
@@ -159,6 +171,11 @@ export default function ArticleView({
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Save failed");
     }
+  }
+
+  function cancelEdit() {
+    if (dirty && !window.confirm("Discard unsaved changes?")) return;
+    setEditing(false);
   }
 
   return (
@@ -260,14 +277,9 @@ export default function ArticleView({
               </Button>
             )}
             {editing && (
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={() => setEditing(false)}>
-                  <X /> Cancel
-                </Button>
-                <Button variant="gold" size="sm" onClick={save} disabled={update.isPending}>
-                  {update.isPending ? <Loader2 className="animate-spin" /> : <Save />} Save
-                </Button>
-              </div>
+              <span className="text-xs text-muted-foreground">
+                Editing — controls are in the toolbar below
+              </span>
             )}
           </div>
 
@@ -315,7 +327,35 @@ export default function ArticleView({
 
               {editing ? (
                 <div className="mt-8">
-                  <ArticleEditor value={a.content_md} onChange={setDraft} />
+                  <ArticleEditor
+                    value={a.content_md}
+                    onChange={setDraft}
+                    actions={
+                      <>
+                        {dirty && (
+                          <span className="text-xs font-medium text-[rgb(var(--ember))]">
+                            Unsaved
+                          </span>
+                        )}
+                        <Button variant="outline" size="sm" onClick={cancelEdit}>
+                          <X /> Cancel
+                        </Button>
+                        <Button
+                          variant="gold"
+                          size="sm"
+                          onClick={save}
+                          disabled={update.isPending || !dirty}
+                        >
+                          {update.isPending ? (
+                            <Loader2 className="animate-spin" />
+                          ) : (
+                            <Save />
+                          )}{" "}
+                          Save
+                        </Button>
+                      </>
+                    }
+                  />
                 </div>
               ) : (
                 a.content_md && (
