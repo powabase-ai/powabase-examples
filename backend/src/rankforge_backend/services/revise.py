@@ -126,13 +126,41 @@ async def fix_meta(
         gen_svc._update(db, article_id, **fields)
 
 
-def _det_proxy(md: str, title: str, meta: str | None, brief: dict) -> int:
-    """Cheap deterministic SEO+GEO proxy (no LLM) to gate whether a revision helps."""
+def _gap(score: dict) -> int:
+    """Points short of target on one axis (0 once met)."""
+    return max(0, score["target"] - score["total"])
+
+
+def _decide(cs_seo: dict, cs_geo: dict, ns_seo: dict, ns_geo: dict) -> bool:
+    """Accept a revision iff it closes (or holds) the SEO/GEO gap to target without
+    pushing an already-met axis below its target. Measuring distance-to-target
+    rather than raw totals means an above-target axis can't veto a revision that
+    improves the failing one."""
+    for cur, new in ((cs_seo, ns_seo), (cs_geo, ns_geo)):
+        if cur["total"] >= cur["target"] and new["total"] < cur["target"]:
+            return False  # don't regress a met axis below its target
+    cur_gap = _gap(cs_seo) + _gap(cs_geo)
+    new_gap = _gap(ns_seo) + _gap(ns_geo)
+    # Allow gap-neutral edits through; the outer combined-score check (which also
+    # weighs grounding) then decides whether the pass actually helped.
+    return new_gap <= cur_gap
+
+
+def _det_scores(md: str, title: str, meta: str | None, brief: dict) -> tuple[dict, dict]:
+    """Cheap deterministic SEO + GEO scores (no LLM) for the commit gate."""
     from . import scoring
 
     seo = scoring.score_seo(md, title, meta, brief)
     geo = scoring.score_geo(md, brief, None, has_structured_data=True)
-    return seo["total"] + geo["total"]
+    return seo, geo
+
+
+def _accept_revision(
+    cur_md: str, new_md: str, title: str, meta: str | None, brief: dict
+) -> bool:
+    cs_seo, cs_geo = _det_scores(cur_md, title, meta, brief)
+    ns_seo, ns_geo = _det_scores(new_md, title, meta, brief)
+    return _decide(cs_seo, cs_geo, ns_seo, ns_geo)
 
 
 # --- evaluation helpers (pure) ---
@@ -318,12 +346,12 @@ async def refine(
             # Guard against a truncated/empty revision clobbering a good draft.
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
-            # Don't commit a revision that lowers deterministic quality.
+            # Commit only if the revision moves the failing axis toward target
+            # without regressing a met axis (an above-target GEO can't veto an
+            # SEO-improving edit).
             title = article.get("meta_title") or article.get("title") or ""
             meta = article.get("meta_description")
-            if _det_proxy(new_md, title, meta, brief) < _det_proxy(
-                cur_md, title, meta, brief
-            ):
+            if not _accept_revision(cur_md, new_md, title, meta, brief):
                 break
             gen_svc._update(db, article_id, content_md=new_md)
             await quality.reflect(client, db, article_id)

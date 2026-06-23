@@ -95,6 +95,25 @@ async def index_run_sources(
     return len(source_ids)
 
 
+# Post-filter the reranked results: the reranker (zerank-2) returns normalized
+# 0–1 relevance scores. Drop chunks that are either clearly irrelevant (absolute
+# floor — guards against junk when a scoped query has no good match) or far below
+# the best match (relative — trims the weak tail that only dilutes grounding).
+_MIN_SCORE = 0.5
+_REL_RATIO = 0.75
+
+
+def _filter_by_score(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scores = [
+        r["score"] for r in results if isinstance(r.get("score"), (int, float))
+    ]
+    if not scores:
+        return results  # API didn't return scores → can't filter; keep as-is
+    floor = max(_MIN_SCORE, max(scores) * _REL_RATIO)
+    kept = [r for r in results if (r.get("score") or 0) >= floor]
+    return kept or results[:1]  # never starve a non-empty result set
+
+
 async def search(
     client: PowabaseClient,
     kb_id: str,
@@ -102,11 +121,15 @@ async def search(
     *,
     top_k: int = 20,
     source_ids: list[str] | None = None,
+    filter_weak: bool = True,
 ) -> list[dict[str, Any]]:
     # Resilient: an empty/partial KB should degrade to ungrounded drafting, not fail.
     try:
-        return await client.search_kb(
+        results = await client.search_kb(
             kb_id, query, top_k=top_k, source_ids=source_ids
         )
     except Exception:  # noqa: BLE001
         return []
+    # Filtering trims weak context for *generation* (precision). Fact-checking wants
+    # recall — find any supporting evidence — so callers there pass filter_weak=False.
+    return _filter_by_score(results) if filter_weak else results
