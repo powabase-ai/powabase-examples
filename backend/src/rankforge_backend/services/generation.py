@@ -23,10 +23,14 @@ WRITER_MODEL = "claude-sonnet-4-6"
 _SYSTEM_PROMPT = (
     "You are RankForge's senior content writer. You write one part of a long-form "
     "SEO/GEO blog article at a time, in clean Markdown. Ground every factual claim in "
-    "the provided source excerpts and cite the relevant source inline as a Markdown "
-    "link. Write in the brand's voice — specific, useful, concrete. Never invent "
-    "statistics. Output only the Markdown for the requested part (starting at its "
-    "heading), with no preamble or sign-off."
+    "the provided source excerpts and cite sources inline as Markdown links. When you "
+    "cite, weave the link into the sentence so the linked (anchor) text is a natural, "
+    "descriptive phrase that reads well in context — NEVER the source's page title, "
+    "site name, or a bare URL. Across your writing, spread citations among DIFFERENT "
+    "source domains instead of repeatedly linking the same one. Write in the brand's "
+    "voice — specific, useful, concrete. Never invent statistics. Output only the "
+    "Markdown for the requested part (starting at its heading), with no preamble or "
+    "sign-off."
 )
 
 _ARTICLE_COLUMNS = (
@@ -79,13 +83,21 @@ def parse_sections(headings: list[str]) -> list[dict[str, Any]]:
 
 
 def _grounding_block(
-    chunks: list[dict[str, Any]], url_by_source: dict[str, str]
+    chunks: list[dict[str, Any]],
+    url_by_source: dict[str, str],
+    per_source: int = 2,
 ) -> str:
     if not chunks:
         return "(no grounding sources — write carefully and avoid specific claims)"
+    # Cap chunks per source so the writer sees — and can cite — a spread of domains.
+    used: dict[str, int] = {}
     lines = []
     for c in chunks:
-        src = url_by_source.get(c.get("source_id")) or c.get("source_id") or "source"
+        sid = c.get("source_id")
+        if used.get(sid, 0) >= per_source:
+            continue
+        used[sid] = used.get(sid, 0) + 1
+        src = url_by_source.get(sid) or sid or "source"
         lines.append(f"- ({src}) {c.get('text', '')[:500]}")
     return "\n".join(lines)
 
@@ -152,7 +164,9 @@ async def _draft_part(
         f"Secondary keywords: {', '.join(ctx.get('secondary_keywords') or [])}\n"
         f"Audience / brand: {ctx.get('audience') or 'n/a'}\n\n"
         f"{instruction}\n\n"
-        f"Grounding excerpts (cite the relevant source URL inline as a Markdown link):\n"
+        "Grounding excerpts — when you use one, cite it inline with NATURAL anchor "
+        "text (a descriptive phrase, never the page title or a bare URL), and vary "
+        "which source domain you cite:\n"
         f"{_grounding_block(chunks, url_by_source)}\n\n"
         "Output only the Markdown."
     )
@@ -266,17 +280,22 @@ async def run_generation_task(
 
         # 6) reflect/fact-check, GEO optimize (JSON-LD), then SEO + GEO scoring
         #    (local import avoids a circular dependency)
-        from . import geo_optimize, quality, scoring
+        from . import geo_optimize, quality, revise, scoring
 
         await quality.reflect(client, db, article_id)
         await geo_optimize.optimize_and_store(client, db, article_id)
         await scoring.score_and_store(client, db, article_id)
 
+        # 7) auto-revise against the SEO/GEO/Grounding evaluators until satisfactory
+        await revise.refine(client, db, article_id)
+
+        final = get_article(db, article_id)
+        final_md = (final.get("content_md") if final else content_md) or content_md
         _update(
             db, article_id,
             generation_status="done",
             progress={"phase": "done", "total": total, "done": total,
-                      "word_count": len(content_md.split())},
+                      "word_count": len(final_md.split())},
         )
     except Exception as e:  # noqa: BLE001
         _update(db, article_id, generation_status="failed", generation_error=str(e))

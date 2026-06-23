@@ -11,6 +11,7 @@ Runs in the background; the research_run row carries status/progress for polling
 import asyncio
 import re
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 from psycopg.types.json import Json
@@ -32,8 +33,11 @@ _SYSTEM_PROMPT = (
     "You are RankForge's SERP analyst. Given a topic, use web_search (Exa) to "
     "analyze the search results. Return the top organic results (rank, title, url, "
     "snippet), People-Also-Ask questions, related queries, keyword clusters, and the "
-    "overall search intent. Do NOT scrape pages — only search. Finish by outputting "
-    "one JSON object in a single ```json fenced block and nothing after it."
+    "overall search intent. Favor a DIVERSE set of sources across DIFFERENT domains "
+    "and source types — official docs, independent analyses, reputable news, and "
+    "practitioner blogs — rather than many pages from the same site. Do NOT scrape "
+    "pages — only search. Finish by outputting one JSON object in a single ```json "
+    "fenced block and nothing after it."
 )
 
 _SCHEMA_HINT = """{
@@ -89,6 +93,34 @@ def _extract_headings(md: str, limit: int = 40) -> list[str]:
 def _first_title(md: str) -> str | None:
     m = re.search(r"^#\s+(.+?)\s*$", md, re.MULTILINE)
     return m.group(1).strip() if m else None
+
+
+def _domain(url: str) -> str:
+    try:
+        return urlparse(url).netloc.replace("www.", "").lower() or url.lower()
+    except ValueError:
+        return url.lower()
+
+
+def diverse_urls(urls: list[str], n: int, per_domain: int = 1) -> list[str]:
+    """Pick up to n URLs preferring distinct domains (so grounding/citations don't
+    all trace back to one parent source); backfill from remaining if too few."""
+    out: list[str] = []
+    counts: dict[str, int] = {}
+    for u in urls:
+        d = _domain(u)
+        if counts.get(d, 0) >= per_domain:
+            continue
+        counts[d] = counts.get(d, 0) + 1
+        out.append(u)
+        if len(out) >= n:
+            return out
+    for u in urls:  # backfill to reach n if there weren't enough distinct domains
+        if u not in out:
+            out.append(u)
+            if len(out) >= n:
+                break
+    return out
 
 
 # --- row helpers ---
@@ -184,7 +216,8 @@ async def run_research_task(
             "related_queries": search.related_queries,
         }
         title_by_url = {r.url: r.title for r in search.serp if r.url}
-        urls = [r.url for r in search.serp if r.url][:scrape_n]
+        # Prefer distinct domains so the article's grounding spans many parent sources.
+        urls = diverse_urls([r.url for r in search.serp if r.url], scrape_n)
         _update(
             db,
             run_id,

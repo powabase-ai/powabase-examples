@@ -1,0 +1,330 @@
+"""Auto-revision loop.
+
+After the first draft is scored, iterate it against the built-in evaluators —
+SEO, GEO, and Grounding — until it meets target (or stops improving). Each pass
+feeds the failing signals' concrete fixes and the flagged grounding claims to a
+`rankforge-reviser` agent, plus a fresh spread of diverse-domain source excerpts,
+then re-runs fact-check → JSON-LD → scoring. Capped so it always terminates.
+"""
+
+from typing import Any
+from uuid import UUID
+
+from ..db import Database
+from ..powabase import PowabaseClient
+from ..util import extract_json
+from . import brief as brief_svc
+from . import business_profiles as brands
+from . import generation as gen_svc
+from . import grounding
+from . import research as research_svc
+
+REVISER_AGENT_NAME = "rankforge-reviser"
+REVISER_MODEL = "claude-sonnet-4-6"
+
+GROUNDING_TARGET = 70
+MAX_REVISIONS = 2
+_SIGNAL_FLOOR = 70  # only surface fixes for signals scoring below this
+
+_SYSTEM = (
+    "You are RankForge's revising editor. You take a full SEO/GEO blog article and a "
+    "list of concrete issues, and return an improved full article that fixes them "
+    "while preserving the structure, headings, voice, and good existing content. Keep "
+    "roughly the same length or longer. When you cite a source, weave the link into a "
+    "natural descriptive phrase (never the page title or a bare URL) and spread "
+    "citations across DIFFERENT source domains. Never invent statistics. Output ONLY "
+    "the full revised article in Markdown, starting at the H1 — no preamble or notes."
+)
+
+_reviser_agent_id: str | None = None
+
+
+async def ensure_reviser_agent(client: PowabaseClient) -> str:
+    global _reviser_agent_id
+    if _reviser_agent_id:
+        return _reviser_agent_id
+    listing = await client.get_agents()
+    for a in listing.get("agents", []):
+        if a.get("name") == REVISER_AGENT_NAME:
+            _reviser_agent_id = a["id"]
+            return _reviser_agent_id
+    created = await client.create_agent(
+        name=REVISER_AGENT_NAME,
+        model=REVISER_MODEL,
+        system_prompt=_SYSTEM,
+        settings={"temperature": 0.3},
+    )
+    _reviser_agent_id = created.get("id") or created.get("agent", {}).get("id")
+    return _reviser_agent_id
+
+
+META_AGENT_NAME = "rankforge-meta"
+_META_SYSTEM = (
+    "You write SEO metadata and return ONLY a single JSON object — no prose or "
+    "code fences."
+)
+_META_KEYS = {"keyword_title", "keyword_early", "title_length", "meta_length"}
+_meta_agent_id: str | None = None
+
+
+async def ensure_meta_agent(client: PowabaseClient) -> str:
+    global _meta_agent_id
+    if _meta_agent_id:
+        return _meta_agent_id
+    listing = await client.get_agents()
+    for a in listing.get("agents", []):
+        if a.get("name") == META_AGENT_NAME:
+            _meta_agent_id = a["id"]
+            return _meta_agent_id
+    created = await client.create_agent(
+        name=META_AGENT_NAME,
+        model=REVISER_MODEL,
+        system_prompt=_META_SYSTEM,
+        settings={"temperature": 0},
+    )
+    _meta_agent_id = created.get("id") or created.get("agent", {}).get("id")
+    return _meta_agent_id
+
+
+def _meta_failing(seo: dict | None) -> bool:
+    """True if SEO loses points on title/meta-bound signals (content can't fix these)."""
+    return bool(seo) and any(
+        s.get("key") in _META_KEYS and s.get("score", 100) < _SIGNAL_FLOOR
+        for s in seo.get("signals", [])
+    )
+
+
+async def fix_meta(
+    client: PowabaseClient, db: Database, article_id: UUID, article: dict, brief: dict
+) -> None:
+    """Rewrite meta_title / meta_description to satisfy the title/meta SEO signals."""
+    pk = brief.get("primary_keyword") or ""
+    msg = (
+        "Write SEO metadata for the article.\n"
+        f"Primary keyword: {pk or 'n/a'}\n"
+        f"Working title: {article.get('title') or ''}\n\n"
+        'Return ONLY JSON: {"meta_title": string of at most 60 characters that '
+        'includes the primary keyword, "meta_description": string of 120-160 '
+        "characters, compelling, including the primary keyword}."
+    )
+    try:
+        agent_id = await ensure_meta_agent(client)
+        res = await client.run_agent(agent_id, msg)
+        data = extract_json(res.get("content") or "")
+    except Exception:  # noqa: BLE001 — advisory
+        return
+    fields: dict[str, Any] = {}
+    if (mt := (data.get("meta_title") or "").strip()):
+        fields["meta_title"] = mt
+    if (md := (data.get("meta_description") or "").strip()):
+        fields["meta_description"] = md
+    if fields:
+        gen_svc._update(db, article_id, **fields)
+
+
+def _det_proxy(md: str, title: str, meta: str | None, brief: dict) -> int:
+    """Cheap deterministic SEO+GEO proxy (no LLM) to gate whether a revision helps."""
+    from . import scoring
+
+    seo = scoring.score_seo(md, title, meta, brief)
+    geo = scoring.score_geo(md, brief, None, has_structured_data=True)
+    return seo["total"] + geo["total"]
+
+
+# --- evaluation helpers (pure) ---
+def collect_issues(
+    seo: dict | None, geo: dict | None, grounding_report: dict | None
+) -> list[str]:
+    """Turn failing evaluator signals into concrete revision instructions."""
+    issues: list[str] = []
+    for score in (seo, geo):
+        if not score or score.get("met"):
+            continue
+        for s in score.get("signals", []):
+            if s.get("score", 100) < _SIGNAL_FLOOR:
+                for fix in s.get("fixes", []):
+                    issues.append(f"[{s['label']}] {fix}")
+    if grounding_report:
+        for f in (grounding_report.get("flagged") or [])[:6]:
+            issues.append(
+                f"[Grounding] Claim \"{(f.get('claim') or '')[:90]}\": "
+                f"{f.get('issue', '')} — {f.get('suggestion', '')}".strip()
+            )
+    return issues
+
+
+def satisfied(
+    seo: dict | None, geo: dict | None, grounding_report: dict | None
+) -> bool:
+    if not (seo and seo.get("met")):
+        return False
+    if not (geo and geo.get("met")):
+        return False
+    gs = grounding_report.get("grounding_score") if grounding_report else None
+    return gs is None or gs >= GROUNDING_TARGET
+
+
+def combined_score(
+    seo: dict | None, geo: dict | None, grounding_report: dict | None
+) -> int:
+    total = (seo or {}).get("total", 0) + (geo or {}).get("total", 0)
+    total += (grounding_report or {}).get("grounding_score") or 0
+    return total
+
+
+# --- context (diverse-domain excerpts) ---
+async def _diverse_excerpts(
+    client: PowabaseClient,
+    kb_id: str | None,
+    brief: dict,
+    source_ids: list[str] | None,
+    url_by_source: dict[str, str],
+    *,
+    limit: int = 12,
+    per_source: int = 2,
+) -> str:
+    if not kb_id:
+        return "(no additional sources available)"
+    queries = [
+        brief.get("primary_keyword"),
+        brief.get("topic"),
+        *(brief.get("secondary_keywords") or [])[:3],
+    ]
+    seen_chunk: set[str] = set()
+    per: dict[str, int] = {}
+    lines: list[str] = []
+    for q in queries:
+        if not q:
+            continue
+        for c in await grounding.search(
+            client, kb_id, q, top_k=8, source_ids=source_ids
+        ):
+            cid, sid = c.get("chunk_id"), c.get("source_id")
+            if cid and cid in seen_chunk:
+                continue
+            if per.get(sid, 0) >= per_source:
+                continue
+            if cid:
+                seen_chunk.add(cid)
+            per[sid] = per.get(sid, 0) + 1
+            url = url_by_source.get(sid) or sid or "source"
+            lines.append(f"- ({url}) {c.get('text', '')[:400]}")
+            if len(lines) >= limit:
+                return "\n".join(lines)
+    return "\n".join(lines) or "(no additional sources available)"
+
+
+def _article_context(
+    db: Database, article: dict
+) -> tuple[list[str] | None, dict[str, str], str | None]:
+    """Derive (source_ids, url_by_source, kb_id) from the article's research run."""
+    source_ids: list[str] | None = None
+    url_by_source: dict[str, str] = {}
+    rrid = article.get("research_run_id")
+    if rrid:
+        srcs = research_svc.list_sources(db, rrid)
+        source_ids = [s["source_id"] for s in srcs if s.get("source_id")] or None
+        url_by_source = {
+            s["source_id"]: s["url"]
+            for s in srcs
+            if s.get("source_id") and s.get("url")
+        }
+    kb_id = None
+    if article.get("business_id"):
+        brand = brands.get_profile(db, article["business_id"])
+        kb_id = brand.get("brand_kb_id") if brand else None
+    return source_ids, url_by_source, kb_id
+
+
+async def _revise_once(
+    client: PowabaseClient, agent_id: str, md: str, issues: list[str], excerpts: str
+) -> str:
+    issue_text = "\n".join(f"- {i}" for i in issues[:14])
+    msg = (
+        "Revise the article below to fix these issues. Preserve its structure, "
+        "headings, voice, and good existing content and citations; keep roughly the "
+        "same length or longer.\n\n"
+        f"ISSUES TO FIX:\n{issue_text}\n\n"
+        "ADDITIONAL SOURCES you may cite (use natural anchor text, vary the domain):\n"
+        f"{excerpts}\n\n"
+        "Output ONLY the full revised article in Markdown, starting at the H1.\n\n"
+        f"---ARTICLE---\n{md}"
+    )
+    # Stream (/run/stream): a full-article rewrite is too large for the buffered
+    # /run endpoint, which 504s on long single-shot generations.
+    res = await client.run_agent_collect(agent_id, msg)
+    if res.get("error"):
+        raise RuntimeError(f"revision failed: {res['error']}")
+    return (res.get("content") or "").strip()
+
+
+async def refine(
+    client: PowabaseClient, db: Database, article_id: UUID
+) -> dict[str, Any] | None:
+    """Iterate the article against the evaluators until satisfactory or stalled."""
+    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+
+    article = gen_svc.get_article(db, article_id)
+    if article is None:
+        return None
+    brief = (
+        brief_svc.get_brief(db, article["brief_id"])
+        if article.get("brief_id")
+        else {}
+    ) or {}
+    source_ids, url_by_source, kb_id = _article_context(db, article)
+
+    # One-time metadata fix: title/meta-bound SEO signals can't be fixed by revising
+    # the body, so rewrite them up front, then re-score.
+    if _meta_failing(article.get("seo_score")):
+        await fix_meta(client, db, article_id, article, brief)
+        await scoring.score_and_store(client, db, article_id)
+
+    agent_id: str | None = None
+    prev_combined = -1
+    for i in range(MAX_REVISIONS):
+        article = gen_svc.get_article(db, article_id)
+        seo = article.get("seo_score")
+        geo = article.get("geo_score")
+        gr = article.get("grounding_report")
+        if satisfied(seo, geo, gr):
+            break
+        score_now = combined_score(seo, geo, gr)
+        if score_now <= prev_combined:  # last pass didn't help — stop
+            break
+        prev_combined = score_now
+        issues = collect_issues(seo, geo, gr)
+        if not issues:
+            break
+
+        gen_svc._update(
+            db, article_id,
+            generation_status="refining",
+            progress={"phase": "refining", "iteration": i + 1, "total": MAX_REVISIONS},
+        )
+        try:
+            if agent_id is None:
+                agent_id = await ensure_reviser_agent(client)
+            excerpts = await _diverse_excerpts(
+                client, kb_id, brief, source_ids, url_by_source
+            )
+            cur_md = article["content_md"] or ""
+            new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
+            # Guard against a truncated/empty revision clobbering a good draft.
+            if not new_md or len(new_md) < 0.6 * len(cur_md):
+                break
+            # Don't commit a revision that lowers deterministic quality.
+            title = article.get("meta_title") or article.get("title") or ""
+            meta = article.get("meta_description")
+            if _det_proxy(new_md, title, meta, brief) < _det_proxy(
+                cur_md, title, meta, brief
+            ):
+                break
+            gen_svc._update(db, article_id, content_md=new_md)
+            await quality.reflect(client, db, article_id)
+            await geo_optimize.optimize_and_store(client, db, article_id)
+            await scoring.score_and_store(client, db, article_id)
+        except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
+            break
+
+    return gen_svc.get_article(db, article_id)

@@ -21,6 +21,7 @@ from ..services import comments as comments_svc
 from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
 from ..services import quality as quality_svc
+from ..services import revise as revise_svc
 from ..services import scoring as scoring_svc
 from .deps import get_db, get_powabase
 
@@ -81,6 +82,42 @@ async def optimize_article(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     await quality_svc.reflect(pb, db, article_id)
     await scoring_svc.score_and_store(pb, db, article_id)
+    return svc.get_article(db, article_id)
+
+
+async def _refine_and_finish(pb: PowabaseClient, db: Database, article_id: UUID) -> None:
+    try:
+        await revise_svc.refine(pb, db, article_id)
+    finally:
+        # Always return the article to a terminal status, even if a pass failed.
+        final = svc.get_article(db, article_id)
+        svc._update(
+            db, article_id,
+            generation_status="done",
+            progress={
+                "phase": "done",
+                "word_count": len(((final or {}).get("content_md") or "").split()),
+            },
+        )
+
+
+@router.post("/{article_id}/refine", response_model=Article)
+async def refine_article(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+):
+    """Auto-iterate the draft against the SEO/GEO/Grounding evaluators (async)."""
+    if svc.get_article(db, article_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    svc._update(
+        db, article_id,
+        generation_status="refining",
+        progress={"phase": "refining", "iteration": 0, "total": revise_svc.MAX_REVISIONS},
+    )
+    task = asyncio.create_task(_refine_and_finish(pb, db, article_id))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
     return svc.get_article(db, article_id)
 
 

@@ -32,6 +32,7 @@ import {
   useArticle,
   useArticleVersions,
   useOptimizeArticle,
+  useRefineArticle,
   useRestoreVersion,
   useUpdateArticle,
 } from "@/lib/hooks/useArticles";
@@ -51,6 +52,7 @@ const PHASE_LABEL: Record<string, string> = {
   outlining: "Outlining…",
   drafting: "Drafting sections…",
   optimizing: "Optimizing & scoring…",
+  refining: "Refining to hit SEO/GEO targets…",
   queued: "Queued…",
 };
 
@@ -162,6 +164,7 @@ export default function ArticleView({
   const { id, articleId } = use(params);
   const { data: a, isLoading } = useArticle(articleId);
   const optimize = useOptimizeArticle(articleId);
+  const refine = useRefineArticle(articleId);
   const update = useUpdateArticle(articleId);
   const versions = useArticleVersions(articleId);
   const restore = useRestoreVersion(articleId);
@@ -294,16 +297,45 @@ export default function ArticleView({
               </p>
             )}
             {a && a.generation_status === "done" && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-4 w-full"
-                onClick={() => optimize.mutate()}
-                disabled={optimize.isPending}
-              >
-                {optimize.isPending ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                Re-optimize & score
-              </Button>
+              <div className="mt-4 space-y-2">
+                <Button
+                  variant="gold"
+                  size="sm"
+                  className="w-full"
+                  onClick={() =>
+                    refine.mutate(undefined, {
+                      onSuccess: () =>
+                        toast.success("Refining against SEO/GEO/Grounding…"),
+                      onError: (e) =>
+                        toast.error(
+                          e instanceof Error ? e.message : "Refine failed"
+                        ),
+                    })
+                  }
+                  disabled={refine.isPending}
+                >
+                  {refine.isPending ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <Sparkles />
+                  )}
+                  Auto-refine to targets
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => optimize.mutate()}
+                  disabled={optimize.isPending}
+                >
+                  {optimize.isPending ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <RefreshCw />
+                  )}
+                  Re-optimize & score
+                </Button>
+              </div>
             )}
           </div>
         )}
@@ -396,6 +428,9 @@ export default function ArticleView({
                       {PHASE_LABEL[a.generation_status] ?? a.generation_status}
                       {a.generation_status === "drafting" && a.progress?.total
                         ? ` (${a.progress.done ?? 0}/${a.progress.total})`
+                        : ""}
+                      {a.generation_status === "refining" && a.progress?.iteration
+                        ? ` (pass ${a.progress.iteration}/${a.progress.total ?? 3})`
                         : ""}
                     </span>
                   </CardContent>

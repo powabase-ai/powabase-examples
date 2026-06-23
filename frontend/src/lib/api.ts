@@ -185,6 +185,7 @@ export type GenerationStatus =
   | "outlining"
   | "drafting"
   | "optimizing"
+  | "refining"
   | "done"
   | "failed";
 
@@ -193,7 +194,13 @@ export interface ArticleSummary {
   title: string;
   status: string;
   generation_status: GenerationStatus;
-  progress: { phase?: string; total?: number; done?: number; word_count?: number };
+  progress: {
+    phase?: string;
+    total?: number;
+    done?: number;
+    word_count?: number;
+    iteration?: number;
+  };
   updated_at: string;
 }
 
@@ -281,6 +288,8 @@ export const articlesApi = {
     request<Article>(`/api/articles/${id}/score`, { method: "POST" }),
   optimize: (id: string) =>
     request<Article>(`/api/articles/${id}/optimize`, { method: "POST" }),
+  refine: (id: string) =>
+    request<Article>(`/api/articles/${id}/refine`, { method: "POST" }),
   update: (id: string, data: ArticleUpdate) =>
     request<Article>(`/api/articles/${id}`, {
       method: "PATCH",

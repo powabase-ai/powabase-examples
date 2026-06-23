@@ -44,6 +44,22 @@ def test_extract_json_missing_raises():
         extract_json("no json here")
 
 
+def test_diverse_urls_prefers_distinct_domains():
+    urls = [
+        "https://a.com/1",
+        "https://www.a.com/2",
+        "https://b.com/x",
+        "https://c.com/y",
+    ]
+    out = svc.diverse_urls(urls, 3)
+    assert [svc._domain(u) for u in out] == ["a.com", "b.com", "c.com"]
+
+
+def test_diverse_urls_backfills_when_too_few_domains():
+    urls = ["https://a.com/1", "https://a.com/2", "https://a.com/3"]
+    assert len(svc.diverse_urls(urls, 2)) == 2
+
+
 def make_client() -> TestClient:
     app = create_app()
     app.dependency_overrides[get_db] = lambda: MagicMock()
