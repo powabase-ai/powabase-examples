@@ -43,7 +43,7 @@ import {
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { ARTICLE_STATUSES, canApprove } from "@/lib/api";
-import type { GroundingReport, Score, ScoreSignal } from "@/lib/api";
+import type { Article, GroundingReport, Score, ScoreSignal } from "@/lib/api";
 
 const GATED_STATUSES = new Set(["approved", "published"]);
 
@@ -153,6 +153,106 @@ function GroundingBody({ report }: { report: GroundingReport }) {
         <p className="text-sm text-muted-foreground">No unsupported claims flagged.</p>
       )}
     </div>
+  );
+}
+
+const REFINE_STEPS = ["revising", "fact-checking", "optimizing", "scoring"];
+
+// One monotonic 0→1 estimate across the whole pipeline, so the bar always moves
+// forward (drafting and refining have real sub-counts; other phases are coarse).
+function overallFraction(a: Article): number {
+  const p = a.progress ?? {};
+  switch (a.generation_status) {
+    case "queued":
+      return 0.03;
+    case "grounding":
+      return 0.1;
+    case "outlining":
+      return 0.22;
+    case "drafting":
+      return 0.25 + 0.4 * (p.total ? (p.done ?? 0) / p.total : 0);
+    case "optimizing":
+      return 0.7;
+    case "refining": {
+      const total = p.total ?? 2;
+      const it = (p.iteration ?? 1) - 1;
+      const si = p.step ? Math.max(0, REFINE_STEPS.indexOf(p.step)) : 0;
+      const passFrac = (it + si / REFINE_STEPS.length) / total;
+      return 0.75 + 0.22 * Math.min(1, passFrac);
+    }
+    default:
+      return 0.5;
+  }
+}
+
+function LiveScore({ label, score }: { label: string; score?: Score | null }) {
+  return (
+    <span>
+      {label}{" "}
+      <b
+        className="font-data"
+        style={{ color: score ? `rgb(${scoreColor(score)})` : undefined }}
+      >
+        {score?.total ?? "—"}
+      </b>
+      {score ? (
+        <span className="text-muted-foreground">/{score.target}</span>
+      ) : null}
+    </span>
+  );
+}
+
+function GenerationProgress({ a }: { a: Article }) {
+  const p = a.progress ?? {};
+  const pct = Math.round(overallFraction(a) * 100);
+  let detail = "";
+  if (a.generation_status === "drafting" && p.total)
+    detail = `section ${p.done ?? 0}/${p.total}`;
+  if (a.generation_status === "refining")
+    detail = `pass ${p.iteration ?? 1}/${p.total ?? 2}${
+      p.step ? ` · ${p.step}` : ""
+    }`;
+
+  return (
+    <Card className="mt-6">
+      <CardContent className="py-5">
+        <div className="mb-2.5 flex items-center gap-2.5 text-sm">
+          <Loader2 className="size-4 animate-spin text-[rgb(var(--ember-bright))]" />
+          <span className="font-medium">
+            {PHASE_LABEL[a.generation_status] ?? a.generation_status}
+          </span>
+          {detail && <span className="text-muted-foreground">· {detail}</span>}
+          <span className="ml-auto font-data text-xs text-muted-foreground">
+            {pct}%
+          </span>
+        </div>
+        <div
+          className="h-1.5 overflow-hidden rounded-full bg-secondary"
+          role="progressbar"
+          aria-valuenow={pct}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <div
+            className="h-full rounded-full bg-[rgb(var(--ember))] transition-[width] duration-500 ease-out"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        {/* During refinement the scores update each pass — let the user watch them move. */}
+        {a.generation_status === "refining" && (
+          <div className="mt-3 flex flex-wrap gap-4 text-xs text-muted-foreground">
+            <LiveScore label="SEO" score={a.seo_score} />
+            <LiveScore label="GEO" score={a.geo_score} />
+            <span>
+              Grounding{" "}
+              <b className="font-data text-foreground">
+                {a.grounding_report?.grounding_score ?? "—"}
+              </b>
+            </span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -433,22 +533,7 @@ export default function ArticleView({
                 />
               )}
 
-              {generating && (
-                <Card className="mt-6">
-                  <CardContent className="flex items-center gap-3 py-5 text-sm">
-                    <Loader2 className="size-4 animate-spin text-[rgb(var(--ember-bright))]" />
-                    <span>
-                      {PHASE_LABEL[a.generation_status] ?? a.generation_status}
-                      {a.generation_status === "drafting" && a.progress?.total
-                        ? ` (${a.progress.done ?? 0}/${a.progress.total})`
-                        : ""}
-                      {a.generation_status === "refining" && a.progress?.iteration
-                        ? ` (pass ${a.progress.iteration}/${a.progress.total ?? 3})`
-                        : ""}
-                    </span>
-                  </CardContent>
-                </Card>
-              )}
+              {generating && <GenerationProgress a={a} />}
 
               {a.generation_status === "failed" && (
                 <Card className="mt-6">

@@ -295,6 +295,20 @@ async def _revise_once(
     return (res.get("content") or "").strip()
 
 
+def _step(db: Database, article_id: UUID, i: int, step: str) -> None:
+    """Publish a refine sub-step for the UI's progress bar."""
+    gen_svc._update(
+        db, article_id,
+        generation_status="refining",
+        progress={
+            "phase": "refining",
+            "iteration": i + 1,
+            "total": MAX_REVISIONS,
+            "step": step,
+        },
+    )
+
+
 async def refine(
     client: PowabaseClient, db: Database, article_id: UUID
 ) -> dict[str, Any] | None:
@@ -334,11 +348,7 @@ async def refine(
         if not issues:
             break
 
-        gen_svc._update(
-            db, article_id,
-            generation_status="refining",
-            progress={"phase": "refining", "iteration": i + 1, "total": MAX_REVISIONS},
-        )
+        _step(db, article_id, i, "revising")
         try:
             if agent_id is None:
                 agent_id = await ensure_reviser_agent(client)
@@ -358,8 +368,11 @@ async def refine(
             if not _accept_revision(cur_md, new_md, title, meta, brief):
                 break
             gen_svc._update(db, article_id, content_md=new_md)
+            _step(db, article_id, i, "fact-checking")
             await quality.reflect(client, db, article_id)
+            _step(db, article_id, i, "optimizing")
             await geo_optimize.optimize_and_store(client, db, article_id)
+            _step(db, article_id, i, "scoring")
             await scoring.score_and_store(client, db, article_id)
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
             break

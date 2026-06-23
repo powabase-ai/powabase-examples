@@ -200,6 +200,7 @@ export interface ArticleSummary {
     done?: number;
     word_count?: number;
     iteration?: number;
+    step?: string;
   };
   updated_at: string;
 }
