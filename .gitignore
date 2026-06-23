@@ -1,34 +1,13 @@
-# Env / secrets
-.env
-.env.*
-!.env.example
-*.local
-
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-.uv/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-*.egg-info/
-dist/
-build/
-
-# Node / Next.js
-node_modules/
-.next/
-out/
-next-env.d.ts
-*.tsbuildinfo
-npm-debug.log*
-
-# Editors / OS
+# Collection-wide ignores (each app also has its own .gitignore).
+# Never commit secrets or build artifacts from any app.
+**/.env
+**/.env.*
+!**/.env.example
+**/node_modules/
+**/.next/
+**/__pycache__/
+**/.venv/
+**/.pytest_cache/
+**/.ruff_cache/
+*.pyc
 .DS_Store
-.vscode/
-.idea/
-
-# Misc
-*.log
-.commitmsg*
