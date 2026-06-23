@@ -49,10 +49,10 @@ def _decode(token: str) -> dict:
 def ensure_profile(db: Database, user_id: str, email: str | None) -> dict:
     """Return the caller's profile (with org), provisioning it on first sight.
 
-    On first sign-in the user is placed in an organization:
-      * if a pending `org_invites` row matches their email, they join that org
-        with the invited role and the invite is marked accepted; otherwise
-      * a brand-new org is created and the user becomes its `admin`.
+    On first sign-in the user gets their OWN fresh organization and becomes its
+    `admin`. Joining someone else's org is a separate, explicit, token-authorized
+    step (`POST /api/org/invites/accept`) — we never place a user in another org
+    based on their (unverified) email claim. See schema/0013.
 
     Provisioning is serialized per-user with a transaction advisory lock and the
     org is re-checked inside the lock, so two concurrent first sign-ins can't
@@ -73,42 +73,24 @@ def ensure_profile(db: Database, user_id: str, email: str | None) -> dict:
         if existing and existing.get("org_id"):
             return existing
 
-        # (a) honor a pending invite (case-insensitive email match), else (b) new org.
-        invite = None
-        if email:
-            cur.execute(
-                "select id, org_id, role from public.org_invites "
-                "where lower(email) = lower(%s) and accepted_at is null "
-                "order by created_at limit 1",
-                (email,),
-            )
-            invite = cur.fetchone()
-        if invite:
-            org_id, role = invite["org_id"], invite["role"]
-            cur.execute(
-                "update public.org_invites set accepted_at = now() where id = %s",
-                (invite["id"],),
-            )
-        else:
-            org_name = (
-                f"{email.split('@', 1)[0]}'s workspace" if email else "My workspace"
-            )
-            cur.execute(
-                "insert into public.organizations (name) values (%s) returning id",
-                (org_name,),
-            )
-            org_id, role = cur.fetchone()["id"], "admin"
-
+        org_name = (
+            f"{email.split('@', 1)[0]}'s workspace" if email else "My workspace"
+        )
+        cur.execute(
+            "insert into public.organizations (name) values (%s) returning id",
+            (org_name,),
+        )
+        org_id = cur.fetchone()["id"]
         cur.execute(
             f"""insert into public.profiles (id, email, org_id, role)
-                values (%s, %s, %s, %s)
+                values (%s, %s, %s, 'admin')
                 on conflict (id) do update set
                     email = excluded.email,
                     org_id = coalesce(profiles.org_id, excluded.org_id),
                     role = case when profiles.org_id is null
                                 then excluded.role else profiles.role end
                 returning {_PROFILE_COLS}""",
-            (user_id, email, org_id, role),
+            (user_id, email, org_id),
         )
         return cur.fetchone()
 

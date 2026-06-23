@@ -71,14 +71,14 @@ def test_ensure_profile_returns_existing():
     db.connection.assert_not_called()
 
 
-def test_ensure_profile_new_user_creates_org_as_admin():
-    # A brand-new user with no matching invite: inside the advisory-locked txn we
-    # re-check (no profile), find no invite, create a fresh org, and upsert the
-    # profile as that org's admin.
+def test_ensure_profile_new_user_creates_solo_org_as_admin():
+    # A brand-new user: inside the advisory-locked txn we re-check (no profile),
+    # create a fresh org, and upsert the profile as that org's admin. Crucially we
+    # NEVER consult org_invites — email is not trusted for cross-org placement
+    # (joining another org is an explicit, token-authorized accept; see test_org).
     db, cur = _cursor_db(
         [
             None,  # re-select inside lock: still no profile
-            None,  # org_invites lookup: no pending invite
             {"id": NEW_ORG},  # insert organizations ... returning id
             _full_profile("admin", NEW_ORG),  # final profile upsert RETURNING
         ]
@@ -91,25 +91,8 @@ def test_ensure_profile_new_user_creates_org_as_admin():
     assert "pg_advisory_xact_lock" in executed
     assert "insert into public.organizations" in executed
     assert "insert into public.profiles" in executed
-
-
-def test_ensure_profile_claims_pending_invite():
-    # A pending org_invites row matching the email joins the caller to that org
-    # with the invited role and marks the invite accepted (no new org created).
-    db, cur = _cursor_db(
-        [
-            None,  # re-select inside lock: no profile
-            {"id": "inv-1", "org_id": INVITE_ORG, "role": "editor"},  # invite
-            _full_profile("editor", INVITE_ORG),  # final profile upsert RETURNING
-        ]
-    )
-    prof = auth.ensure_profile(db, UID, "u@test")
-
-    assert prof["role"] == "editor"
-    assert prof["org_id"] == INVITE_ORG
-    executed = " ".join(c.args[0].lower() for c in cur.execute.call_args_list)
-    assert "org_invites set accepted_at" in executed
-    assert "insert into public.organizations" not in executed
+    # Security: provisioning must not auto-claim invites by email.
+    assert "org_invites" not in executed
 
 
 # --- token verification via /api/me ---

@@ -51,11 +51,18 @@ class OrgInviteCreate(BaseModel):
     role: str = "writer"  # writer|editor|admin
 
 
+class OrgInviteAccept(BaseModel):
+    token: str
+
+
 class OrgInvite(BaseModel):
     id: UUID
     org_id: UUID
     email: str
     role: str
+    # The secret join token — returned to the admin who created it (to share with
+    # the invitee). Whoever holds it can join the org, so treat it like a password.
+    token: str | None = None
     invited_by: UUID | None = None
     created_at: datetime | None = None
     accepted_at: datetime | None = None

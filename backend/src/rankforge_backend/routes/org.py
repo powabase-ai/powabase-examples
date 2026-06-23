@@ -16,6 +16,7 @@ from ..models.profile import (
     CurrentUser,
     Organization,
     OrgInvite,
+    OrgInviteAccept,
     OrgInviteCreate,
 )
 from ..services import org as svc
@@ -32,6 +33,20 @@ def get_org(
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "organization not found")
     return row
+
+
+@router.post("/invites/accept", response_model=Organization)
+def accept_invite(
+    payload: OrgInviteAccept,
+    user: CurrentUser = Depends(get_current_user),
+    db: Database = Depends(get_db),
+):
+    """Join an org by presenting a valid invite token (the token authorizes the
+    join — the email is never trusted). The caller leaves their own solo org."""
+    try:
+        return svc.accept_invite(db, user.id, payload.token)
+    except svc.InviteInvalid as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
 
 
 @router.get("/invites", response_model=list[OrgInvite])

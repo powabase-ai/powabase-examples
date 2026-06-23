@@ -125,14 +125,15 @@ async def _refine_and_finish(pb: PowabaseClient, db: Database, article_id: UUID)
         await revise_svc.refine(pb, db, article_id)
     finally:
         # Always return the article to a terminal status, even if a pass failed.
+        # If there's no content (refine bailed on a failed/empty article), mark it
+        # failed rather than falsely reporting "done".
         final = svc.get_article(db, article_id)
+        words = ((final or {}).get("content_md") or "").split()
+        terminal = "done" if words else "failed"
         svc._update(
             db, article_id,
-            generation_status="done",
-            progress={
-                "phase": "done",
-                "word_count": len(((final or {}).get("content_md") or "").split()),
-            },
+            generation_status=terminal,
+            progress={"phase": terminal, "word_count": len(words)},
         )
 
 

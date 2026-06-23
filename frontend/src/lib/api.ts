@@ -18,6 +18,19 @@ export class ApiError extends Error {
   }
 }
 
+/** Turn a backend error into a user-facing message. The expensive AI routes can
+ * now return 429 (rate limited) and 409 (a generation/refine already running);
+ * surface those gracefully instead of a raw "API 429: ..." string. */
+function friendlyMessage(status: number, detail: string): string {
+  if (status === 429)
+    return "You're going a bit fast — please wait a moment and try again.";
+  if (status === 409)
+    return detail || "That action is already in progress.";
+  if (status === 503)
+    return "The service is busy right now — please retry shortly.";
+  return detail ? `${detail}` : `Request failed (${status})`;
+}
+
 export interface Competitor {
   name?: string | null;
   domain: string;
@@ -82,7 +95,7 @@ async function request<T>(
     } catch {
       /* ignore */
     }
-    throw new ApiError(res.status, `API ${res.status}: ${detail}`);
+    throw new ApiError(res.status, friendlyMessage(res.status, detail));
   }
   if (res.status === 204) return undefined as T;
   return res.json();
