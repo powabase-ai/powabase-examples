@@ -18,6 +18,7 @@ from . import business_profiles as brands
 from . import generation as gen_svc
 from . import grounding
 from . import research as research_svc
+from .agents import ensure_agent
 
 REVISER_AGENT_NAME = "rankforge-reviser"
 REVISER_MODEL = "claude-sonnet-4-6"
@@ -48,26 +49,14 @@ and citations.
 notes, or commentary.
 """
 
-_reviser_agent_id: str | None = None
-
-
 async def ensure_reviser_agent(client: PowabaseClient) -> str:
-    global _reviser_agent_id
-    if _reviser_agent_id:
-        return _reviser_agent_id
-    listing = await client.get_agents()
-    for a in listing.get("agents", []):
-        if a.get("name") == REVISER_AGENT_NAME:
-            _reviser_agent_id = a["id"]
-            return _reviser_agent_id
-    created = await client.create_agent(
+    return await ensure_agent(
+        client,
         name=REVISER_AGENT_NAME,
         model=REVISER_MODEL,
         system_prompt=_SYSTEM,
         settings={"temperature": 0.3},
     )
-    _reviser_agent_id = created.get("id") or created.get("agent", {}).get("id")
-    return _reviser_agent_id
 
 
 META_AGENT_NAME = "rankforge-meta"
@@ -79,26 +68,16 @@ description for an article and return only structured JSON.
 - Return exactly one JSON object — no prose, no code fences.
 """
 _META_KEYS = {"keyword_title", "keyword_early", "title_length", "meta_length"}
-_meta_agent_id: str | None = None
 
 
 async def ensure_meta_agent(client: PowabaseClient) -> str:
-    global _meta_agent_id
-    if _meta_agent_id:
-        return _meta_agent_id
-    listing = await client.get_agents()
-    for a in listing.get("agents", []):
-        if a.get("name") == META_AGENT_NAME:
-            _meta_agent_id = a["id"]
-            return _meta_agent_id
-    created = await client.create_agent(
+    return await ensure_agent(
+        client,
         name=META_AGENT_NAME,
         model=REVISER_MODEL,
         system_prompt=_META_SYSTEM,
         settings={"temperature": 0},
     )
-    _meta_agent_id = created.get("id") or created.get("agent", {}).get("id")
-    return _meta_agent_id
 
 
 def _meta_failing(seo: dict | None) -> bool:

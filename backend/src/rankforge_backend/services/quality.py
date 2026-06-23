@@ -14,6 +14,7 @@ from . import business_profiles as brands
 from . import generation as gen_svc
 from . import grounding
 from . import research as research_svc
+from .agents import ensure_agent
 
 FACTCHECK_AGENT_NAME = "rankforge-factcheck"
 FACTCHECK_MODEL = "claude-sonnet-4-6"
@@ -59,26 +60,14 @@ Return ONLY this JSON object:
 [{"claim": str, "issue": str, "suggestion": str}]}\
 """
 
-_agent_id: str | None = None
-
-
 async def ensure_factcheck_agent(client: PowabaseClient) -> str:
-    global _agent_id
-    if _agent_id:
-        return _agent_id
-    listing = await client.get_agents()
-    for a in listing.get("agents", []):
-        if a.get("name") == FACTCHECK_AGENT_NAME:
-            _agent_id = a["id"]
-            return _agent_id
-    created = await client.create_agent(
+    return await ensure_agent(
+        client,
         name=FACTCHECK_AGENT_NAME,
         model=FACTCHECK_MODEL,
         system_prompt=_SYSTEM,
         settings={"temperature": 0},
     )
-    _agent_id = created.get("id") or created.get("agent", {}).get("id")
-    return _agent_id
 
 
 async def _grounding_excerpts(

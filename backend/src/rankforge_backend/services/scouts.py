@@ -24,6 +24,7 @@ from . import brief as brief_svc
 from . import business_profiles as brands
 from . import generation
 from . import research as research_svc
+from .agents import ensure_agent
 
 SCOUT_AGENT_NAME = "rankforge-scout"
 SCOUT_MODEL = "claude-sonnet-4-6"
@@ -82,28 +83,15 @@ _OPP_COLUMNS = (
     "source_url, evidence, score, scores, status, article_id, created_at, updated_at"
 )
 
-_scout_agent_id: str | None = None
-
-
 async def ensure_scout_agent(client: PowabaseClient) -> str:
-    global _scout_agent_id
-    if _scout_agent_id:
-        return _scout_agent_id
-    listing = await client.get_agents()
-    for agent in listing.get("agents", []):
-        if agent.get("name") == SCOUT_AGENT_NAME:
-            _scout_agent_id = agent["id"]
-            return _scout_agent_id
-    created = await client.create_agent(
+    return await ensure_agent(
+        client,
         name=SCOUT_AGENT_NAME,
         model=SCOUT_MODEL,
         system_prompt=_SYSTEM_PROMPT,
         settings={"temperature": 0.2},
+        builtin_tools=("web_search",),
     )
-    agent_id = created.get("id") or created.get("agent", {}).get("id")
-    await client.attach_builtin_tool(agent_id, "web_search")
-    _scout_agent_id = agent_id
-    return agent_id
 
 
 # --- config ---

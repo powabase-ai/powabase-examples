@@ -16,6 +16,7 @@ from ..util import extract_json
 from . import brief as brief_svc
 from . import generation as gen_svc
 from . import templates as templates_svc
+from .agents import ensure_agent
 
 SEO_TARGET = 80
 GEO_TARGET = 85
@@ -281,26 +282,14 @@ Return ONLY this JSON object:
 "citability": int, "citability_note": str, "citability_fixes": [str]}\
 """
 
-_judge_agent_id: str | None = None
-
-
 async def ensure_judge_agent(client: PowabaseClient) -> str:
-    global _judge_agent_id
-    if _judge_agent_id:
-        return _judge_agent_id
-    listing = await client.get_agents()
-    for a in listing.get("agents", []):
-        if a.get("name") == JUDGE_AGENT_NAME:
-            _judge_agent_id = a["id"]
-            return _judge_agent_id
-    created = await client.create_agent(
+    return await ensure_agent(
+        client,
         name=JUDGE_AGENT_NAME,
         model=JUDGE_MODEL,
         system_prompt=_JUDGE_SYSTEM,
         settings={"temperature": 0},
     )
-    _judge_agent_id = created.get("id") or created.get("agent", {}).get("id")
-    return _judge_agent_id
 
 
 async def judge_geo(client: PowabaseClient, content_md: str) -> dict | None:

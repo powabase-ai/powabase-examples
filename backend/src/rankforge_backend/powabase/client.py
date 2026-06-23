@@ -89,6 +89,28 @@ class PowabaseClient:
             body["settings"] = settings
         return await self._request("POST", "/api/agents", json=body)
 
+    async def update_agent(
+        self,
+        agent_id: str,
+        *,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> Any:
+        """Update an existing agent (PATCH /api/agents/{id}).
+
+        The update body honors only name/model/system_prompt/settings (same as
+        create); tuning fields must nest in `settings`. We use this to keep the
+        code the source of truth for an agent's prompt/settings on every boot."""
+        body: dict[str, Any] = {}
+        if model is not None:
+            body["model"] = model
+        if system_prompt is not None:
+            body["system_prompt"] = system_prompt
+        if settings is not None:
+            body["settings"] = settings
+        return await self._request("PATCH", f"/api/agents/{agent_id}", json=body)
+
     async def attach_builtin_tool(self, agent_id: str, tool_name: str) -> Any:
         """Attach a builtin tool. The live API requires BOTH tool_type and
         tool_name (tool_name alone → 400)."""

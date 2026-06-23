@@ -13,6 +13,7 @@ from ..powabase import PowabaseClient
 from ..util import extract_json
 from . import research as research_svc
 from . import templates as templates_svc
+from .agents import ensure_agent
 
 BRIEF_AGENT_NAME = "rankforge-brief"
 BRIEF_MODEL = "claude-sonnet-4-6"
@@ -66,26 +67,14 @@ _JSONB_FIELDS = {
     "link_suggestions",
 }
 
-_agent_id: str | None = None
-
-
 async def ensure_brief_agent(client: PowabaseClient) -> str:
-    global _agent_id
-    if _agent_id:
-        return _agent_id
-    listing = await client.get_agents()
-    for agent in listing.get("agents", []):
-        if agent.get("name") == BRIEF_AGENT_NAME:
-            _agent_id = agent["id"]
-            return _agent_id
-    created = await client.create_agent(
+    return await ensure_agent(
+        client,
         name=BRIEF_AGENT_NAME,
         model=BRIEF_MODEL,
         system_prompt=_SYSTEM_PROMPT,
         settings={"temperature": 0.3},
     )
-    _agent_id = created.get("id") or created.get("agent", {}).get("id")
-    return _agent_id
 
 
 def _summarize_research(run: dict[str, Any]) -> str:

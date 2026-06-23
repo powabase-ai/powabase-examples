@@ -21,6 +21,7 @@ from ..models.research import CompetitorTeardown, SearchResult
 from ..powabase import PowabaseClient, PowabaseError
 from ..util import extract_json
 from . import business_profiles as brands
+from .agents import ensure_agent
 
 SERP_AGENT_NAME = "rankforge-serp"
 SERP_MODEL = "claude-sonnet-4-6"
@@ -69,28 +70,15 @@ _SOURCE_COLUMNS = (
     "id, research_run_id, source_id, url, title, word_count, status, created_at"
 )
 
-_serp_agent_id: str | None = None
-
-
 async def ensure_serp_agent(client: PowabaseClient) -> str:
-    global _serp_agent_id
-    if _serp_agent_id:
-        return _serp_agent_id
-    listing = await client.get_agents()
-    for agent in listing.get("agents", []):
-        if agent.get("name") == SERP_AGENT_NAME:
-            _serp_agent_id = agent["id"]
-            return _serp_agent_id
-    created = await client.create_agent(
+    return await ensure_agent(
+        client,
         name=SERP_AGENT_NAME,
         model=SERP_MODEL,
         system_prompt=_SYSTEM_PROMPT,
         settings={"temperature": 0},
+        builtin_tools=("web_search",),
     )
-    agent_id = created.get("id") or created.get("agent", {}).get("id")
-    await client.attach_builtin_tool(agent_id, "web_search")
-    _serp_agent_id = agent_id
-    return agent_id
 
 
 # --- markdown teardown helpers ---

@@ -16,6 +16,7 @@ from ..powabase import PowabaseClient
 from . import brief as brief_svc
 from . import grounding
 from . import research as research_svc
+from .agents import ensure_agent
 
 WRITER_AGENT_NAME = "rankforge-writer"
 WRITER_MODEL = "claude-sonnet-4-6"
@@ -49,26 +50,14 @@ _ARTICLE_COLUMNS = (
 )
 _SUMMARY_COLUMNS = "id, title, status, generation_status, progress, updated_at"
 
-_writer_agent_id: str | None = None
-
-
 async def ensure_writer_agent(client: PowabaseClient) -> str:
-    global _writer_agent_id
-    if _writer_agent_id:
-        return _writer_agent_id
-    listing = await client.get_agents()
-    for agent in listing.get("agents", []):
-        if agent.get("name") == WRITER_AGENT_NAME:
-            _writer_agent_id = agent["id"]
-            return _writer_agent_id
-    created = await client.create_agent(
+    return await ensure_agent(
+        client,
         name=WRITER_AGENT_NAME,
         model=WRITER_MODEL,
         system_prompt=_SYSTEM_PROMPT,
         settings={"temperature": 0.4},
     )
-    _writer_agent_id = created.get("id") or created.get("agent", {}).get("id")
-    return _writer_agent_id
 
 
 def _slugify(title: str) -> str:
