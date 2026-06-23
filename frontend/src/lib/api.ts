@@ -442,6 +442,47 @@ export const opportunitiesApi = {
     request<Opportunity>(`/api/opportunities/${id}/dismiss`, { method: "POST" }),
 };
 
+// --- Publishing / export (M8) ---
+export type PublishTarget = "export" | "webhook";
+
+export interface Publication {
+  id: string;
+  article_id: string;
+  target_type: string;
+  status: "pending" | "success" | "failed";
+  url?: string | null;
+  external_id?: string | null;
+  published_at?: string | null;
+  created_at: string;
+}
+
+export const publishApi = {
+  publish: (id: string, body: { target_type: PublishTarget; config?: Record<string, unknown> }) =>
+    request<Publication>(`/api/articles/${id}/publish`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  publications: (id: string) =>
+    request<Publication[]>(`/api/articles/${id}/publications`),
+};
+
+/** Export an article as raw text (markdown/html) with the auth header attached. */
+export async function exportArticle(
+  id: string,
+  format: "markdown" | "html"
+): Promise<string> {
+  const token = getAccessToken();
+  const res = await fetch(
+    `${API_BASE_URL}/api/articles/${id}/export?format=${format}`,
+    {
+      cache: "no-store",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }
+  );
+  if (!res.ok) throw new Error(`Export failed (${res.status})`);
+  return res.text();
+}
+
 export interface ArticleUpdate {
   title?: string;
   content_md?: string;

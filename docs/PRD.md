@@ -313,7 +313,12 @@ Still open:
 - **M6** — Authority & linking: sitemap ingestion, internal/external links, monthly
   re-linking, linkable assets (Phase 12 + FR-11.4).
 - **M7** — Programmatic SEO (Phase 10) + media enrichment (Phase 11).
-- **M8** — Publishing adapters (Phase 8); backlink opportunity finder (FR-12.4b).
+- **M8** — Publishing adapters (Phase 8). ✅ (first cut) Markdown/HTML export,
+  webhook adapter, and — the GEO payoff — a server-rendered public page (`/p/{id}`)
+  that emits schema.org JSON-LD + content in the initial HTML (crawlable), backed by
+  an unauthenticated `/api/public/articles/{id}` endpoint; publish marks the article
+  `published`, caches sanitized HTML (nh3), and records `publications`. Remaining:
+  WordPress/Webflow adapters (need CMS credentials), backlink finder (FR-12.4b).
 
 Sequencing rationale: prove single-article quality (M1–M4) before automating it at
 scale (M5–M7). Scouts reuse the generation pipeline, so they come after it works.

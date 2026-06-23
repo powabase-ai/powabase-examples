@@ -11,6 +11,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Share2,
   Sparkles,
   X,
 } from "lucide-react";
@@ -27,6 +28,7 @@ import {
 import { ArticleEditor } from "@/components/ArticleEditor";
 import { CommentsPanel } from "@/components/CommentsPanel";
 import { Markdown } from "@/components/Markdown";
+import { PublishDialog } from "@/components/PublishDialog";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import {
   useArticle,
@@ -274,6 +276,7 @@ export default function ArticleView({
   const [draft, setDraft] = useState("");
   const [tab, setTab] = useState<"SEO" | "GEO" | "Grounding" | "Comments">("SEO");
   const [showHistory, setShowHistory] = useState(false);
+  const [showPublish, setShowPublish] = useState(false);
 
   const generating = a && !["done", "failed"].includes(a.generation_status);
   const dirty = !!a && editing && draft !== a.content_md;
@@ -285,6 +288,7 @@ export default function ArticleView({
     setDraft("");
     setTab("SEO");
     setShowHistory(false);
+    setShowPublish(false);
   }, [articleId]);
 
   // Warn before leaving with unsaved edits.
@@ -500,6 +504,13 @@ export default function ArticleView({
                 >
                   <Pencil /> Edit
                 </Button>
+                <Button
+                  variant="gold"
+                  size="sm"
+                  onClick={() => setShowPublish(true)}
+                >
+                  <Share2 /> Publish
+                </Button>
               </div>
             )}
             {editing && (
@@ -588,6 +599,16 @@ export default function ArticleView({
           </div>
         </div>
       </ResizablePanel>
+
+      {a && (
+        <PublishDialog
+          open={showPublish}
+          onOpenChange={setShowPublish}
+          articleId={articleId}
+          slug={a.slug}
+          published={a.status === "published"}
+        />
+      )}
 
       <Dialog open={showHistory} onOpenChange={setShowHistory}>
         <DialogContent className="max-w-md">

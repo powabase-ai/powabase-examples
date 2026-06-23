@@ -33,6 +33,8 @@ class Settings(BaseSettings):
 
     # --- Server ---
     cors_allow_origins: str = "http://localhost:3000"
+    # Public base URL of the frontend, used to build crawlable /p/{id} links.
+    public_base_url: str = "http://localhost:3007"
     db_pool_min_size: int = 1
     db_pool_max_size: int = 10
 
