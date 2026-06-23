@@ -50,21 +50,23 @@ def test_ensure_profile_returns_existing():
     db.fetch_one.assert_called_once()
 
 
-def test_ensure_profile_first_user_becomes_admin():
+def test_ensure_profile_creates_new_via_locked_insert():
+    # The admin-vs-writer decision now lives in SQL (atomic, advisory-locked), so
+    # the unit test verifies the new-user path takes the lock + insert and returns
+    # the cursor row; the role itself is a live-DB concern.
     db = MagicMock()
-    db.fetch_one.side_effect = [None, {"is_first": True}, _full_profile("admin")]
+    db.fetch_one.return_value = None  # no existing profile
+    cur = MagicMock()
+    cur.fetchone.return_value = _full_profile("admin")
+    conn = db.connection.return_value.__enter__.return_value
+    conn.cursor.return_value.__enter__.return_value = cur
+
     prof = auth.ensure_profile(db, UID, "u@test")
+
     assert prof["role"] == "admin"
-    insert = db.fetch_one.call_args_list[-1]
-    assert "insert into public.profiles" in insert.args[0].lower()
-    assert insert.args[1][2] == "admin"  # role param
-
-
-def test_ensure_profile_later_user_is_writer():
-    db = MagicMock()
-    db.fetch_one.side_effect = [None, {"is_first": False}, _full_profile("writer")]
-    auth.ensure_profile(db, UID, "u@test")
-    assert db.fetch_one.call_args_list[-1].args[1][2] == "writer"
+    executed = " ".join(c.args[0].lower() for c in cur.execute.call_args_list)
+    assert "pg_advisory_xact_lock" in executed
+    assert "insert into public.profiles" in executed
 
 
 # --- token verification via /api/me ---
@@ -108,7 +110,11 @@ def test_set_role_requires_admin():
 
 def test_set_role_admin_ok():
     db = MagicMock()
-    db.fetch_one.return_value = _full_profile("editor")
+    # set_role first runs a last-admin guard query, then the UPDATE.
+    db.fetch_one.side_effect = [
+        {"cur": "editor", "admins": 2},
+        _full_profile("editor"),
+    ]
     admin = CurrentUser(id=UID, email="a@test", role="admin")
     resp = _as(db, admin).patch(f"/api/members/{UID}", json={"role": "editor"})
     assert resp.status_code == 200

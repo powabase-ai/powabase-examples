@@ -40,23 +40,30 @@ def _decode(token: str) -> dict:
 
 
 def ensure_profile(db: Database, user_id: str, email: str | None) -> dict:
-    """Return the caller's profile, creating it on first sight."""
+    """Return the caller's profile, creating it on first sight.
+
+    The first profile in an empty workspace becomes admin. That decision is made
+    atomically inside one transaction guarded by a session advisory lock, so two
+    concurrent first sign-ins can't both observe an empty table and both become
+    admin (the lock serializes them; the loser commits after the winner and sees a
+    non-empty table → writer)."""
     row = db.fetch_one(
         "select id, email, display_name, role from public.profiles where id = %s",
         (user_id,),
     )
     if row:
         return row
-    first = db.fetch_one(
-        "select not exists (select 1 from public.profiles) as is_first"
-    )
-    role = "admin" if (first and first["is_first"]) else "writer"
-    return db.fetch_one(
-        "insert into public.profiles (id, email, role) values (%s, %s, %s) "
-        "on conflict (id) do update set email = excluded.email "
-        "returning id, email, display_name, role",
-        (user_id, email, role),
-    )
+    with db.connection() as conn, conn.cursor() as cur:
+        cur.execute("select pg_advisory_xact_lock(hashtext('rankforge_first_admin'))")
+        cur.execute(
+            "insert into public.profiles (id, email, role) "
+            "select %s, %s, case when exists (select 1 from public.profiles) "
+            "then 'writer' else 'admin' end "
+            "on conflict (id) do update set email = excluded.email "
+            "returning id, email, display_name, role",
+            (user_id, email),
+        )
+        return cur.fetchone()
 
 
 def get_current_user(

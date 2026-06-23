@@ -102,7 +102,9 @@ async def build_faq_jsonld(
             "acceptedAnswer": {"@type": "Answer", "text": f["answer"]},
         }
         for f in faqs
-        if f.get("question") and f.get("answer")
+        # isinstance guard: a malformed response (e.g. a list of strings) must not
+        # raise AttributeError here and crash the generation task.
+        if isinstance(f, dict) and f.get("question") and f.get("answer")
     ]
     if not entities:
         return None

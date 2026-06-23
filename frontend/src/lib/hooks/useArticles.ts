@@ -57,7 +57,11 @@ export function useUpdateArticle(id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (data: ArticleUpdate) => articlesApi.update(id, data),
-    onSuccess: (data) => qc.setQueryData(["article", id], data),
+    onSuccess: (data) => {
+      qc.setQueryData(["article", id], data);
+      // A content edit snapshots a new version server-side — keep History fresh.
+      qc.invalidateQueries({ queryKey: ["versions", id] });
+    },
   });
 }
 

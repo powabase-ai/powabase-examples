@@ -150,11 +150,13 @@ begin
         'profiles','research_runs','briefs','articles',
         'article_versions','publish_targets','publications'
     ] loop
+        execute format('drop policy if exists %I on public.%I', t || '_read', t);
         execute format(
             'create policy %I on public.%I for select to authenticated using (true)',
             t || '_read', t
         );
         -- Authenticated members can write; backend (service role) bypasses RLS.
+        execute format('drop policy if exists %I on public.%I', t || '_write', t);
         execute format(
             'create policy %I on public.%I for all to authenticated using (true) with check (true)',
             t || '_write', t

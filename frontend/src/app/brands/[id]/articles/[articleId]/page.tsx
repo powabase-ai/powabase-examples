@@ -178,6 +178,15 @@ export default function ArticleView({
   const generating = a && !["done", "failed"].includes(a.generation_status);
   const dirty = !!a && editing && draft !== a.content_md;
 
+  // The route component is reused across article ids — reset view/edit state so an
+  // open editor (and its stale draft) never carries over to a different article.
+  useEffect(() => {
+    setEditing(false);
+    setDraft("");
+    setTab("SEO");
+    setShowHistory(false);
+  }, [articleId]);
+
   // Warn before leaving with unsaved edits.
   useEffect(() => {
     if (!dirty) return;
@@ -416,7 +425,11 @@ export default function ArticleView({
               {a.json_ld && (
                 <script
                   type="application/ld+json"
-                  dangerouslySetInnerHTML={{ __html: JSON.stringify(a.json_ld) }}
+                  // Escape "<" so generated/scraped content can't break out of the
+                  // <script> tag (e.g. a "</script>" substring) — XSS guard.
+                  dangerouslySetInnerHTML={{
+                    __html: JSON.stringify(a.json_ld).replace(/</g, "\\u003c"),
+                  }}
                 />
               )}
 
@@ -448,6 +461,7 @@ export default function ArticleView({
               {editing ? (
                 <div className="mt-8">
                   <ArticleEditor
+                    key={articleId}
                     value={a.content_md}
                     onChange={setDraft}
                     actions={

@@ -47,6 +47,22 @@ def test_collect_issues_empty_when_met():
     assert revise.collect_issues(SEO_MET, GEO_MET, None) == []
 
 
+def test_collect_issues_excludes_meta_bound_signals():
+    # Title/meta-bound signals are handled by fix_meta, not the body reviser.
+    seo = {
+        "met": False,
+        "signals": [
+            {"key": "title_length", "label": "Title length", "score": 0,
+             "fixes": ["Target 30–60 characters."]},
+            {"key": "heading_structure", "label": "Heading hierarchy", "score": 40,
+             "fixes": ["Add more H2 sections."]},
+        ],
+    }
+    issues = revise.collect_issues(seo, None, None)
+    assert any("Heading hierarchy" in i for i in issues)
+    assert not any("Title length" in i for i in issues)
+
+
 def test_combined_score_sums_three_axes():
     assert revise.combined_score(SEO_MET, GEO_MET, GR_OK) == 82 + 88 + 80
     assert revise.combined_score(None, None, None) == 0

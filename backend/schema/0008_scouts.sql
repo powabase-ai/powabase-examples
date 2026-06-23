@@ -72,10 +72,12 @@ do $$
 declare t text;
 begin
     foreach t in array array['scout_configs', 'scout_runs', 'opportunities'] loop
+        execute format('drop policy if exists %I on public.%I', t || '_read', t);
         execute format(
             'create policy %I on public.%I for select to authenticated using (true)',
             t || '_read', t
         );
+        execute format('drop policy if exists %I on public.%I', t || '_write', t);
         execute format(
             'create policy %I on public.%I for all to authenticated using (true) with check (true)',
             t || '_write', t

@@ -41,7 +41,10 @@ def set_member_role(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, f"role must be one of {ROLES}"
         )
-    row = svc.set_role(db, user_id, payload.role)
+    try:
+        row = svc.set_role(db, user_id, payload.role)
+    except svc.LastAdminError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "member not found")
     return row

@@ -93,8 +93,8 @@ def _client(db, user: CurrentUser | None = None) -> TestClient:
     return TestClient(app)
 
 
-def test_get_config_ensures(monkeypatch):
-    monkeypatch.setattr(svc, "ensure_config", lambda db, bid: CFG)
+def test_get_config_returns_existing(monkeypatch):
+    monkeypatch.setattr(svc, "get_config", lambda db, bid: CFG)
     resp = _client(MagicMock()).get(f"/api/scouts/config?business_id={BID}")
     assert resp.status_code == 200
     assert resp.json()["cadence"] == "daily"
@@ -116,6 +116,45 @@ def test_update_config_editor_ok(monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["enabled"] is True
+
+
+def test_update_config_rejects_out_of_range_drafts():
+    # Pydantic bounds guard against a runaway autonomous-spend value.
+    resp = _client(MagicMock()).put(
+        f"/api/scouts/config?business_id={BID}", json={"max_drafts_per_run": 999}
+    )
+    assert resp.status_code == 422
+
+
+def test_get_config_does_not_persist(monkeypatch):
+    # GET must be read-only — returns a default without inserting a row.
+    monkeypatch.setattr(svc, "get_config", lambda db, bid: None)
+    resp = _client(MagicMock()).get(f"/api/scouts/config?business_id={BID}")
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is False
+
+
+async def test_auto_draft_bails_on_failed_research(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(svc.brands, "get_profile", lambda db, bid: {"id": BID})
+    monkeypatch.setattr(
+        svc.research_svc, "create_research_run", lambda db, **k: {"id": "r1"}
+    )
+
+    async def fake_task(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc.research_svc, "run_research_task", fake_task)
+    monkeypatch.setattr(svc.research_svc, "get_run", lambda db, rid: {"status": "failed"})
+    monkeypatch.setattr(
+        svc, "set_opportunity_status", lambda db, oid, st, **k: seen.append(st)
+    )
+    ok = await svc.auto_draft(
+        MagicMock(), MagicMock(),
+        {"id": "o1", "business_id": BID, "keyword": "k", "title": "t"},
+    )
+    assert ok is False
+    assert seen[-1] == "new"
 
 
 def test_run_now_202(monkeypatch):

@@ -173,6 +173,10 @@ def collect_issues(
         if not score or score.get("met"):
             continue
         for s in score.get("signals", []):
+            # Skip title/meta-bound signals — the body reviser can't fix those;
+            # fix_meta() handles them. Sending them here just wastes a pass.
+            if s.get("key") in _META_KEYS:
+                continue
             if s.get("score", 100) < _SIGNAL_FLOOR:
                 for fix in s.get("fixes", []):
                     issues.append(f"[{s['label']}] {fix}")

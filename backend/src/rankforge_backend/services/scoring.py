@@ -119,7 +119,8 @@ def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dic
         "Primary keyword appears early." if early else "Primary keyword not in the first 100 words.",
         [] if early else ["Mention the primary keyword in the intro."]))
 
-    density = (lower.count(pk) / wc * 100) if (pk and wc) else 0
+    pk_hits = len(re.findall(rf"\b{re.escape(pk)}\b", lower)) if pk else 0
+    density = (pk_hits / wc * 100) if (pk and wc) else 0
     sig.append(_signal(
         "keyword_density", "Keyword density", _band(density, 0.4, 2.5, 1.5), 0.10,
         f"Primary keyword density ~{density:.2f}%.",
@@ -240,15 +241,23 @@ def score_geo(
         f"{lists} list item(s), {'a' if tables else 'no'} table(s).",
         ["Add lists/tables answer engines can lift."] if lists < 3 else []))
 
-    if llm:
-        sig.append(_signal(
-            "direct_answer", "Direct-answer leads", llm.get("direct_answer", 0), 0.12,
-            llm.get("direct_answer_note", "LLM judgment of extractable lead answers."),
-            llm.get("direct_answer_fixes", []), method="llm"))
-        sig.append(_signal(
-            "citability", "Claim citability", llm.get("citability", 0), 0.08,
-            llm.get("citability_note", "LLM judgment of how quotable/specific claims are."),
-            llm.get("citability_fixes", []), method="llm"))
+    # Always include the LLM-judged signals so the weight denominator (and thus the
+    # target's meaning) is the same whether or not the judge ran. When it's
+    # unavailable, they default to a neutral 50 rather than being dropped — which
+    # would otherwise re-normalize the other signals and shift the effective target.
+    _NEUTRAL = "Not evaluated (LLM judge unavailable)."
+    sig.append(_signal(
+        "direct_answer", "Direct-answer leads",
+        llm.get("direct_answer", 0) if llm else 50, 0.12,
+        llm.get("direct_answer_note", "LLM judgment of extractable lead answers.")
+        if llm else _NEUTRAL,
+        llm.get("direct_answer_fixes", []) if llm else [], method="llm"))
+    sig.append(_signal(
+        "citability", "Claim citability",
+        llm.get("citability", 0) if llm else 50, 0.08,
+        llm.get("citability_note", "LLM judgment of how quotable/specific claims are.")
+        if llm else _NEUTRAL,
+        llm.get("citability_fixes", []) if llm else [], method="llm"))
 
     return _aggregate(sig, geo_target)
 

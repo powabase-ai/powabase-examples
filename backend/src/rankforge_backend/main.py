@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         if scheduler is not None:
-            scheduler.shutdown()
+            await scheduler.aclose()
         if powabase is not None:
             await powabase.aclose()
         if db is not None:
@@ -69,10 +69,13 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="RankForge API", version="0.0.1", lifespan=lifespan)
 
+    # Never pair credentialed CORS with a wildcard origin — if CORS_ALLOW_ORIGINS is
+    # misconfigured to "*", drop credentials rather than reflecting any origin.
+    origins = settings.cors_origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=True,
+        allow_origins=origins,
+        allow_credentials="*" not in origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )

@@ -38,7 +38,9 @@ def test_geo_deterministic_signals():
     assert by["entity_coverage"]["score"] == 100  # Strapi + Contentful present
     assert by["structured_data"]["score"] == 0  # no JSON-LD
     assert by["citation_density"]["score"] > 0  # one outbound citation
-    assert "direct_answer" not in by  # llm signals omitted when llm is None
+    # LLM signals are still present (neutral 50) so the weight denominator — and
+    # thus the target's meaning — is the same whether or not the judge ran.
+    assert by["direct_answer"]["score"] == 50
 
 
 def test_geo_includes_llm_signals_when_present():
@@ -46,6 +48,14 @@ def test_geo_includes_llm_signals_when_present():
     by = {x["key"]: x for x in g["signals"]}
     assert by["direct_answer"]["score"] == 90
     assert by["direct_answer"]["method"] == "llm"
+
+
+def test_keyword_density_ignores_substrings():
+    # "cms" appears only inside "cmsx" — word-boundary counting must score it 0.
+    body = "# Title\n" + "cmsx cmsx cmsx alpha beta gamma delta epsilon zeta eta " * 3
+    s = scoring.score_seo(body, "Title", "x" * 140, {"primary_keyword": "cms"})
+    density = next(x for x in s["signals"] if x["key"] == "keyword_density")
+    assert "0.00%" in density["explanation"]
 
 
 def test_band_and_helpers():

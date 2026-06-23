@@ -27,6 +27,7 @@ class ScoutScheduler:
         self._pb = pb
         self._sched = AsyncIOScheduler()
         self._running: set = set()
+        self._tasks: set[asyncio.Task] = set()
 
     def start(self) -> None:
         self._sched.add_job(
@@ -35,8 +36,12 @@ class ScoutScheduler:
         self._sched.start()
         log.info("scout scheduler started (tick=%ss)", TICK_SECONDS)
 
-    def shutdown(self) -> None:
+    async def aclose(self) -> None:
+        """Stop ticking and give in-flight scout runs a bounded chance to finish
+        before the lifespan tears down the DB pool / Powabase client."""
         self._sched.shutdown(wait=False)
+        if self._tasks:
+            await asyncio.wait(self._tasks, timeout=20)
 
     async def _tick(self) -> None:
         try:
@@ -49,7 +54,9 @@ class ScoutScheduler:
             if bid in self._running:
                 continue
             self._running.add(bid)
-            asyncio.create_task(self._run(bid))
+            task = asyncio.create_task(self._run(bid))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     async def _run(self, business_id) -> None:
         try:

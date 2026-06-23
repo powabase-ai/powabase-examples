@@ -44,6 +44,18 @@ def test_extract_json_missing_raises():
         extract_json("no json here")
 
 
+def test_extract_json_fenced_keeps_nested_braces():
+    # The fenced capture must be greedy or it truncates at the first "}".
+    assert extract_json('```json\n{"a": {"b": 1}, "c": [1, 2]}\n```') == {
+        "a": {"b": 1},
+        "c": [1, 2],
+    }
+
+
+def test_extract_json_falls_back_to_bare_object():
+    assert extract_json('chatter {"ok": true} trailing') == {"ok": True}
+
+
 def test_diverse_urls_prefers_distinct_domains():
     urls = [
         "https://a.com/1",

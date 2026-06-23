@@ -20,7 +20,19 @@ def get_profile(db: Database, user_id: UUID) -> dict[str, Any] | None:
     )
 
 
+class LastAdminError(ValueError):
+    """Raised when a role change would leave the workspace with no admin."""
+
+
 def set_role(db: Database, user_id: UUID, role: str) -> dict[str, Any] | None:
+    if role != "admin":
+        guard = db.fetch_one(
+            "select (select role from public.profiles where id = %s) as cur, "
+            "(select count(*) from public.profiles where role = 'admin') as admins",
+            (user_id,),
+        )
+        if guard and guard["cur"] == "admin" and (guard["admins"] or 0) <= 1:
+            raise LastAdminError("cannot demote the last remaining admin")
     return db.fetch_one(
         f"update public.profiles set role = %s, updated_at = now() "
         f"where id = %s returning {_PROFILE_COLS}",

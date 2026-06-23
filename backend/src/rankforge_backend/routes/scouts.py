@@ -30,7 +30,8 @@ def _spawn(coro) -> None:
 # --- config ---
 @router.get("/scouts/config", response_model=ScoutConfig)
 def get_scout_config(business_id: UUID, db: Database = Depends(get_db)):
-    return svc.ensure_config(db, business_id)
+    # Read-only: don't INSERT on a GET. The row is created lazily on PUT.
+    return svc.get_config(db, business_id) or svc.default_config(business_id)
 
 
 @router.put("/scouts/config", response_model=ScoutConfig)

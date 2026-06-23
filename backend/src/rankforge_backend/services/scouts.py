@@ -108,6 +108,22 @@ def get_config(db: Database, business_id: UUID) -> dict[str, Any] | None:
     )
 
 
+def default_config(business_id: UUID) -> dict[str, Any]:
+    """A transient default for reads — does NOT persist (the row is created on PUT)."""
+    return {
+        "business_id": business_id,
+        "enabled": False,
+        "cadence": "daily",
+        "autonomy": "suggest",
+        "min_score": 70,
+        "max_drafts_per_run": 1,
+        "focus": [],
+        "last_run_at": None,
+        "next_run_at": None,
+        "updated_at": None,
+    }
+
+
 def ensure_config(db: Database, business_id: UUID) -> dict[str, Any]:
     row = get_config(db, business_id)
     if row:
@@ -333,12 +349,16 @@ async def run_scout(
             (str(e), run_id),
         )
     finally:
-        # Roll the schedule forward regardless of outcome.
-        db.execute(
-            "update public.scout_configs set last_run_at = now(), "
-            "next_run_at = now() + %s where business_id = %s",
-            (_cadence_delta(cfg.get("cadence") or "daily"), business_id),
-        )
+        # Roll the schedule forward regardless of outcome (guarded so a failure
+        # here can't mask the original error or stop the run from returning).
+        try:
+            db.execute(
+                "update public.scout_configs set last_run_at = now(), "
+                "next_run_at = now() + %s where business_id = %s",
+                (_cadence_delta(cfg.get("cadence") or "daily"), business_id),
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return get_run(db, run_id)
 
 
@@ -359,6 +379,16 @@ async def auto_draft(
             client, db, run_id=rrun["id"], brand=brand, topic=topic,
             locale="en-US", depth="standard",
         )
+        # run_research_task swallows its own errors onto the run row — gate the
+        # chain on research actually succeeding and producing sources, so we never
+        # draft an ungrounded article from a failed/empty run.
+        run = research_svc.get_run(db, rrun["id"])
+        if not run or run.get("status") == "failed":
+            set_opportunity_status(db, opp_id, "new")
+            return False
+        if not research_svc.list_sources(db, rrun["id"]):
+            set_opportunity_status(db, opp_id, "new")
+            return False
         brief = await brief_svc.generate_brief(
             client, db, research_run_id=rrun["id"]
         )

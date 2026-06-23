@@ -7,12 +7,14 @@ effect on the next run, without deleting the live agent. Ids are cached per proc
 to avoid a lookup on every call.
 """
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 
 from ..powabase import PowabaseClient
 
 _cache: dict[str, str] = {}
+_lock = asyncio.Lock()
 
 
 async def ensure_agent(
@@ -26,6 +28,30 @@ async def ensure_agent(
 ) -> str:
     if name in _cache:
         return _cache[name]
+    # Serialize the cold-start miss path so two concurrent first-calls for the same
+    # agent can't both create it (duplicate-agent leak).
+    async with _lock:
+        if name in _cache:  # double-check after acquiring the lock
+            return _cache[name]
+        return await _provision(
+            client,
+            name=name,
+            model=model,
+            system_prompt=system_prompt,
+            settings=settings,
+            builtin_tools=builtin_tools,
+        )
+
+
+async def _provision(
+    client: PowabaseClient,
+    *,
+    name: str,
+    model: str,
+    system_prompt: str,
+    settings: dict[str, Any] | None,
+    builtin_tools: Sequence[str],
+) -> str:
     listing = await client.get_agents()
     existing = next(
         (a for a in listing.get("agents", []) if a.get("name") == name), None
