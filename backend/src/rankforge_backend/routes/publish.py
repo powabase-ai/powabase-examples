@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from ..auth import get_current_user
+from ..auth import get_current_user, require_editor
 from ..config import get_settings
 from ..db import Database
 from ..models.publish import PublicArticle, Publication, PublishRequest
@@ -47,7 +47,10 @@ def export_article(article_id: UUID, format: str = "markdown", db: Database = De
 
 @router.post("/{article_id}/publish", response_model=Publication)
 async def publish_article(
-    article_id: UUID, payload: PublishRequest, db: Database = Depends(get_db)
+    article_id: UUID,
+    payload: PublishRequest,
+    db: Database = Depends(get_db),
+    _: object = Depends(require_editor),  # publishing flips status → editor/admin only
 ):
     pub = await svc.publish(
         db,
@@ -71,4 +74,5 @@ def public_article(article_id: UUID, db: Database = Depends(get_db)):
     row = svc.get_published(db, article_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
-    return row
+    # Render + sanitize fresh from content_md (response_model drops content_md).
+    return {**row, "content_html": svc.render_body_html(row.get("content_md") or "")}

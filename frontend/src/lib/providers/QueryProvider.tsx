@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  MutationCache,
   QueryCache,
   QueryClient,
   QueryClientProvider,
@@ -9,20 +8,21 @@ import {
 import { useState } from "react";
 import { toast } from "sonner";
 
+import { ApiError } from "@/lib/api";
+
 export function QueryProvider({ children }: { children: React.ReactNode }) {
   const [client] = useState(
     () =>
       new QueryClient({
         defaultOptions: { queries: { staleTime: 30_000, refetchOnWindowFocus: false } },
         // Surface fetch failures so a broken list isn't indistinguishable from
-        // "no data". Auth 401s are handled (refresh) before reaching here.
+        // "no data". 401s are handled (refresh) before reaching here, so skip them.
         queryCache: new QueryCache({
           onError: (error) => {
-            const msg = error instanceof Error ? error.message : "Request failed";
-            if (!/\b401\b/.test(msg)) toast.error(msg);
+            if (error instanceof ApiError && error.status === 401) return;
+            toast.error(error instanceof Error ? error.message : "Request failed");
           },
         }),
-        mutationCache: new MutationCache({}),
       })
   );
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;

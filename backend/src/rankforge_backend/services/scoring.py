@@ -119,7 +119,10 @@ def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dic
         "Primary keyword appears early." if early else "Primary keyword not in the first 100 words.",
         [] if early else ["Mention the primary keyword in the intro."]))
 
-    pk_hits = len(re.findall(rf"\b{re.escape(pk)}\b", lower)) if pk else 0
+    # Non-word lookarounds (not \b) so punctuation keywords like "c++"/".net" match.
+    pk_hits = (
+        len(re.findall(rf"(?<![a-z0-9]){re.escape(pk)}(?![a-z0-9])", lower)) if pk else 0
+    )
     density = (pk_hits / wc * 100) if (pk and wc) else 0
     sig.append(_signal(
         "keyword_density", "Keyword density", _band(density, 0.4, 2.5, 1.5), 0.10,

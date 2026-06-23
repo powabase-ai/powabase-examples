@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from conftest import with_auth
 from fastapi.testclient import TestClient
 
@@ -42,6 +43,28 @@ def test_render_markdown_has_frontmatter():
     assert "title:" in out and "# Heading" in out
 
 
+# --- webhook SSRF guard ---
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/hook",
+        "http://localhost/hook",
+        "https://10.0.0.1/hook",
+        "https://192.168.1.5/hook",
+        "https://169.254.169.254/latest/meta-data",
+        "ftp://example.com/x",
+        "https://",
+    ],
+)
+def test_validate_webhook_url_blocks_private_and_bad_scheme(url):
+    with pytest.raises(ValueError):
+        svc.validate_webhook_url(url)
+
+
+def test_validate_webhook_url_allows_public():
+    svc.validate_webhook_url("https://8.8.8.8/hook")  # public IP — no raise
+
+
 # --- service ---
 async def test_publish_export_marks_published(monkeypatch):
     db = MagicMock()
@@ -72,18 +95,36 @@ def test_public_article_is_unauthenticated_and_404s_when_absent(monkeypatch):
     assert resp.status_code == 404  # not 401 — the route is public
 
 
-def test_public_article_returns_published(monkeypatch):
+def test_public_article_renders_fresh_from_markdown(monkeypatch):
+    # The route renders content_html from content_md at read time (never stale).
     monkeypatch.setattr(
         svc, "get_published",
         lambda db, aid: {
             "id": AID, "title": "T", "slug": "t", "meta_title": "T",
-            "meta_description": "d", "content_html": "<p>x</p>",
+            "meta_description": "d", "content_md": "# Live Heading\n\nbody",
             "json_ld": {"@type": "BlogPosting"}, "updated_at": "2026-06-20T00:00:00Z",
         },
     )
     resp = _client(MagicMock(), auth=False).get(f"/api/public/articles/{AID}")
     assert resp.status_code == 200
-    assert resp.json()["content_html"] == "<p>x</p>"
+    assert "<h1>Live Heading</h1>" in resp.json()["content_html"]
+
+
+def test_publish_requires_editor(monkeypatch):
+    from rankforge_backend.models.profile import CurrentUser
+
+    async def fake_publish(db, aid, **k):
+        return None  # shouldn't be reached
+
+    monkeypatch.setattr(svc, "publish", fake_publish)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: MagicMock()
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    with_auth(app, CurrentUser(id=AID, role="writer"))
+    resp = TestClient(app).post(
+        f"/api/articles/{AID}/publish", json={"target_type": "export"}
+    )
+    assert resp.status_code == 403
 
 
 def test_publish_route(monkeypatch):

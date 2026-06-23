@@ -58,6 +58,14 @@ def test_keyword_density_ignores_substrings():
     assert "0.00%" in density["explanation"]
 
 
+def test_keyword_density_matches_punctuation_keyword():
+    # ".net" must match via non-word lookarounds (\b would score it 0).
+    body = "# Title\n" + ".net .net .net " + "word " * 20
+    s = scoring.score_seo(body, "Title", "x" * 140, {"primary_keyword": ".net"})
+    density = next(x for x in s["signals"] if x["key"] == "keyword_density")
+    assert "0.00%" not in density["explanation"]
+
+
 def test_band_and_helpers():
     assert scoring._band(1.0, 0.5, 1.5, 1.0) == 100
     assert scoring._band(2.5, 0.5, 1.5, 1.0) == 0

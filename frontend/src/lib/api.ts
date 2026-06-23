@@ -8,6 +8,16 @@ import { getAccessToken, getSession, refresh } from "./auth/session";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+/** Error carrying the HTTP status so callers can branch on it (not regex the text). */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 export interface Competitor {
   name?: string | null;
   domain: string;
@@ -72,7 +82,7 @@ async function request<T>(
     } catch {
       /* ignore */
     }
-    throw new Error(`API ${res.status}: ${detail}`);
+    throw new ApiError(res.status, `API ${res.status}: ${detail}`);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -466,10 +476,12 @@ export const publishApi = {
     request<Publication[]>(`/api/articles/${id}/publications`),
 };
 
-/** Export an article as raw text (markdown/html) with the auth header attached. */
+/** Export an article as raw text (markdown/html) with the auth header attached.
+ *  Mirrors request()'s 401 → refresh → retry so export doesn't break on token expiry. */
 export async function exportArticle(
   id: string,
-  format: "markdown" | "html"
+  format: "markdown" | "html",
+  retry = false
 ): Promise<string> {
   const token = getAccessToken();
   const res = await fetch(
@@ -479,7 +491,11 @@ export async function exportArticle(
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     }
   );
-  if (!res.ok) throw new Error(`Export failed (${res.status})`);
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return exportArticle(id, format, true);
+  }
+  if (!res.ok) throw new ApiError(res.status, `Export failed (${res.status})`);
   return res.text();
 }
 

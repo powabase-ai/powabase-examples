@@ -11,7 +11,9 @@ def test_kb_context_none_without_research_run():
     ) == (None, None)
 
 
-async def test_reflect_uses_broad_path_when_no_kb(monkeypatch):
+async def test_reflect_unavailable_when_no_kb(monkeypatch):
+    # No KB → grounding is unmeasurable; don't fabricate a score by judging against
+    # nothing. Report unavailable (None) without calling the LLM at all.
     db = MagicMock()
     article = {
         "id": "a1",
@@ -28,16 +30,10 @@ async def test_reflect_uses_broad_path_when_no_kb(monkeypatch):
     monkeypatch.setattr(quality.brief_svc, "get_brief", lambda db, bid: {})
     monkeypatch.setattr(quality, "ensure_factcheck_agent", AsyncMock(return_value="aid"))
     client = MagicMock()
-    client.run_agent = AsyncMock(
-        return_value={
-            "content": '{"grounding_score": 80, "claims_checked": 2, '
-            '"supported": 2, "flagged": []}'
-        }
-    )
+    client.run_agent = AsyncMock()
 
     rep = await quality.reflect(client, db, "a1")
 
-    assert rep["grounding_score"] == 80
-    # No KB → no per-claim extraction; exactly one (broad-bundle) judge call.
-    assert client.run_agent.await_count == 1
-    assert stored["grounding_report"]["grounding_score"] == 80
+    assert rep["grounding_score"] is None and rep["error"]
+    assert client.run_agent.await_count == 0  # never invoked the judge
+    assert stored["grounding_report"]["error"]

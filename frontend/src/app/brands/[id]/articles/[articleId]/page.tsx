@@ -206,7 +206,8 @@ function LiveScore({ label, score }: { label: string; score?: Score | null }) {
 
 function GenerationProgress({ a }: { a: Article }) {
   const p = a.progress ?? {};
-  const pct = Math.round(overallFraction(a) * 100);
+  // Clamp — overallFraction reads runtime JSON that could be malformed.
+  const pct = Math.round(Math.min(1, Math.max(0, overallFraction(a))) * 100);
   let detail = "";
   if (a.generation_status === "drafting" && p.total)
     detail = `section ${p.done ?? 0}/${p.total}`;

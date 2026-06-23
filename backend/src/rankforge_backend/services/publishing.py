@@ -7,8 +7,11 @@ so the public SSR page can serve schema-marked HTML in its initial response.
 """
 
 import html as _html
+import ipaddress
 import json
+import socket
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -95,6 +98,30 @@ def render_markdown(article: dict[str, Any]) -> str:
 
 
 # --- publishing ---
+def validate_webhook_url(url: str) -> None:
+    """SSRF guard: only http(s) to a public host. Rejects loopback/private/
+    link-local/reserved addresses so a webhook can't reach internal services or a
+    cloud metadata endpoint. (DNS-rebinding is a residual window; redirects are
+    disabled by the caller.)"""
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        raise ValueError("webhook URL must be http or https")
+    host = p.hostname
+    if not host:
+        raise ValueError("webhook URL has no host")
+    try:
+        infos = socket.getaddrinfo(host, p.port or (443 if p.scheme == "https" else 80))
+    except OSError as e:
+        raise ValueError("webhook host does not resolve") from e
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+        ):
+            raise ValueError("webhook URL resolves to a blocked address")
+
+
 def list_publications(db: Database, article_id: UUID) -> list[dict[str, Any]]:
     return db.fetch_all(
         f"select {_PUBLICATION_COLUMNS} from public.publications "
@@ -136,13 +163,12 @@ async def publish(
         return None
     config = config or {}
 
-    # Cache the sanitized HTML *fragment* for the public SSR page (the standalone
-    # full document is built on the fly for export), and flip to published.
-    body_html = render_body_html(article.get("content_md") or "")
+    # Flip to published. The public page renders fresh from content_md at read time,
+    # so there's no stale cached HTML to keep in sync.
     db.execute(
-        "update public.articles set content_html = %s, status = 'published', "
-        "updated_at = now() where id = %s",
-        (body_html, article_id),
+        "update public.articles set status = 'published', updated_at = now() "
+        "where id = %s",
+        (article_id,),
     )
 
     public_url = (
@@ -150,9 +176,11 @@ async def publish(
     )
 
     if target_type == "webhook":
-        url = config.get("url")
-        if not url:
-            return _record(db, article_id, "webhook", status="failed")
+        url = (config.get("url") or "").strip()
+        try:
+            validate_webhook_url(url)
+        except ValueError:
+            return _record(db, article_id, "webhook", status="failed", url=url or None)
         payload = {
             "id": str(article_id),
             "title": article.get("title"),
@@ -165,7 +193,7 @@ async def publish(
             "public_url": public_url,
         }
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
             return _record(db, article_id, "webhook", status="success", url=url)
@@ -178,10 +206,13 @@ async def publish(
 
 # --- public read (no auth) ---
 def get_published(db: Database, article_id: UUID) -> dict[str, Any] | None:
-    """A published article for the public SSR page. Returns None unless published."""
+    """A published article for the public SSR page (None unless published).
+
+    Returns content_md; the route renders + sanitizes it fresh, so the public page
+    never serves stale HTML and sanitization is guaranteed at render time."""
     return db.fetch_one(
         "select id, title, slug, meta_title, meta_description, content_md, "
-        "content_html, json_ld, updated_at from public.articles "
+        "json_ld, updated_at from public.articles "
         "where id = %s and status = 'published'",
         (article_id,),
     )

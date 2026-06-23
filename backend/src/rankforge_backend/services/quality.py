@@ -192,6 +192,13 @@ async def reflect(
     md = article.get("content_md") or ""
     kb_id, source_ids = _kb_context(db, article)
 
+    # No KB → grounding isn't measurable. Report it as unavailable (score None)
+    # rather than asking the judge to "check" against no evidence, which would
+    # otherwise feed a meaningless number into satisfied()/combined_score.
+    if not kb_id:
+        gen_svc._update(db, article_id, grounding_report=_UNAVAILABLE)
+        return _UNAVAILABLE
+
     try:
         agent_id = await ensure_factcheck_agent(client)
     except Exception:  # noqa: BLE001 — advisory: degrade gracefully
@@ -200,17 +207,14 @@ async def reflect(
 
     report: dict[str, Any] | None = None
     # Preferred path: verify each claim against evidence retrieved for that claim.
-    if kb_id:
-        try:
-            report = await _per_claim_report(client, agent_id, md, kb_id, source_ids)
-        except Exception:  # noqa: BLE001 — fall back to the broad-bundle judge
-            report = None
-    # Fallback: broad excerpt bundle (no KB, or extraction produced nothing).
+    try:
+        report = await _per_claim_report(client, agent_id, md, kb_id, source_ids)
+    except Exception:  # noqa: BLE001 — fall back to the broad-bundle judge
+        report = None
+    # Fallback: broad excerpt bundle (extraction failed or produced nothing).
     if report is None:
         try:
-            excerpts = (
-                await _broad_excerpts(client, kb_id, source_ids, brief) if kb_id else []
-            )
+            excerpts = await _broad_excerpts(client, kb_id, source_ids, brief)
             excerpt_text = "\n---\n".join(e[:600] for e in excerpts) or (
                 "(no grounding excerpts available)"
             )
