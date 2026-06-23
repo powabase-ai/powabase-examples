@@ -19,7 +19,9 @@ from . import research as research_svc
 from .agents import ensure_agent
 
 WRITER_AGENT_NAME = "rankforge-writer"
-WRITER_MODEL = "claude-sonnet-4-6"
+# Long-form prose IS the product — top model. Keep temperature for natural variety
+# (per-section calls, so we avoid stacking extended-thinking latency ~10×/article).
+WRITER_MODEL = "claude-opus-4-7"
 
 _SYSTEM_PROMPT = """\
 You are RankForge's **senior content writer**. You write one part of a long-form \

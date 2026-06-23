@@ -17,7 +17,9 @@ from . import research as research_svc
 from .agents import ensure_agent
 
 FACTCHECK_AGENT_NAME = "rankforge-factcheck"
-FACTCHECK_MODEL = "claude-sonnet-4-6"
+# Highest-stakes correctness gate (catching hallucinations). Top model + extended
+# thinking; short output makes the reasoning cheap relative to its value.
+FACTCHECK_MODEL = "claude-opus-4-7"
 
 _SYSTEM = """\
 You are RankForge's **grounding fact-checker**. You judge whether an article's \
@@ -66,7 +68,7 @@ async def ensure_factcheck_agent(client: PowabaseClient) -> str:
         name=FACTCHECK_AGENT_NAME,
         model=FACTCHECK_MODEL,
         system_prompt=_SYSTEM,
-        settings={"temperature": 0},
+        settings={"reasoning_effort": "high"},
     )
 
 

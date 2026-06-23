@@ -21,7 +21,12 @@ from . import research as research_svc
 from .agents import ensure_agent
 
 REVISER_AGENT_NAME = "rankforge-reviser"
-REVISER_MODEL = "claude-sonnet-4-6"
+# The "make it satisfactory" full-article rewrite — top model. Keep a low
+# temperature (faithful edits) rather than extended thinking, since this is a
+# large streamed output where thinking would add the most latency.
+REVISER_MODEL = "claude-opus-4-7"
+# Metadata is a trivial one-liner — a fast capable model is plenty.
+META_MODEL = "claude-sonnet-4-6"
 
 GROUNDING_TARGET = 70
 MAX_REVISIONS = 2
@@ -55,7 +60,7 @@ async def ensure_reviser_agent(client: PowabaseClient) -> str:
         name=REVISER_AGENT_NAME,
         model=REVISER_MODEL,
         system_prompt=_SYSTEM,
-        settings={"temperature": 0.3},
+        settings={"temperature": 0.2},
     )
 
 
@@ -74,7 +79,7 @@ async def ensure_meta_agent(client: PowabaseClient) -> str:
     return await ensure_agent(
         client,
         name=META_AGENT_NAME,
-        model=REVISER_MODEL,
+        model=META_MODEL,
         system_prompt=_META_SYSTEM,
         settings={"temperature": 0},
     )

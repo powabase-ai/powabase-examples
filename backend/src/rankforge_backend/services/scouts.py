@@ -27,7 +27,9 @@ from . import research as research_svc
 from .agents import ensure_agent
 
 SCOUT_AGENT_NAME = "rankforge-scout"
-SCOUT_MODEL = "claude-sonnet-4-6"
+# Discovery quality feeds auto-draft — top model + moderate extended thinking to
+# weigh timeliness/fit (we still re-score deterministically in code).
+SCOUT_MODEL = "claude-opus-4-7"
 
 _SYSTEM_PROMPT = """\
 You are RankForge's **content scout**. Given a brand, you use the `web_search` (Exa) \
@@ -89,7 +91,7 @@ async def ensure_scout_agent(client: PowabaseClient) -> str:
         name=SCOUT_AGENT_NAME,
         model=SCOUT_MODEL,
         system_prompt=_SYSTEM_PROMPT,
-        settings={"temperature": 0.2},
+        settings={"reasoning_effort": "medium"},
         builtin_tools=("web_search",),
     )
 

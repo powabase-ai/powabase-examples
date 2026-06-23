@@ -254,7 +254,8 @@ def score_geo(
 
 
 JUDGE_AGENT_NAME = "rankforge-geo-judge"
-JUDGE_MODEL = "claude-sonnet-4-6"
+# Evaluation/judgment with short JSON output — top model + extended thinking.
+JUDGE_MODEL = "claude-opus-4-7"
 _JUDGE_SYSTEM = """\
 You are a **GEO (Generative Engine Optimization) auditor**. You rate how easily an \
 AI answer engine could lift and cite an article, and you return only structured JSON.
@@ -288,7 +289,7 @@ async def ensure_judge_agent(client: PowabaseClient) -> str:
         name=JUDGE_AGENT_NAME,
         model=JUDGE_MODEL,
         system_prompt=_JUDGE_SYSTEM,
-        settings={"temperature": 0},
+        settings={"reasoning_effort": "high"},
     )
 
 

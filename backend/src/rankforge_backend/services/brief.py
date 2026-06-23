@@ -16,7 +16,9 @@ from . import templates as templates_svc
 from .agents import ensure_agent
 
 BRIEF_AGENT_NAME = "rankforge-brief"
-BRIEF_MODEL = "claude-sonnet-4-6"
+# Planning step — sets the contract every downstream agent obeys. Top model +
+# extended thinking; thinking forces temperature≈1, so we omit temperature.
+BRIEF_MODEL = "claude-opus-4-7"
 
 _SYSTEM_PROMPT = """\
 You are RankForge's **SEO/GEO content strategist**. You turn topic research into a \
@@ -73,7 +75,7 @@ async def ensure_brief_agent(client: PowabaseClient) -> str:
         name=BRIEF_AGENT_NAME,
         model=BRIEF_MODEL,
         system_prompt=_SYSTEM_PROMPT,
-        settings={"temperature": 0.3},
+        settings={"reasoning_effort": "high"},
     )
 
 
