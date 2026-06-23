@@ -5,13 +5,16 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   ChevronLeft,
   Layers,
+  LogOut,
   PenLine,
   Search,
   Settings,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 
 import { useBrands } from "@/lib/hooks/useBrands";
+import { useAuth } from "@/lib/auth/AuthProvider";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
@@ -25,11 +28,13 @@ export function AppSidebar({ brandId }: { brandId: string }) {
   const pathname = usePathname();
   const router = useRouter();
   const { data: brands } = useBrands();
+  const { profile, signOut } = useAuth();
 
   const nav: NavItem[] = [
     { title: "Research", href: `/brands/${brandId}`, icon: Search, exact: true },
     { title: "Sources", href: `/brands/${brandId}/sources`, icon: Layers },
     { title: "Articles", href: `/brands/${brandId}/articles`, icon: PenLine },
+    { title: "Team", href: `/brands/${brandId}/team`, icon: Users },
     { title: "Settings", href: `/brands/${brandId}/settings`, icon: Settings },
   ];
 
@@ -83,13 +88,35 @@ export function AppSidebar({ brandId }: { brandId: string }) {
         })}
       </nav>
 
-      <div className="mt-auto px-5 pb-5">
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1 text-xs text-[rgb(var(--iron-text))] transition-colors hover:text-[rgb(var(--iron-strong))]"
-        >
-          <ChevronLeft className="size-3.5" /> All brands
-        </Link>
+      <div className="mt-auto">
+        <div className="px-5 pb-3">
+          <Link
+            href="/"
+            className="inline-flex items-center gap-1 text-xs text-[rgb(var(--iron-text))] transition-colors hover:text-[rgb(var(--iron-strong))]"
+          >
+            <ChevronLeft className="size-3.5" /> All brands
+          </Link>
+        </div>
+        <div className="flex items-center justify-between gap-2 border-t border-[rgb(var(--iron-line))] px-5 py-3.5">
+          <div className="min-w-0">
+            <div className="truncate text-xs font-medium text-[rgb(var(--iron-strong))]">
+              {profile?.email ?? "—"}
+            </div>
+            {profile && (
+              <div className="text-[10px] uppercase tracking-wide text-[rgb(var(--iron-text))]">
+                {profile.role}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => signOut()}
+            title="Sign out"
+            aria-label="Sign out"
+            className="shrink-0 rounded-md p-1.5 text-[rgb(var(--iron-text))] transition-colors hover:bg-[rgb(var(--iron-hover))] hover:text-[rgb(var(--iron-strong))]"
+          >
+            <LogOut className="size-4" />
+          </button>
+        </div>
       </div>
     </aside>
   );

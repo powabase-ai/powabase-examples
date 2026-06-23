@@ -12,6 +12,7 @@ dependencies = [
     "psycopg[binary,pool]>=3.2",
     "httpx>=0.27",
     "python-multipart>=0.0.12",
+    "pyjwt>=2.9",
 ]
 
 [dependency-groups]

@@ -90,14 +90,16 @@ def _grounding_block(
     return "\n".join(lines)
 
 
-def create_article(db: Database, brief: dict[str, Any]) -> dict[str, Any]:
+def create_article(
+    db: Database, brief: dict[str, Any], author_id: Any = None
+) -> dict[str, Any]:
     title = brief.get("suggested_title") or brief.get("topic") or "Untitled"
     return db.fetch_one(
         f"""
         insert into public.articles
             (business_id, brief_id, research_run_id, title, slug, status,
-             generation_status, meta_title, meta_description, keywords)
-        values (%s, %s, %s, %s, %s, 'draft', 'grounding', %s, %s, %s)
+             generation_status, meta_title, meta_description, keywords, author_id)
+        values (%s, %s, %s, %s, %s, 'draft', 'grounding', %s, %s, %s, %s)
         returning {_ARTICLE_COLUMNS}
         """,
         (
@@ -109,6 +111,7 @@ def create_article(db: Database, brief: dict[str, Any]) -> dict[str, Any]:
             brief.get("suggested_title"),
             brief.get("suggested_meta"),
             Json([brief.get("primary_keyword")] if brief.get("primary_keyword") else []),
+            author_id,
         ),
     )
 

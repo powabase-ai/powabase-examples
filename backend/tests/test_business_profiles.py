@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+from conftest import with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
@@ -28,7 +29,7 @@ ROW = {
 def make_client(db: MagicMock) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_db] = lambda: db
-    return TestClient(app)
+    return TestClient(with_auth(app))
 
 
 def test_create_inserts_and_returns_201():

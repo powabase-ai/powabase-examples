@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from conftest import with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
@@ -47,7 +48,7 @@ def make_client() -> TestClient:
     app = create_app()
     app.dependency_overrides[get_db] = lambda: MagicMock()
     app.dependency_overrides[get_powabase] = lambda: MagicMock()
-    return TestClient(app)
+    return TestClient(with_auth(app))
 
 
 def test_create_research_returns_searching(monkeypatch):

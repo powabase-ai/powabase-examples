@@ -3,6 +3,8 @@
  * secrets (only the Anon key, used elsewhere for GoTrue/PostgREST).
  */
 
+import { getAccessToken, getSession, refresh } from "./auth/session";
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -41,12 +43,27 @@ export interface BusinessProfileInput {
   sitemap_url?: string | null;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  retry = false
+): Promise<T> {
+  const { headers: initHeaders, ...rest } = init ?? {};
+  const token = getAccessToken();
   const res = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json" },
     cache: "no-store",
-    ...init,
+    ...rest,
+    headers: {
+      "Content-Type": "application/json",
+      ...(initHeaders as Record<string, string> | undefined),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
   });
+  // Token expired? Refresh once and retry transparently.
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return request<T>(path, init, true);
+  }
   if (!res.ok) {
     let detail = `${res.status}`;
     try {
@@ -275,7 +292,68 @@ export const articlesApi = {
     request<Article>(`/api/articles/${id}/versions/${versionId}/restore`, {
       method: "POST",
     }),
+  comments: (id: string) =>
+    request<Comment[]>(`/api/articles/${id}/comments`),
+  addComment: (id: string, body: string, anchor?: string | null) =>
+    request<Comment>(`/api/articles/${id}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ body, anchor }),
+    }),
+  updateComment: (
+    id: string,
+    commentId: string,
+    data: { body?: string; resolved?: boolean }
+  ) =>
+    request<Comment>(`/api/articles/${id}/comments/${commentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  removeComment: (id: string, commentId: string) =>
+    request<void>(`/api/articles/${id}/comments/${commentId}`, {
+      method: "DELETE",
+    }),
 };
+
+// --- Auth / membership ---
+export type Role = "writer" | "editor" | "admin";
+
+export interface Profile {
+  id: string;
+  email?: string | null;
+  display_name?: string | null;
+  role: Role;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export const accountApi = {
+  me: () => request<Profile>("/api/me"),
+  members: () => request<Profile[]>("/api/members"),
+  setRole: (id: string, role: Role) =>
+    request<Profile>(`/api/members/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+};
+
+// --- Review comments ---
+export interface Comment {
+  id: string;
+  article_id: string;
+  author_id?: string | null;
+  author_email?: string | null;
+  author_name?: string | null;
+  body: string;
+  anchor?: string | null;
+  resolved: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Whether a role may approve/publish (the editorial gate). */
+export function canApprove(role?: Role | null): boolean {
+  return role === "editor" || role === "admin";
+}
 
 export interface ArticleUpdate {
   title?: string;

@@ -13,6 +13,7 @@ from .config import get_settings
 from .db import Database
 from .powabase import PowabaseClient
 from .routes import (
+    account,
     articles,
     brief,
     business_profiles,
@@ -66,6 +67,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(account.router)
     app.include_router(business_profiles.router)
     app.include_router(research.router)
     app.include_router(brief.router)

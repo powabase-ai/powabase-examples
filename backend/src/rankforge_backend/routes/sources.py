@@ -4,13 +4,18 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from ..auth import get_current_user
 from ..db import Database
 from ..models.research import BrandSource
 from ..powabase import PowabaseClient, PowabaseError
 from ..services import research as svc
 from .deps import get_db, get_powabase
 
-router = APIRouter(prefix="/api/sources", tags=["sources"])
+router = APIRouter(
+    prefix="/api/sources",
+    tags=["sources"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.get("", response_model=list[BrandSource])

@@ -8,10 +8,20 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { BrandForm } from "@/components/BrandForm";
 import { useBrands, useCreateBrand } from "@/lib/hooks/useBrands";
+import { RequireAuth } from "@/lib/auth/RequireAuth";
 import { LAST_BRAND_KEY } from "@/lib/constants";
 import type { BusinessProfileInput } from "@/lib/api";
 
 export default function Home() {
+  // Gate brand queries behind auth so they don't fire (and 401) pre-login.
+  return (
+    <RequireAuth>
+      <HomeInner />
+    </RequireAuth>
+  );
+}
+
+function HomeInner() {
   const router = useRouter();
   const { data: brands, isLoading } = useBrands();
   const createBrand = useCreateBrand();

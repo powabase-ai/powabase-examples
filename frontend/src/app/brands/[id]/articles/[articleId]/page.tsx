@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   History,
   Loader2,
+  MessageSquare,
   Pencil,
   RefreshCw,
   RotateCcw,
@@ -24,7 +25,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ArticleEditor } from "@/components/ArticleEditor";
+import { CommentsPanel } from "@/components/CommentsPanel";
 import { Markdown } from "@/components/Markdown";
+import { useAuth } from "@/lib/auth/AuthProvider";
 import {
   useArticle,
   useArticleVersions,
@@ -38,8 +41,10 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
-import { ARTICLE_STATUSES } from "@/lib/api";
+import { ARTICLE_STATUSES, canApprove } from "@/lib/api";
 import type { GroundingReport, Score, ScoreSignal } from "@/lib/api";
+
+const GATED_STATUSES = new Set(["approved", "published"]);
 
 const PHASE_LABEL: Record<string, string> = {
   grounding: "Grounding in research sources…",
@@ -160,9 +165,11 @@ export default function ArticleView({
   const update = useUpdateArticle(articleId);
   const versions = useArticleVersions(articleId);
   const restore = useRestoreVersion(articleId);
+  const { profile } = useAuth();
+  const mayApprove = canApprove(profile?.role);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const [tab, setTab] = useState<"SEO" | "GEO" | "Grounding">("SEO");
+  const [tab, setTab] = useState<"SEO" | "GEO" | "Grounding" | "Comments">("SEO");
   const [showHistory, setShowHistory] = useState(false);
 
   const generating = a && !["done", "failed"].includes(a.generation_status);
@@ -203,7 +210,11 @@ export default function ArticleView({
   function changeStatus(next: string) {
     update.mutate(
       { status: next },
-      { onSuccess: () => toast.success(`Marked ${next.replace(/_/g, " ")}`) }
+      {
+        onSuccess: () => toast.success(`Marked ${next.replace(/_/g, " ")}`),
+        onError: (e) =>
+          toast.error(e instanceof Error ? e.message : "Status change failed"),
+      }
     );
   }
 
@@ -228,7 +239,7 @@ export default function ArticleView({
       <ResizablePanel defaultSize={26} minSize={16} maxSize={45}>
         <aside className="flex h-full w-full flex-col bg-card">
         <div className="flex border-b border-border">
-          {(["SEO", "GEO", "Grounding"] as const).map((t) => {
+          {(["SEO", "GEO", "Grounding", "Comments"] as const).map((t) => {
             const sc = t === "SEO" ? a?.seo_score : t === "GEO" ? a?.geo_score : null;
             const g = t === "Grounding" ? a?.grounding_report?.grounding_score : null;
             const badge = sc ? sc.total : g ?? null;
@@ -249,8 +260,9 @@ export default function ArticleView({
                     ? "border-[rgb(var(--ember))] text-foreground"
                     : "border-transparent text-muted-foreground hover:text-foreground"
                 )}
+                title={t}
               >
-                {t}
+                {t === "Comments" ? <MessageSquare className="size-3.5" /> : t}
                 {badge != null && (
                   <span className="font-data" style={{ color: `rgb(${color})` }}>
                     {badge}
@@ -260,35 +272,41 @@ export default function ArticleView({
             );
           })}
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {tab === "Grounding" ? (
-            a?.grounding_report ? (
-              <GroundingBody report={a.grounding_report} />
+        {tab === "Comments" ? (
+          <div className="min-h-0 flex-1 p-4">
+            <CommentsPanel articleId={articleId} />
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            {tab === "Grounding" ? (
+              a?.grounding_report ? (
+                <GroundingBody report={a.grounding_report} />
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  {generating ? "Fact-check runs after generation." : "No fact-check yet."}
+                </p>
+              )
+            ) : current ? (
+              <EvalBody score={current} />
             ) : (
               <p className="text-sm text-muted-foreground">
-                {generating ? "Fact-check runs after generation." : "No fact-check yet."}
+                {generating ? "Scores appear once generation finishes." : "No scores yet."}
               </p>
-            )
-          ) : current ? (
-            <EvalBody score={current} />
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              {generating ? "Scores appear once generation finishes." : "No scores yet."}
-            </p>
-          )}
-          {a && a.generation_status === "done" && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="mt-4 w-full"
-              onClick={() => optimize.mutate()}
-              disabled={optimize.isPending}
-            >
-              {optimize.isPending ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              Re-optimize & score
-            </Button>
-          )}
-        </div>
+            )}
+            {a && a.generation_status === "done" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-4 w-full"
+                onClick={() => optimize.mutate()}
+                disabled={optimize.isPending}
+              >
+                {optimize.isPending ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                Re-optimize & score
+              </Button>
+            )}
+          </div>
+        )}
         </aside>
       </ResizablePanel>
       <ResizableHandle />
@@ -314,8 +332,13 @@ export default function ArticleView({
                   aria-label="Article status"
                 >
                   {ARTICLE_STATUSES.map((s) => (
-                    <option key={s} value={s}>
+                    <option
+                      key={s}
+                      value={s}
+                      disabled={!mayApprove && GATED_STATUSES.has(s)}
+                    >
                       {s.replace(/_/g, " ")}
+                      {!mayApprove && GATED_STATUSES.has(s) ? " (editor)" : ""}
                     </option>
                   ))}
                 </select>

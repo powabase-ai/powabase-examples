@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+from conftest import with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
@@ -47,7 +48,7 @@ def make_client() -> TestClient:
     app = create_app()
     app.dependency_overrides[get_db] = lambda: MagicMock()
     app.dependency_overrides[get_powabase] = lambda: MagicMock()
-    return TestClient(app)
+    return TestClient(with_auth(app))
 
 
 def test_generate_article_201(monkeypatch):
@@ -55,7 +56,9 @@ def test_generate_article_201(monkeypatch):
         return None
 
     monkeypatch.setattr(svc, "get_brief", lambda db, bid: {"id": BRIEF_ID})
-    monkeypatch.setattr(svc, "create_article", lambda db, brief: ARTICLE)
+    monkeypatch.setattr(
+        svc, "create_article", lambda db, brief, author_id=None: ARTICLE
+    )
     monkeypatch.setattr(svc, "run_generation_task", fake_task)
 
     resp = make_client().post("/api/articles", json={"brief_id": BRIEF_ID})
@@ -75,7 +78,7 @@ def test_update_article_patches():
     app = create_app()
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_powabase] = lambda: MagicMock()
-    resp = TestClient(app).patch(
+    resp = TestClient(with_auth(app)).patch(
         f"/api/articles/{ARTICLE['id']}", json={"title": "Edited"}
     )
     assert resp.status_code == 200

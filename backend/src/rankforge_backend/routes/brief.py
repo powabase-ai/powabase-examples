@@ -4,13 +4,18 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from ..auth import get_current_user
 from ..db import Database
 from ..models.brief import Brief, BriefGenerate, BriefUpdate
 from ..powabase import PowabaseClient
 from ..services import brief as svc
 from .deps import get_db, get_powabase
 
-router = APIRouter(prefix="/api/briefs", tags=["briefs"])
+router = APIRouter(
+    prefix="/api/briefs",
+    tags=["briefs"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.post("", response_model=Brief, status_code=status.HTTP_201_CREATED)

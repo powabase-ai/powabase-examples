@@ -299,8 +299,11 @@ Still open:
   real Powabase project.
 - **M2** — Generation pipeline + grounding KB + quality gates (Phases 3, 6, 13);
   article-type templates.
-- **M3** — SEO + GEO scoring (Phases 4–5) in the editor.
-- **M4** — Editorial workflow + library (Phase 7).
+- **M3** — SEO + GEO scoring (Phases 4–5) in the editor. ✅
+- **M4** — Editorial workflow + library (Phase 7). ✅ Status lifecycle, library
+  filters, version history/restore, **GoTrue auth** (Anon-key client + JWT-verified
+  backend, JIT profiles, first user → admin), **roles** (writer/editor/admin gating
+  approve/publish + role management), and inline **review comments**.
 - **M5** — Autonomous content scouts + opportunity inbox (Phase 9) — the
   scheduled-job/queue framework.
 - **M6** — Authority & linking: sitemap ingestion, internal/external links, monthly

@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from ..auth import get_current_user
 from ..db import Database
 from ..models.business import (
     BusinessProfile,
@@ -15,7 +16,11 @@ from .deps import get_db, get_powabase  # re-exported for callers/tests
 
 __all__ = ["router", "get_db", "get_powabase"]
 
-router = APIRouter(prefix="/api/business-profiles", tags=["business-profiles"])
+router = APIRouter(
+    prefix="/api/business-profiles",
+    tags=["business-profiles"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.get("", response_model=list[BusinessProfile])

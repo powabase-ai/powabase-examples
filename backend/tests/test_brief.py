@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+from conftest import with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
@@ -33,7 +34,7 @@ def make_client(db: MagicMock) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_powabase] = lambda: MagicMock()
-    return TestClient(app)
+    return TestClient(with_auth(app))
 
 
 def test_generate_brief_201(monkeypatch):

@@ -5,13 +5,18 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from ..auth import get_current_user
 from ..db import Database
 from ..models.research import ResearchRun, ResearchRunCreate, ResearchSource
 from ..powabase import PowabaseClient
 from ..services import research as svc
 from .deps import get_db, get_powabase
 
-router = APIRouter(prefix="/api/research", tags=["research"])
+router = APIRouter(
+    prefix="/api/research",
+    tags=["research"],
+    dependencies=[Depends(get_current_user)],
+)
 
 # keep references so background tasks aren't garbage-collected
 _bg_tasks: set[asyncio.Task] = set()
