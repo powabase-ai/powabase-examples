@@ -85,6 +85,15 @@ def test_norm_title_dedups():
     )
 
 
+def test_cadence_delta():
+    from datetime import timedelta
+
+    assert svc._cadence_delta("twice_daily") == timedelta(hours=12)
+    assert svc._cadence_delta("daily") == timedelta(days=1)
+    assert svc._cadence_delta("weekly") == timedelta(days=7)
+    assert svc._cadence_delta("bogus") == timedelta(days=1)  # safe default
+
+
 # --- routes (hermetic) ---
 def _brand_db() -> MagicMock:
     """A db mock whose fetch_one satisfies assert_brand_access (org match)."""

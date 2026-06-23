@@ -400,7 +400,7 @@ export type OpportunityStatus =
 export interface ScoutConfig {
   business_id: string;
   enabled: boolean;
-  cadence: "daily" | "weekly";
+  cadence: "twice_daily" | "daily" | "weekly";
   autonomy: Autonomy;
   min_score: number;
   max_drafts_per_run: number;

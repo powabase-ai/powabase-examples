@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-Cadence = Literal["daily", "weekly"]
+Cadence = Literal["twice_daily", "daily", "weekly"]
 Autonomy = Literal["suggest", "auto_draft"]
 
 

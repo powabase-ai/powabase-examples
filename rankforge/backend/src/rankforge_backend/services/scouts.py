@@ -101,7 +101,11 @@ async def ensure_scout_agent(client: PowabaseClient) -> str:
 
 # --- config ---
 def _cadence_delta(cadence: str) -> timedelta:
-    return timedelta(days=7) if cadence == "weekly" else timedelta(days=1)
+    if cadence == "weekly":
+        return timedelta(days=7)
+    if cadence == "twice_daily":
+        return timedelta(hours=12)
+    return timedelta(days=1)  # daily (default)
 
 
 def get_config(db: Database, business_id: UUID) -> dict[str, Any] | None:

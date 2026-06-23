@@ -70,37 +70,35 @@ function ConfigPanel({
   return (
     <Card>
       <CardContent className="grid gap-4 py-5 sm:grid-cols-2">
-        <label className="flex items-center justify-between gap-3 sm:col-span-2">
-          <div>
-            <div className="text-sm font-medium">Autonomous scouting</div>
-            <div className="text-xs text-muted-foreground">
-              Discover timely opportunities on a schedule.
-            </div>
-          </div>
-          <input
-            type="checkbox"
-            checked={form.enabled}
-            disabled={!canEdit}
-            onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
-            className="size-4 accent-[rgb(var(--ember))]"
-          />
-        </label>
-
-        <div className="space-y-1.5">
+        <div className="space-y-1.5 sm:col-span-2">
           <label className="text-xs font-medium text-muted-foreground">
-            Cadence
+            Auto-scout frequency
           </label>
           <select
-            value={form.cadence}
+            value={form.enabled ? form.cadence : "off"}
             disabled={!canEdit}
-            onChange={(e) =>
-              setForm({ ...form, cadence: e.target.value as ScoutConfig["cadence"] })
-            }
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "off") setForm({ ...form, enabled: false });
+              else
+                setForm({
+                  ...form,
+                  enabled: true,
+                  cadence: v as ScoutConfig["cadence"],
+                });
+            }}
             className={cn(field, "w-full")}
           >
+            <option value="off">Off — manual only</option>
+            <option value="twice_daily">Twice a day</option>
             <option value="daily">Daily</option>
             <option value="weekly">Weekly</option>
           </select>
+          <p className="text-xs text-muted-foreground">
+            {form.enabled
+              ? "Scouts run automatically on this schedule. You can still run one anytime with “Run now.”"
+              : "No automatic scouting — use “Run now” to scout on demand."}
+          </p>
         </div>
 
         <div className="space-y-1.5">
