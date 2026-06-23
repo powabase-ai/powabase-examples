@@ -26,15 +26,27 @@ GROUNDING_TARGET = 70
 MAX_REVISIONS = 2
 _SIGNAL_FLOOR = 70  # only surface fixes for signals scoring below this
 
-_SYSTEM = (
-    "You are RankForge's revising editor. You take a full SEO/GEO blog article and a "
-    "list of concrete issues, and return an improved full article that fixes them "
-    "while preserving the structure, headings, voice, and good existing content. Keep "
-    "roughly the same length or longer. When you cite a source, weave the link into a "
-    "natural descriptive phrase (never the page title or a bare URL) and spread "
-    "citations across DIFFERENT source domains. Never invent statistics. Output ONLY "
-    "the full revised article in Markdown, starting at the H1 — no preamble or notes."
-)
+_SYSTEM = """\
+You are RankForge's **revising editor**. You take a full SEO/GEO blog article plus a \
+list of concrete issues, and return an improved full article that resolves them.
+
+## Preserve
+- The article's structure, headings, voice, and factually-correct existing content \
+and citations.
+- Roughly the same length or longer — never truncate the article.
+
+## Fix
+- Every issue in the provided list, using the supplied additional sources where relevant.
+
+## Citations
+- Weave each link into a natural descriptive phrase — never the page title or a bare URL.
+- Spread citations across different source domains.
+- Never invent statistics or sources.
+
+## Output
+- Output ONLY the full revised article in Markdown, starting at the H1 — no preamble, \
+notes, or commentary.
+"""
 
 _reviser_agent_id: str | None = None
 
@@ -59,10 +71,13 @@ async def ensure_reviser_agent(client: PowabaseClient) -> str:
 
 
 META_AGENT_NAME = "rankforge-meta"
-_META_SYSTEM = (
-    "You write SEO metadata and return ONLY a single JSON object — no prose or "
-    "code fences."
-)
+_META_SYSTEM = """\
+You are RankForge's **SEO metadata writer**. You write a compliant title and meta \
+description for an article and return only structured JSON.
+
+## Output discipline
+- Return exactly one JSON object — no prose, no code fences.
+"""
 _META_KEYS = {"keyword_title", "keyword_early", "title_length", "meta_length"}
 _meta_agent_id: str | None = None
 
@@ -100,12 +115,17 @@ async def fix_meta(
     """Rewrite meta_title / meta_description to satisfy the title/meta SEO signals."""
     pk = brief.get("primary_keyword") or ""
     msg = (
-        "Write SEO metadata for the article.\n"
-        f"Primary keyword: {pk or 'n/a'}\n"
-        f"Working title: {article.get('title') or ''}\n\n"
-        'Return ONLY JSON: {"meta_title": string of at most 60 characters that '
-        'includes the primary keyword, "meta_description": string of 120-160 '
-        "characters, compelling, including the primary keyword}."
+        "Write SEO metadata for the article.\n\n"
+        "## Context\n"
+        f"- Primary keyword: {pk or 'n/a'}\n"
+        f"- Working title: {article.get('title') or ''}\n\n"
+        "## Requirements\n"
+        "- `meta_title`: at most 60 characters, includes the primary keyword.\n"
+        "- `meta_description`: 120–160 characters, compelling, includes the primary "
+        "keyword.\n\n"
+        "## Output\n"
+        'Return ONLY this JSON object:\n'
+        '{"meta_title": str, "meta_description": str}'
     )
     try:
         agent_id = await ensure_meta_agent(client)
@@ -241,13 +261,14 @@ async def _revise_once(
 ) -> str:
     issue_text = "\n".join(f"- {i}" for i in issues[:14])
     msg = (
-        "Revise the article below to fix these issues. Preserve its structure, "
-        "headings, voice, and good existing content and citations; keep roughly the "
-        "same length or longer.\n\n"
-        f"ISSUES TO FIX:\n{issue_text}\n\n"
-        "ADDITIONAL SOURCES you may cite (use natural anchor text, vary the domain):\n"
+        "Revise the article below into an improved full article.\n\n"
+        "## Issues to fix\n"
+        f"{issue_text}\n\n"
+        "## Additional sources you may cite\n"
+        "- Use natural anchor text and vary the source domain.\n"
         f"{excerpts}\n\n"
-        "Output ONLY the full revised article in Markdown, starting at the H1.\n\n"
+        "## Output\n"
+        "- Output ONLY the full revised article in Markdown, starting at the H1.\n\n"
         f"---ARTICLE---\n{md}"
     )
     # Stream (/run/stream): a full-article rewrite is too large for the buffered

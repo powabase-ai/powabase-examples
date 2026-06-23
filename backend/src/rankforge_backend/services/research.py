@@ -29,16 +29,29 @@ TERMINAL = {"extracted", "attention_required", "failed", "cancelled"}
 # depth → (serp results to analyze, competitor pages to scrape)
 DEPTH_PRESETS = {"quick": (5, 3), "standard": (10, 5), "deep": (20, 10)}
 
-_SYSTEM_PROMPT = (
-    "You are RankForge's SERP analyst. Given a topic, use web_search (Exa) to "
-    "analyze the search results. Return the top organic results (rank, title, url, "
-    "snippet), People-Also-Ask questions, related queries, keyword clusters, and the "
-    "overall search intent. Favor a DIVERSE set of sources across DIFFERENT domains "
-    "and source types — official docs, independent analyses, reputable news, and "
-    "practitioner blogs — rather than many pages from the same site. Do NOT scrape "
-    "pages — only search. Finish by outputting one JSON object in a single ```json "
-    "fenced block and nothing after it."
-)
+_SYSTEM_PROMPT = """\
+You are RankForge's **SERP analyst**. Given a topic, you map its search landscape \
+with the `web_search` (Exa) tool and return a structured analysis.
+
+## Your task
+- Search the topic with `web_search`, then derive every field from the returned \
+results — not from prior knowledge.
+- Capture: the organic ranking results, the questions searchers ask, adjacent \
+queries, keyword groupings, and the dominant search intent.
+
+## Rules
+- Search only — never open, scrape, or read the full body of a page.
+- Prefer a diverse result set: span different domains and source types (official \
+docs, independent analyses, reputable news, practitioner blogs) over many pages \
+from one site.
+- Keep results in their natural ranking order; do not reorder by opinion.
+- Leave a field empty (`[]` or `null`) when the search does not support it; never \
+fabricate.
+
+## Output
+- Your final message must be exactly one JSON object in a single ```json fenced \
+block, with nothing after it.
+"""
 
 _SCHEMA_HINT = """{
   "intent": "informational|commercial|transactional|navigational",
@@ -198,12 +211,18 @@ async def run_research_task(
         # 1) SERP via agent (search only)
         agent_id = await ensure_serp_agent(client)
         msg = (
-            f"Topic: {topic}\nLocale: {locale}\n"
-            f"Brand niche: {brand.get('niche') or 'n/a'}\n\n"
-            f"Use web_search to analyze the top {serp_n} organic results for this "
-            "topic. Collect results (rank, title, url, snippet), People-Also-Ask, "
-            "related queries, keyword clusters, and overall intent. Do not scrape.\n\n"
-            f"Output ONLY a single ```json block:\n{_SCHEMA_HINT}"
+            "## Context\n"
+            f"- Topic: {topic}\n"
+            f"- Locale: {locale}\n"
+            f"- Brand niche: {brand.get('niche') or 'n/a'}\n\n"
+            "## Task\n"
+            f"- Use `web_search` to analyze the top {serp_n} organic results.\n"
+            "- Collect: ranked results (rank, title, url, snippet), People-Also-Ask, "
+            "related queries, keyword clusters, and overall intent.\n"
+            "- Search only — do not scrape.\n\n"
+            "## Output\n"
+            "- Output ONLY a single ```json block matching this shape:\n"
+            f"{_SCHEMA_HINT}"
         )
         run = await client.run_agent_collect(agent_id, msg)
         if run["error"]:

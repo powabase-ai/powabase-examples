@@ -20,18 +20,26 @@ from . import research as research_svc
 WRITER_AGENT_NAME = "rankforge-writer"
 WRITER_MODEL = "claude-sonnet-4-6"
 
-_SYSTEM_PROMPT = (
-    "You are RankForge's senior content writer. You write one part of a long-form "
-    "SEO/GEO blog article at a time, in clean Markdown. Ground every factual claim in "
-    "the provided source excerpts and cite sources inline as Markdown links. When you "
-    "cite, weave the link into the sentence so the linked (anchor) text is a natural, "
-    "descriptive phrase that reads well in context — NEVER the source's page title, "
-    "site name, or a bare URL. Across your writing, spread citations among DIFFERENT "
-    "source domains instead of repeatedly linking the same one. Write in the brand's "
-    "voice — specific, useful, concrete. Never invent statistics. Output only the "
-    "Markdown for the requested part (starting at its heading), with no preamble or "
-    "sign-off."
-)
+_SYSTEM_PROMPT = """\
+You are RankForge's **senior content writer**. You write one part of a long-form \
+SEO/GEO blog article at a time, in clean Markdown, for the brand's audience.
+
+## Grounding & citations
+- Base every factual or statistical claim on the provided source excerpts; never \
+invent statistics or specifics.
+- Cite sources inline as Markdown links.
+- Make each link's anchor text a natural, descriptive phrase that reads well in the \
+sentence — never the source's page title, the site name, or a bare URL.
+- Spread citations across different source domains rather than repeatedly linking one.
+
+## Style
+- Write in the brand's voice: specific, useful, concrete.
+- Lead with a tight, directly extractable answer, then elaborate.
+
+## Output
+- Output only the Markdown for the requested part, starting at its heading.
+- Add no preamble, sign-off, or content outside the requested part.
+"""
 
 _ARTICLE_COLUMNS = (
     "id, business_id, brief_id, research_run_id, title, slug, status, "
@@ -159,16 +167,19 @@ async def _draft_part(
         else []
     )
     msg = (
-        f"Article topic: {ctx['topic']}\n"
-        f"Primary keyword: {ctx.get('primary_keyword') or 'n/a'}\n"
-        f"Secondary keywords: {', '.join(ctx.get('secondary_keywords') or [])}\n"
-        f"Audience / brand: {ctx.get('audience') or 'n/a'}\n\n"
-        f"{instruction}\n\n"
-        "Grounding excerpts — when you use one, cite it inline with NATURAL anchor "
-        "text (a descriptive phrase, never the page title or a bare URL), and vary "
-        "which source domain you cite:\n"
+        "## Context\n"
+        f"- Article topic: {ctx['topic']}\n"
+        f"- Primary keyword: {ctx.get('primary_keyword') or 'n/a'}\n"
+        f"- Secondary keywords: {', '.join(ctx.get('secondary_keywords') or []) or 'n/a'}\n"
+        f"- Audience / brand: {ctx.get('audience') or 'n/a'}\n\n"
+        "## Write this part\n"
+        f"- {instruction}\n\n"
+        "## Grounding excerpts\n"
+        "- Cite an excerpt inline with natural anchor text (a descriptive phrase, "
+        "never the page title or a bare URL), and vary the source domain.\n"
         f"{_grounding_block(chunks, url_by_source)}\n\n"
-        "Output only the Markdown."
+        "## Output\n"
+        "- Output only the Markdown for this part."
     )
     res = await client.run_agent(agent_id, msg)
     return (res.get("content") or "").strip()

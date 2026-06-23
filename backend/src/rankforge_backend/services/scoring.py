@@ -254,19 +254,32 @@ def score_geo(
 
 JUDGE_AGENT_NAME = "rankforge-geo-judge"
 JUDGE_MODEL = "claude-sonnet-4-6"
-_JUDGE_SYSTEM = (
-    "You are a GEO (Generative Engine Optimization) auditor. You read an article and "
-    "return ONLY a single JSON object — no prose, no commentary, no code fences."
-)
-_JUDGE_PROMPT = (
-    "Rate this article 0–100 on two axes for how well an AI answer engine could lift "
-    "and cite it:\n"
-    "1. direct_answer — does each section open with a concise, extractable answer?\n"
-    "2. citability — are claims specific, quotable, and source-attributed?\n"
-    'Return ONLY: {"direct_answer": int, "direct_answer_note": str, '
-    '"direct_answer_fixes": [str], "citability": int, "citability_note": str, '
-    '"citability_fixes": [str]}.'
-)
+_JUDGE_SYSTEM = """\
+You are a **GEO (Generative Engine Optimization) auditor**. You rate how easily an \
+AI answer engine could lift and cite an article, and you return only structured JSON.
+
+## Output discipline
+- Return exactly one JSON object — no prose, no commentary, no code fences.
+"""
+_JUDGE_PROMPT = """\
+Rate the article on two independent axes (0–100 each) for how well an AI answer \
+engine could lift and cite it.
+
+## Axes
+- **direct_answer** — does each section open with a concise, self-contained, \
+extractable answer?
+- **citability** — are claims specific, quotable, and attributed to sources?
+
+## For each axis return
+- The score (0–100).
+- A one-line note explaining the score.
+- A short list of concrete fixes (empty when none are needed).
+
+## Output
+Return ONLY this JSON object:
+{"direct_answer": int, "direct_answer_note": str, "direct_answer_fixes": [str], \
+"citability": int, "citability_note": str, "citability_fixes": [str]}\
+"""
 
 _judge_agent_id: str | None = None
 

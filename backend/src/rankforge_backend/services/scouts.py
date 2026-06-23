@@ -28,17 +28,33 @@ from . import research as research_svc
 SCOUT_AGENT_NAME = "rankforge-scout"
 SCOUT_MODEL = "claude-sonnet-4-6"
 
-_SYSTEM_PROMPT = (
-    "You are RankForge's content scout. Given a brand (its niche, topics, "
-    "keywords, competitors), use web_search (Exa) to find timely, high-potential "
-    "blog opportunities being discussed RIGHT NOW — recent news, fresh search "
-    "demand, trends, and gaps competitors haven't covered well. Favor specific, "
-    "actionable angles over evergreen restatements. For each, give a clear title, "
-    "the recommended angle, why it's timely (why_now), the primary keyword, the "
-    "signal type (news|serp|competitor), a source URL, and an opportunity_score "
-    "0-100 (timeliness + search potential + brand fit). Finish by outputting one "
-    "JSON object in a single ```json fenced block and nothing after it."
-)
+_SYSTEM_PROMPT = """\
+You are RankForge's **content scout**. Given a brand, you use the `web_search` (Exa) \
+tool to find timely, high-potential blog opportunities and return them as JSON.
+
+## What to look for
+- Recent news, fresh search demand, and emerging trends relevant to the brand's \
+niche and keywords.
+- Gaps where competitors have covered a topic poorly or not at all.
+
+## Selection rules
+- Favor specific, actionable angles over evergreen restatements of well-covered topics.
+- Prefer timely opportunities — something changed recently that makes this worth \
+writing now.
+- Base every opportunity on a real search result; never fabricate sources or trends.
+
+## For each opportunity provide
+- **title** — a clear working title — and **angle** — the recommended take.
+- **why_now** — the timeliness rationale.
+- **keyword** — the primary keyword.
+- **source_type** — the signal: `news`, `serp`, or `competitor`.
+- **source_url** — a supporting URL.
+- **opportunity_score** — 0–100, blending timeliness, search potential, and brand fit.
+
+## Output
+- Your final message must be exactly one JSON object in a single ```json fenced \
+block, with nothing after it.
+"""
 
 _SCHEMA_HINT = """{
   "opportunities": [
@@ -238,14 +254,18 @@ async def run_scout(
         focus = cfg.get("focus") or brand.get("seed_topics") or []
         agent_id = await ensure_scout_agent(client)
         msg = (
-            f"Brand: {brand.get('name')}\n"
-            f"Niche: {brand.get('niche') or 'n/a'}\n"
-            f"Audience: {brand.get('audience') or 'n/a'}\n"
-            f"Focus topics: {', '.join(focus) or 'n/a'}\n"
-            f"Target keywords: {', '.join(brand.get('target_keywords') or []) or 'n/a'}\n"
-            f"Competitors: {', '.join(c.get('domain', '') for c in (brand.get('competitors') or [])) or 'n/a'}\n\n"
-            "Find 5-8 timely content opportunities for this brand right now.\n\n"
-            f"Output ONLY a single ```json block:\n{_SCHEMA_HINT}"
+            "## Brand\n"
+            f"- Name: {brand.get('name')}\n"
+            f"- Niche: {brand.get('niche') or 'n/a'}\n"
+            f"- Audience: {brand.get('audience') or 'n/a'}\n"
+            f"- Focus topics: {', '.join(focus) or 'n/a'}\n"
+            f"- Target keywords: {', '.join(brand.get('target_keywords') or []) or 'n/a'}\n"
+            f"- Competitors: {', '.join(c.get('domain', '') for c in (brand.get('competitors') or [])) or 'n/a'}\n\n"
+            "## Task\n"
+            "- Find 5–8 timely content opportunities for this brand right now.\n\n"
+            "## Output\n"
+            "- Output ONLY a single ```json block matching this shape:\n"
+            f"{_SCHEMA_HINT}"
         )
         agent_run = await client.run_agent_collect(agent_id, msg)
         if agent_run["error"]:
