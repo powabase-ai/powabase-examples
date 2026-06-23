@@ -16,8 +16,20 @@ from rankforge_backend.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()
 
+import pytest  # noqa: E402
+
+from rankforge_backend import ratelimit  # noqa: E402
 from rankforge_backend.auth import get_current_user  # noqa: E402
 from rankforge_backend.models.profile import CurrentUser  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """Per-user rate-limit buckets are process-global; clear them between tests so
+    repeated calls by the shared test user don't accumulate across cases."""
+    ratelimit.reset()
+    yield
+    ratelimit.reset()
 
 # A default authenticated admin for hermetic route tests. Endpoints are gated
 # behind `get_current_user`; override it so tests don't need a real GoTrue token.

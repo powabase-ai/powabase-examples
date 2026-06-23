@@ -1,26 +1,37 @@
 """Health / readiness endpoints."""
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
 async def health() -> dict[str, str]:
-    """Liveness — does not touch dependencies."""
+    """Liveness — does not touch dependencies, always 200."""
     return {"status": "ok"}
 
 
 @router.get("/health/ready")
-async def ready(request: Request) -> dict[str, object]:
-    """Readiness — reports whether DB and Powabase client are configured.
+async def ready(request: Request) -> JSONResponse:
+    """Readiness — runs a real, cheap DB check (`select 1`).
 
-    Kept dependency-light on purpose: it does not run a query or hit the network,
-    so it stays fast and side-effect free. Deeper checks belong in a separate
-    diagnostic endpoint.
+    Returns 200 once the DB pool can actually serve a query; returns 503 when the
+    DB is unconfigured or the query fails. The blocking pool work is offloaded to a
+    thread so it doesn't stall the event loop. Powabase is intentionally NOT probed
+    here — readiness stays DB-only so it isn't coupled to an external API's health.
     """
-    return {
-        "status": "ok",
-        "db_configured": request.app.state.db is not None,
-        "powabase_configured": request.app.state.powabase is not None,
-    }
+    db = request.app.state.db
+    if db is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "db": "unavailable"},
+        )
+    try:
+        await db.afetch_one("select 1 as ok")
+    except Exception:  # noqa: BLE001 — any failure means not-ready
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "db": "unavailable"},
+        )
+    return JSONResponse(status_code=200, content={"status": "ok", "db": "ok"})

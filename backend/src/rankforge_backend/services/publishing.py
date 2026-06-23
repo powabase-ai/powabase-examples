@@ -2,8 +2,9 @@
 
 Renders a finished article to crawlable HTML (with inline JSON-LD + meta) and to
 portable Markdown, ships it to a target (webhook now; CMS adapters later), and
-records the publication. The rendered HTML is also cached on `articles.content_html`
-so the public SSR page can serve schema-marked HTML in its initial response.
+records the publication. HTML is rendered on read, fresh from `content_md`, every
+time it is needed (public SSR page, webhook payload, export) and is never persisted
+— so there is no cached HTML that can go stale or skip sanitization.
 """
 
 import html as _html

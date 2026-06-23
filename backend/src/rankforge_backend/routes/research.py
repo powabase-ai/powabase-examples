@@ -9,6 +9,7 @@ from ..db import Database
 from ..models.profile import CurrentUser
 from ..models.research import ResearchRun, ResearchRunCreate, ResearchSource
 from ..powabase import PowabaseClient
+from ..ratelimit import rate_limit
 from ..services import research as svc
 from ..tasks import spawn
 from .deps import get_db, get_powabase
@@ -20,7 +21,12 @@ router = APIRouter(
 )
 
 
-@router.post("", response_model=ResearchRun, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=ResearchRun,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("research:create"))],
+)
 async def create_research(
     payload: ResearchRunCreate,
     db: Database = Depends(get_db),

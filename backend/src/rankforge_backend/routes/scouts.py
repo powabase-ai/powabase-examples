@@ -13,6 +13,7 @@ from ..db import Database
 from ..models.profile import CurrentUser
 from ..models.scout import Opportunity, ScoutConfig, ScoutConfigUpdate, ScoutRun
 from ..powabase import PowabaseClient
+from ..ratelimit import rate_limit
 from ..services import scouts as svc
 from ..tasks import spawn
 from .deps import get_db, get_powabase
@@ -50,7 +51,11 @@ def update_scout_config(
 
 
 # --- runs ---
-@router.post("/scouts/run", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/scouts/run",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit("scout:run"))],
+)
 async def run_scout_now(
     business_id: UUID,
     db: Database = Depends(get_db),
@@ -84,7 +89,11 @@ def list_opportunities(
     return svc.list_opportunities(db, business_id)
 
 
-@router.post("/opportunities/{opp_id}/draft", response_model=Opportunity)
+@router.post(
+    "/opportunities/{opp_id}/draft",
+    response_model=Opportunity,
+    dependencies=[Depends(rate_limit("opportunity:draft"))],
+)
 async def draft_opportunity(
     opp_id: UUID,
     db: Database = Depends(get_db),
@@ -96,9 +105,11 @@ async def draft_opportunity(
     if opp is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "opportunity not found")
     assert_brand_access(db, opp["business_id"], user)
-    if opp["status"] in ("drafting", "drafted"):
+    # Atomically claim it; if already queued/drafting/drafted, don't launch a second
+    # pipeline — return the current state.
+    queued = svc.try_claim_opportunity(db, opp_id)
+    if queued is None:
         return opp
-    queued = svc.set_opportunity_status(db, opp_id, "queued")
     spawn(svc.auto_draft(pb, db, opp))
     return queued
 

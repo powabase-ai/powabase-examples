@@ -5,6 +5,7 @@ sources) -> outline (from the brief) -> per-section grounded drafting (KB retrie
 injected as context, cited inline) -> assemble -> store as a draft article.
 """
 
+import logging
 import re
 from typing import Any
 from uuid import UUID
@@ -17,6 +18,19 @@ from . import brief as brief_svc
 from . import grounding
 from . import research as research_svc
 from .agents import ensure_agent
+
+log = logging.getLogger("rankforge.generation")
+
+# generation_status values that mean work is actively in flight on an article.
+# Used to compare-and-set when claiming a refine so double-submits can't launch
+# two concurrent pipelines on the same article (doubling LLM spend / racing saves).
+_ACTIVE_GEN_STATUSES = (
+    "grounding",
+    "outlining",
+    "drafting",
+    "optimizing",
+    "refining",
+)
 
 WRITER_AGENT_NAME = "rankforge-writer"
 # Long-form prose IS the product — top model. Keep temperature for natural variety
@@ -138,6 +152,26 @@ def _update(db: Database, article_id: UUID, **fields: Any) -> None:
     db.execute(
         f"update public.articles set {', '.join(sets)} where id = %s", tuple(params)
     )
+
+
+def try_begin_refine(db: Database, article_id: UUID, *, total: int) -> bool:
+    """Atomically claim an article for refinement. Returns False if generation or
+    another refine is already in flight (so the route returns 409 instead of
+    launching a second concurrent pipeline). The status flip and the in-flight
+    check are one statement, so concurrent submits can't both win."""
+    placeholders = ", ".join(["%s"] * len(_ACTIVE_GEN_STATUSES))
+    row = db.fetch_one(
+        f"update public.articles set generation_status = 'refining', "
+        f"progress = %s, updated_at = now() "
+        f"where id = %s and (generation_status is null "
+        f"or generation_status not in ({placeholders})) returning id",
+        (
+            Json({"phase": "refining", "iteration": 0, "total": total}),
+            article_id,
+            *_ACTIVE_GEN_STATUSES,
+        ),
+    )
+    return row is not None
 
 
 async def _draft_part(
@@ -299,8 +333,15 @@ async def run_generation_task(
             progress={"phase": "done", "total": total, "done": total,
                       "word_count": len(final_md.split())},
         )
-    except Exception as e:  # noqa: BLE001
-        _update(db, article_id, generation_status="failed", generation_error=str(e))
+    except Exception:  # noqa: BLE001
+        log.exception("article generation failed for %s", article_id)
+        # Surface a generic message to clients; the detail is in the server log.
+        _update(
+            db,
+            article_id,
+            generation_status="failed",
+            generation_error="generation failed — see server logs",
+        )
 
 
 # --- reads ---

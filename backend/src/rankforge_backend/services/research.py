@@ -9,6 +9,7 @@ Runs in the background; the research_run row carries status/progress for polling
 """
 
 import asyncio
+import logging
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -22,6 +23,8 @@ from ..powabase import PowabaseClient, PowabaseError
 from ..util import extract_json
 from . import business_profiles as brands
 from .agents import ensure_agent
+
+log = logging.getLogger("rankforge.research")
 
 SERP_AGENT_NAME = "rankforge-serp"
 SERP_MODEL = "claude-sonnet-4-6"
@@ -341,8 +344,9 @@ async def run_research_task(
             competitors=competitors,
             progress={"phase": "done", "total": len(urls), "done": len(competitors)},
         )
-    except Exception as e:  # noqa: BLE001 — surface any failure to the row
-        _update(db, run_id, status="failed", error=str(e))
+    except Exception:  # noqa: BLE001 — surface a safe failure to the row
+        log.exception("research run %s failed", run_id)
+        _update(db, run_id, status="failed", error="research failed — see server logs")
 
 
 def get_brand(db: Database, business_id: UUID) -> dict[str, Any] | None:

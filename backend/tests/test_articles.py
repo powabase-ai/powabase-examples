@@ -60,6 +60,28 @@ def make_client(db: MagicMock | None = None) -> TestClient:
     return TestClient(with_auth(app))
 
 
+def test_refine_starts_when_claim_succeeds(monkeypatch):
+    from rankforge_backend.routes import articles as articles_route
+
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: ARTICLE)
+    monkeypatch.setattr(svc, "try_begin_refine", lambda db, aid, total: True)
+
+    async def fake_finish(*a, **k):
+        return None
+
+    monkeypatch.setattr(articles_route, "_refine_and_finish", fake_finish)
+    resp = make_client().post(f"/api/articles/{ARTICLE['id']}/refine")
+    assert resp.status_code == 200
+
+
+def test_refine_conflict_when_already_in_progress(monkeypatch):
+    """A second refine while one is in flight must 409, not launch a 2nd pipeline."""
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: ARTICLE)
+    monkeypatch.setattr(svc, "try_begin_refine", lambda db, aid, total: False)
+    resp = make_client().post(f"/api/articles/{ARTICLE['id']}/refine")
+    assert resp.status_code == 409
+
+
 def test_generate_article_201(monkeypatch):
     async def fake_task(*args, **kwargs):
         return None

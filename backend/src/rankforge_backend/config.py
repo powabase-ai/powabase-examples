@@ -35,11 +35,18 @@ class Settings(BaseSettings):
     cors_allow_origins: str = "http://localhost:3000"
     # Public base URL of the frontend, used to build crawlable /p/{id} links.
     public_base_url: str = "http://localhost:3007"
-    db_pool_min_size: int = 1
-    db_pool_max_size: int = 10
+    db_pool_min_size: int = 2
+    db_pool_max_size: int = 20
+    # Seconds a request waits for a free pooled connection before the pool raises
+    # PoolTimeout (surfaced as 503, not a hung request or a 500).
+    db_pool_timeout: float = 15.0
     # Max concurrent heavy background tasks (generation/research/refine/scout).
     # Kept well under the DB pool size so a burst can't starve the pool.
     max_background_tasks: int = 4
+    # Per-user rate limit on expensive AI operations (generate / refine / research
+    # / optimize / score / scout-run / opportunity-draft): N requests per window.
+    rate_limit_expensive: int = 30
+    rate_limit_window_seconds: float = 60.0
 
     @property
     def cors_origins(self) -> list[str]:

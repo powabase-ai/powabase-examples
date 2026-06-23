@@ -194,8 +194,10 @@ def test_dismiss(monkeypatch):
 
 def test_draft_spawns(monkeypatch):
     monkeypatch.setattr(svc, "get_opportunity", lambda db, oid: OPP)
+    # The route now claims the opportunity atomically (compare-and-set) before
+    # spawning; a successful claim returns the queued row.
     monkeypatch.setattr(
-        svc, "set_opportunity_status", lambda db, oid, st, **k: {**OPP, "status": st}
+        svc, "try_claim_opportunity", lambda db, oid: {**OPP, "status": "queued"}
     )
 
     async def fake_draft(*a, **k):
@@ -205,3 +207,20 @@ def test_draft_spawns(monkeypatch):
     resp = _client().post(f"/api/opportunities/{OID}/draft")
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"
+
+
+def test_draft_already_in_progress_no_double_spawn(monkeypatch):
+    """A second draft of an in-flight opportunity must not launch another pipeline."""
+    monkeypatch.setattr(svc, "get_opportunity", lambda db, oid: {**OPP, "status": "drafting"})
+    monkeypatch.setattr(svc, "try_claim_opportunity", lambda db, oid: None)
+
+    spawned = []
+
+    async def fake_draft(*a, **k):
+        spawned.append(1)
+
+    monkeypatch.setattr(svc, "auto_draft", fake_draft)
+    resp = _client().post(f"/api/opportunities/{OID}/draft")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "drafting"
+    assert spawned == []  # claim failed → no second pipeline

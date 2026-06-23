@@ -9,6 +9,7 @@ from ..db import Database
 from ..models.brief import Brief, BriefGenerate, BriefUpdate
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
+from ..ratelimit import rate_limit
 from ..services import brief as svc
 from ..services import research as research_svc
 from .deps import get_db, get_powabase
@@ -20,7 +21,12 @@ router = APIRouter(
 )
 
 
-@router.post("", response_model=Brief, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=Brief,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("brief:generate"))],
+)
 async def generate_brief(
     payload: BriefGenerate,
     db: Database = Depends(get_db),

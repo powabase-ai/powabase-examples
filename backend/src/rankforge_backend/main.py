@@ -4,10 +4,13 @@ Wires up the psycopg pool and the Powabase client at startup, exposes them on
 `app.state`, and tears them down at shutdown.
 """
 
+import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from psycopg_pool import PoolTimeout
 
 from . import tasks
 from .config import get_settings
@@ -39,6 +42,7 @@ async def lifespan(app: FastAPI):
             settings.powabase_database_url,
             min_size=settings.db_pool_min_size,
             max_size=settings.db_pool_max_size,
+            timeout=settings.db_pool_timeout,
         )
         db.open()
     app.state.db = db
@@ -83,6 +87,18 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Connection-pool exhaustion (too many concurrent requests for the pool) is a
+    # transient overload, not a server bug — surface it as 503 with Retry-After so
+    # clients back off instead of seeing an opaque 500.
+    @app.exception_handler(PoolTimeout)
+    async def _pool_timeout_handler(_request: Request, _exc: PoolTimeout):
+        logging.getLogger("rankforge").warning("db pool exhausted (PoolTimeout)")
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "service busy, retry shortly"},
+            headers={"Retry-After": "5"},
+        )
 
     app.include_router(health.router)
     app.include_router(account.router)

@@ -10,6 +10,7 @@ Scheduling is owned by the in-process APScheduler tick (see `scheduler.py`); thi
 module is the pure worker, callable on a schedule or on a manual trigger.
 """
 
+import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -25,6 +26,8 @@ from . import business_profiles as brands
 from . import generation
 from . import research as research_svc
 from .agents import ensure_agent
+
+log = logging.getLogger("rankforge.scouts")
 
 SCOUT_AGENT_NAME = "rankforge-scout"
 # Discovery quality feeds auto-draft — top model + moderate extended thinking to
@@ -200,6 +203,18 @@ def set_opportunity_status(
     )
 
 
+def try_claim_opportunity(db: Database, opp_id: UUID) -> dict[str, Any] | None:
+    """Atomically move an opportunity to 'queued' for drafting. Returns None if it
+    is already queued/drafting/drafted (so a double-submit can't launch two draft
+    pipelines for the same opportunity). The check and the flip are one statement."""
+    return db.fetch_one(
+        f"update public.opportunities set status = 'queued', updated_at = now() "
+        f"where id = %s and status not in ('queued', 'drafting', 'drafted') "
+        f"returning {_OPP_COLUMNS}",
+        (opp_id,),
+    )
+
+
 # --- scoring helpers ---
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -343,10 +358,11 @@ async def run_scout(
             "update public.scout_runs set status = 'done', drafted = %s where id = %s",
             (drafted, run_id),
         )
-    except Exception as e:  # noqa: BLE001 — record on the run row
+    except Exception:  # noqa: BLE001 — record on the run row
+        log.exception("scout run %s failed for business %s", run_id, business_id)
         db.execute(
             "update public.scout_runs set status = 'failed', error = %s where id = %s",
-            (str(e), run_id),
+            ("scout run failed — see server logs", run_id),
         )
     finally:
         # Roll the schedule forward regardless of outcome (guarded so a failure
@@ -401,6 +417,7 @@ async def auto_draft(
         set_opportunity_status(db, opp_id, "drafted", article_id=article["id"])
         return True
     except Exception:  # noqa: BLE001 — leave the opportunity for manual retry
+        log.exception("auto_draft failed for opportunity %s", opp_id)
         set_opportunity_status(db, opp_id, "new")
         return False
 

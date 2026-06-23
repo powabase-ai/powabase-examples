@@ -16,6 +16,7 @@ from ..models.article import (
 from ..models.comment import Comment, CommentCreate, CommentUpdate
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
+from ..ratelimit import rate_limit
 from ..services import comments as comments_svc
 from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
@@ -58,7 +59,12 @@ def _guard_comment_article(
     assert_brand_access(db, article["business_id"], user)
 
 
-@router.post("", response_model=Article, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=Article,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("article:generate"))],
+)
 async def generate_article(
     payload: ArticleGenerate,
     db: Database = Depends(get_db),
@@ -75,7 +81,11 @@ async def generate_article(
     return article
 
 
-@router.post("/{article_id}/score", response_model=Article)
+@router.post(
+    "/{article_id}/score",
+    response_model=Article,
+    dependencies=[Depends(rate_limit("article:score"))],
+)
 async def score_article(
     article_id: UUID,
     db: Database = Depends(get_db),
@@ -90,7 +100,11 @@ async def score_article(
     return svc.get_article(db, article_id)
 
 
-@router.post("/{article_id}/optimize", response_model=Article)
+@router.post(
+    "/{article_id}/optimize",
+    response_model=Article,
+    dependencies=[Depends(rate_limit("article:optimize"))],
+)
 async def optimize_article(
     article_id: UUID,
     db: Database = Depends(get_db),
@@ -122,7 +136,11 @@ async def _refine_and_finish(pb: PowabaseClient, db: Database, article_id: UUID)
         )
 
 
-@router.post("/{article_id}/refine", response_model=Article)
+@router.post(
+    "/{article_id}/refine",
+    response_model=Article,
+    dependencies=[Depends(rate_limit("article:refine"))],
+)
 async def refine_article(
     article_id: UUID,
     db: Database = Depends(get_db),
@@ -131,11 +149,14 @@ async def refine_article(
 ):
     """Auto-iterate the draft against the SEO/GEO/Grounding evaluators (async)."""
     _guard_article(db, article_id, user)
-    svc._update(
-        db, article_id,
-        generation_status="refining",
-        progress={"phase": "refining", "iteration": 0, "total": revise_svc.MAX_REVISIONS},
-    )
+    # Atomically claim the article; refuse if a generation/refine is already running
+    # so a double-submit can't launch two concurrent pipelines on the same article.
+    if not svc.try_begin_refine(
+        db, article_id, total=revise_svc.MAX_REVISIONS
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "generation already in progress"
+        )
     spawn(_refine_and_finish(pb, db, article_id))
     return svc.get_article(db, article_id)
 

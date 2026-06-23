@@ -20,11 +20,22 @@ from psycopg_pool import ConnectionPool
 class Database:
     """Thin wrapper over a psycopg3 ConnectionPool with dict rows."""
 
-    def __init__(self, conninfo: str, *, min_size: int = 1, max_size: int = 10):
+    def __init__(
+        self,
+        conninfo: str,
+        *,
+        min_size: int = 1,
+        max_size: int = 10,
+        timeout: float = 30.0,
+    ):
         self._pool = ConnectionPool(
             conninfo,
             min_size=min_size,
             max_size=max_size,
+            # Bound how long a caller waits for a free connection. On exhaustion the
+            # pool raises PoolTimeout, which the app maps to 503 (see main.py) rather
+            # than hanging the request or failing with an opaque 500.
+            timeout=timeout,
             kwargs={"row_factory": dict_row},
             # Validate (and transparently replace) a pooled connection before
             # handing it out. Long-running ops (research/generation runs) can
