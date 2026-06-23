@@ -1,9 +1,10 @@
 """Publishing/export — rendering (pure), service, and route wiring (hermetic)."""
 
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
-from conftest import with_auth
+from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
@@ -12,6 +13,7 @@ from rankforge_backend.routes.research import get_powabase
 from rankforge_backend.services import publishing as svc
 
 AID = "55555555-5555-5555-5555-555555555555"
+BID = "11111111-1111-1111-1111-111111111111"
 ARTICLE = {
     "id": AID,
     "title": "Title",
@@ -79,6 +81,14 @@ async def test_publish_export_marks_published(monkeypatch):
     assert "status = 'published'" in sql
 
 
+def _brand_db() -> MagicMock:
+    """db whose fetch_one yields an article in the caller's org (passes the
+    gen_svc.get_article lookup + assert_brand_access in the publish routes)."""
+    db = MagicMock()
+    db.fetch_one.return_value = {**ARTICLE, "business_id": BID, "org_id": UUID(ADMIN_ORG)}
+    return db
+
+
 # --- routes ---
 def _client(db, auth: bool = True) -> TestClient:
     app = create_app()
@@ -120,7 +130,7 @@ def test_publish_requires_editor(monkeypatch):
     app = create_app()
     app.dependency_overrides[get_db] = lambda: MagicMock()
     app.dependency_overrides[get_powabase] = lambda: MagicMock()
-    with_auth(app, CurrentUser(id=AID, role="writer"))
+    with_auth(app, CurrentUser(id=AID, role="writer", org_id=ADMIN_ORG))
     resp = TestClient(app).post(
         f"/api/articles/{AID}/publish", json={"target_type": "export"}
     )
@@ -136,7 +146,7 @@ def test_publish_route(monkeypatch):
         }
 
     monkeypatch.setattr(svc, "publish", fake_publish)
-    resp = _client(MagicMock()).post(
+    resp = _client(_brand_db()).post(
         f"/api/articles/{AID}/publish", json={"target_type": "export"}
     )
     assert resp.status_code == 200
@@ -145,6 +155,6 @@ def test_publish_route(monkeypatch):
 
 def test_export_route_sets_download_header(monkeypatch):
     monkeypatch.setattr(svc, "export", lambda db, aid, fmt: ("# md", "text/markdown"))
-    resp = _client(MagicMock()).get(f"/api/articles/{AID}/export?format=markdown")
+    resp = _client(_brand_db()).get(f"/api/articles/{AID}/export?format=markdown")
     assert resp.status_code == 200
     assert "attachment" in resp.headers.get("content-disposition", "")

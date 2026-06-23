@@ -21,8 +21,14 @@ from rankforge_backend.models.profile import CurrentUser  # noqa: E402
 
 # A default authenticated admin for hermetic route tests. Endpoints are gated
 # behind `get_current_user`; override it so tests don't need a real GoTrue token.
+# Every brand/content fixture lives in ADMIN_ORG so `assert_brand_access` (which
+# loads the brand's org_id and compares it to the caller's) passes.
+ADMIN_ORG = "00000000-0000-0000-0000-0000000000a0"
 ADMIN_USER = CurrentUser(
-    id="00000000-0000-0000-0000-000000000001", email="admin@test", role="admin"
+    id="00000000-0000-0000-0000-000000000001",
+    email="admin@test",
+    role="admin",
+    org_id=ADMIN_ORG,
 )
 
 

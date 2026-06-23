@@ -9,10 +9,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from ..auth import get_current_user, require_editor
+from ..auth import assert_brand_access, get_current_user, require_editor
 from ..config import get_settings
 from ..db import Database
+from ..models.profile import CurrentUser
 from ..models.publish import PublicArticle, Publication, PublishRequest
+from ..services import generation as gen_svc
 from ..services import publishing as svc
 from .deps import get_db
 
@@ -29,7 +31,16 @@ _EXT = {"markdown": "md", "html": "html"}
 
 
 @router.get("/{article_id}/export")
-def export_article(article_id: UUID, format: str = "markdown", db: Database = Depends(get_db)):
+def export_article(
+    article_id: UUID,
+    format: str = "markdown",
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    article = gen_svc.get_article(db, article_id)
+    if article is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    assert_brand_access(db, article["business_id"], user)
     result = svc.export(db, article_id, format)
     if result is None:
         raise HTTPException(
@@ -50,8 +61,12 @@ async def publish_article(
     article_id: UUID,
     payload: PublishRequest,
     db: Database = Depends(get_db),
-    _: object = Depends(require_editor),  # publishing flips status → editor/admin only
+    user: CurrentUser = Depends(require_editor),  # flips status → editor/admin only
 ):
+    article = gen_svc.get_article(db, article_id)
+    if article is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    assert_brand_access(db, article["business_id"], user)
     pub = await svc.publish(
         db,
         article_id,
@@ -65,7 +80,15 @@ async def publish_article(
 
 
 @router.get("/{article_id}/publications", response_model=list[Publication])
-def list_publications(article_id: UUID, db: Database = Depends(get_db)):
+def list_publications(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    article = gen_svc.get_article(db, article_id)
+    if article is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    assert_brand_access(db, article["business_id"], user)
     return svc.list_publications(db, article_id)
 
 

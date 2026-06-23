@@ -1,8 +1,9 @@
 """Content scouts — scoring (unit) + route wiring (hermetic)."""
 
 from unittest.mock import MagicMock
+from uuid import UUID
 
-from conftest import with_auth
+from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
@@ -85,9 +86,16 @@ def test_norm_title_dedups():
 
 
 # --- routes (hermetic) ---
-def _client(db, user: CurrentUser | None = None) -> TestClient:
+def _brand_db() -> MagicMock:
+    """A db mock whose fetch_one satisfies assert_brand_access (org match)."""
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": UUID(ADMIN_ORG)}
+    return db
+
+
+def _client(db=None, user: CurrentUser | None = None) -> TestClient:
     app = create_app()
-    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_db] = lambda: db if db is not None else _brand_db()
     app.dependency_overrides[get_powabase] = lambda: MagicMock()
     with_auth(app, user) if user else with_auth(app)
     return TestClient(app)
@@ -95,15 +103,15 @@ def _client(db, user: CurrentUser | None = None) -> TestClient:
 
 def test_get_config_returns_existing(monkeypatch):
     monkeypatch.setattr(svc, "get_config", lambda db, bid: CFG)
-    resp = _client(MagicMock()).get(f"/api/scouts/config?business_id={BID}")
+    resp = _client().get(f"/api/scouts/config?business_id={BID}")
     assert resp.status_code == 200
     assert resp.json()["cadence"] == "daily"
 
 
 def test_update_config_requires_editor(monkeypatch):
     monkeypatch.setattr(svc, "update_config", lambda db, bid, f: {**CFG, "enabled": True})
-    writer = CurrentUser(id=BID, role="writer")
-    resp = _client(MagicMock(), writer).put(
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).put(
         f"/api/scouts/config?business_id={BID}", json={"enabled": True}
     )
     assert resp.status_code == 403
@@ -111,7 +119,7 @@ def test_update_config_requires_editor(monkeypatch):
 
 def test_update_config_editor_ok(monkeypatch):
     monkeypatch.setattr(svc, "update_config", lambda db, bid, f: {**CFG, "enabled": True})
-    resp = _client(MagicMock()).put(
+    resp = _client().put(
         f"/api/scouts/config?business_id={BID}", json={"enabled": True}
     )
     assert resp.status_code == 200
@@ -120,7 +128,7 @@ def test_update_config_editor_ok(monkeypatch):
 
 def test_update_config_rejects_out_of_range_drafts():
     # Pydantic bounds guard against a runaway autonomous-spend value.
-    resp = _client(MagicMock()).put(
+    resp = _client().put(
         f"/api/scouts/config?business_id={BID}", json={"max_drafts_per_run": 999}
     )
     assert resp.status_code == 422
@@ -129,7 +137,7 @@ def test_update_config_rejects_out_of_range_drafts():
 def test_get_config_does_not_persist(monkeypatch):
     # GET must be read-only — returns a default without inserting a row.
     monkeypatch.setattr(svc, "get_config", lambda db, bid: None)
-    resp = _client(MagicMock()).get(f"/api/scouts/config?business_id={BID}")
+    resp = _client().get(f"/api/scouts/config?business_id={BID}")
     assert resp.status_code == 200
     assert resp.json()["enabled"] is False
 
@@ -162,23 +170,24 @@ def test_run_now_202(monkeypatch):
         return None
 
     monkeypatch.setattr(svc, "run_scout", fake_run)
-    resp = _client(MagicMock()).post(f"/api/scouts/run?business_id={BID}")
+    resp = _client().post(f"/api/scouts/run?business_id={BID}")
     assert resp.status_code == 202
     assert resp.json()["status"] == "started"
 
 
 def test_list_opportunities(monkeypatch):
     monkeypatch.setattr(svc, "list_opportunities", lambda db, bid: [OPP])
-    resp = _client(MagicMock()).get(f"/api/opportunities?business_id={BID}")
+    resp = _client().get(f"/api/opportunities?business_id={BID}")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
 
 
 def test_dismiss(monkeypatch):
+    monkeypatch.setattr(svc, "get_opportunity", lambda db, oid: OPP)
     monkeypatch.setattr(
         svc, "set_opportunity_status", lambda db, oid, st, **k: {**OPP, "status": st}
     )
-    resp = _client(MagicMock()).post(f"/api/opportunities/{OID}/dismiss")
+    resp = _client().post(f"/api/opportunities/{OID}/dismiss")
     assert resp.status_code == 200
     assert resp.json()["status"] == "dismissed"
 
@@ -193,6 +202,6 @@ def test_draft_spawns(monkeypatch):
         return True
 
     monkeypatch.setattr(svc, "auto_draft", fake_draft)
-    resp = _client(MagicMock()).post(f"/api/opportunities/{OID}/draft")
+    resp = _client().post(f"/api/opportunities/{OID}/draft")
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"

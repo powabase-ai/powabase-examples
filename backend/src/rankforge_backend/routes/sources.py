@@ -4,8 +4,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..auth import get_current_user
+from ..auth import assert_brand_access, get_current_user
 from ..db import Database
+from ..models.profile import CurrentUser
 from ..models.research import BrandSource
 from ..powabase import PowabaseClient, PowabaseError
 from ..services import research as svc
@@ -19,14 +20,24 @@ router = APIRouter(
 
 
 @router.get("", response_model=list[BrandSource])
-def list_brand_sources(business_id: UUID, db: Database = Depends(get_db)):
+def list_brand_sources(
+    business_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    assert_brand_access(db, business_id, user)
     return svc.list_brand_sources(db, business_id)
 
 
 @router.get("/{source_id}/markdown")
 async def get_source_markdown(
-    source_id: str, pb: PowabaseClient = Depends(get_powabase)
+    source_id: str,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
 ):
+    if not svc.source_in_org(db, source_id, user.org_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "source not found")
     try:
         md = await pb.get_source_markdown(source_id)
     except PowabaseError as e:

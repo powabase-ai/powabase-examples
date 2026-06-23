@@ -1,8 +1,9 @@
 """Articles — section parsing (unit) + async route wiring (hermetic)."""
 
 from unittest.mock import MagicMock
+from uuid import UUID
 
-from conftest import with_auth
+from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
@@ -11,9 +12,10 @@ from rankforge_backend.routes.research import get_powabase
 from rankforge_backend.services import generation as svc
 
 BRIEF_ID = "44444444-4444-4444-4444-444444444444"
+BID = "11111111-1111-1111-1111-111111111111"
 ARTICLE = {
     "id": "55555555-5555-5555-5555-555555555555",
-    "business_id": "11111111-1111-1111-1111-111111111111",
+    "business_id": BID,
     "brief_id": BRIEF_ID,
     "research_run_id": None,
     "title": "Headless CMS Comparison",
@@ -44,9 +46,16 @@ def test_parse_sections_handles_unprefixed():
     assert [s["h2"] for s in secs] == ["Intro", "Details"]
 
 
-def make_client() -> TestClient:
+def _brand_db() -> MagicMock:
+    """A db mock whose fetch_one satisfies assert_brand_access (org match)."""
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": UUID(ADMIN_ORG)}
+    return db
+
+
+def make_client(db: MagicMock | None = None) -> TestClient:
     app = create_app()
-    app.dependency_overrides[get_db] = lambda: MagicMock()
+    app.dependency_overrides[get_db] = lambda: db or _brand_db()
     app.dependency_overrides[get_powabase] = lambda: MagicMock()
     return TestClient(with_auth(app))
 
@@ -55,7 +64,7 @@ def test_generate_article_201(monkeypatch):
     async def fake_task(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(svc, "get_brief", lambda db, bid: {"id": BRIEF_ID})
+    monkeypatch.setattr(svc, "get_brief", lambda db, bid: {"id": BRIEF_ID, "business_id": BID})
     monkeypatch.setattr(
         svc, "create_article", lambda db, brief, author_id=None: ARTICLE
     )
@@ -74,7 +83,7 @@ def test_generate_article_unknown_brief_404(monkeypatch):
 
 def test_update_article_patches():
     db = MagicMock()
-    db.fetch_one.return_value = {**ARTICLE, "title": "Edited"}
+    db.fetch_one.return_value = {**ARTICLE, "title": "Edited", "org_id": UUID(ADMIN_ORG)}
     app = create_app()
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_powabase] = lambda: MagicMock()

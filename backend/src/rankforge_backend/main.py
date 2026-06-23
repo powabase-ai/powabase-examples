@@ -19,6 +19,7 @@ from .routes import (
     brief,
     business_profiles,
     health,
+    org,
     publish,
     research,
     scouts,
@@ -85,6 +86,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(account.router)
+    app.include_router(org.router)
     app.include_router(business_profiles.router)
     app.include_router(research.router)
     app.include_router(brief.router)

@@ -1,9 +1,10 @@
 """Research — JSON extraction (unit) + async route wiring (hermetic)."""
 
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
-from conftest import with_auth
+from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
@@ -74,7 +75,9 @@ def test_diverse_urls_backfills_when_too_few_domains():
 
 def make_client() -> TestClient:
     app = create_app()
-    app.dependency_overrides[get_db] = lambda: MagicMock()
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": UUID(ADMIN_ORG)}  # assert_brand_access
+    app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_powabase] = lambda: MagicMock()
     return TestClient(with_auth(app))
 

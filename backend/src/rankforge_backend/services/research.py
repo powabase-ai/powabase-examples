@@ -168,6 +168,22 @@ def list_runs(db: Database, business_id: UUID) -> list[dict[str, Any]]:
     )
 
 
+def source_in_org(db: Database, source_id: str, org_id: UUID) -> bool:
+    """True if a research_sources row with this Powabase source_id belongs to a
+    research run whose business is in the caller's org. Gates the markdown proxy
+    so a caller can't read arbitrary Powabase sources from other orgs."""
+    return (
+        db.fetch_one(
+            "select 1 from public.research_sources rs "
+            "join public.research_runs rr on rr.id = rs.research_run_id "
+            "join public.business_profiles bp on bp.id = rr.business_id "
+            "where rs.source_id = %s and bp.org_id = %s limit 1",
+            (source_id, org_id),
+        )
+        is not None
+    )
+
+
 def list_sources(db: Database, run_id: UUID) -> list[dict[str, Any]]:
     return db.fetch_all(
         f"select {_SOURCE_COLUMNS} from public.research_sources "

@@ -24,17 +24,17 @@ def me(
 
 @router.get("/members", response_model=list[Profile])
 def members(
-    _: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: Database = Depends(get_db),
 ):
-    return svc.list_members(db)
+    return svc.list_members(db, user.org_id)
 
 
 @router.patch("/members/{user_id}", response_model=Profile)
 def set_member_role(
     user_id: UUID,
     payload: RoleUpdate,
-    _: CurrentUser = Depends(require_admin),
+    admin: CurrentUser = Depends(require_admin),
     db: Database = Depends(get_db),
 ):
     if payload.role not in ROLES:
@@ -42,7 +42,7 @@ def set_member_role(
             status.HTTP_422_UNPROCESSABLE_ENTITY, f"role must be one of {ROLES}"
         )
     try:
-        row = svc.set_role(db, user_id, payload.role)
+        row = svc.set_role(db, user_id, payload.role, admin.org_id)
     except svc.LastAdminError as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
     if row is None:

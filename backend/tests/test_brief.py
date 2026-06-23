@@ -1,8 +1,9 @@
 """Brief — route wiring + update (hermetic)."""
 
 from unittest.mock import MagicMock
+from uuid import UUID
 
-from conftest import with_auth
+from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
@@ -11,9 +12,10 @@ from rankforge_backend.routes.research import get_powabase
 from rankforge_backend.services import brief as svc
 
 RID = "33333333-3333-3333-3333-333333333333"
+BID = "11111111-1111-1111-1111-111111111111"
 BRIEF = {
     "id": "44444444-4444-4444-4444-444444444444",
-    "business_id": "11111111-1111-1111-1111-111111111111",
+    "business_id": BID,
     "research_run_id": RID,
     "topic": "generative engine optimization",
     "primary_keyword": "generative engine optimization",
@@ -42,7 +44,10 @@ def test_generate_brief_201(monkeypatch):
         return BRIEF
 
     monkeypatch.setattr(svc, "generate_brief", fake_generate)
-    client = make_client(MagicMock())
+    db = MagicMock()
+    # get_run (resolve brand) → assert_brand_access (org match)
+    db.fetch_one.side_effect = [{"business_id": BID}, {"org_id": UUID(ADMIN_ORG)}]
+    client = make_client(db)
     resp = client.post("/api/briefs", json={"research_run_id": RID})
     assert resp.status_code == 201
     assert resp.json()["target_word_count"] == 2200
@@ -50,7 +55,13 @@ def test_generate_brief_201(monkeypatch):
 
 def test_update_brief_partial():
     db = MagicMock()
-    db.fetch_one.return_value = {**BRIEF, "target_word_count": 3000}
+    # get_brief → assert_brand_access → update_brief all hit fetch_one; the dict
+    # carries both business_id (for the brand lookup) and org_id (for access).
+    db.fetch_one.return_value = {
+        **BRIEF,
+        "target_word_count": 3000,
+        "org_id": UUID(ADMIN_ORG),
+    }
     client = make_client(db)
     resp = client.patch(
         "/api/briefs/44444444-4444-4444-4444-444444444444",

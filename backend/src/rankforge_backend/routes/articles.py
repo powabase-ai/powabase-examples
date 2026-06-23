@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..auth import get_current_user
+from ..auth import assert_brand_access, get_current_user
 from ..db import Database
 from ..models.article import (
     Article,
@@ -36,6 +36,28 @@ router = APIRouter(
 _GATED_STATUSES = {"approved", "published"}
 
 
+def _guard_article(db: Database, article_id: UUID, user: CurrentUser) -> dict:
+    """Load an article and assert the caller's org owns its brand. 404 if missing
+    or out-of-org. Returns the article row so callers can reuse it."""
+    article = svc.get_article(db, article_id)
+    if article is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    assert_brand_access(db, article["business_id"], user)
+    return article
+
+
+def _guard_comment_article(
+    db: Database, article_id: UUID, user: CurrentUser
+) -> None:
+    """Resolve a comment's article and assert org access via its brand. The
+    comment endpoints surface a 'comment not found' 404, so we mirror that here
+    rather than leaking which article ids exist in other orgs."""
+    article = svc.get_article(db, article_id)
+    if article is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "comment not found")
+    assert_brand_access(db, article["business_id"], user)
+
+
 @router.post("", response_model=Article, status_code=status.HTTP_201_CREATED)
 async def generate_article(
     payload: ArticleGenerate,
@@ -47,6 +69,7 @@ async def generate_article(
     brief = svc.get_brief(db, payload.brief_id)
     if brief is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "brief not found")
+    assert_brand_access(db, brief["business_id"], user)
     article = svc.create_article(db, brief, author_id=user.id)
     spawn(svc.run_generation_task(pb, db, article_id=article["id"], brief=brief))
     return article
@@ -57,8 +80,10 @@ async def score_article(
     article_id: UUID,
     db: Database = Depends(get_db),
     pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
 ):
     """Re-run SEO + GEO scoring for an article."""
+    _guard_article(db, article_id, user)
     result = await scoring_svc.score_and_store(pb, db, article_id)
     if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
@@ -70,8 +95,10 @@ async def optimize_article(
     article_id: UUID,
     db: Database = Depends(get_db),
     pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
 ):
     """Re-run fact-check + JSON-LD + scoring."""
+    _guard_article(db, article_id, user)
     if await geo_svc.optimize_and_store(pb, db, article_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     await quality_svc.reflect(pb, db, article_id)
@@ -100,10 +127,10 @@ async def refine_article(
     article_id: UUID,
     db: Database = Depends(get_db),
     pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
 ):
     """Auto-iterate the draft against the SEO/GEO/Grounding evaluators (async)."""
-    if svc.get_article(db, article_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    _guard_article(db, article_id, user)
     svc._update(
         db, article_id,
         generation_status="refining",
@@ -114,16 +141,22 @@ async def refine_article(
 
 
 @router.get("", response_model=list[ArticleSummary])
-def list_articles(business_id: UUID, db: Database = Depends(get_db)):
+def list_articles(
+    business_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    assert_brand_access(db, business_id, user)
     return svc.list_articles(db, business_id)
 
 
 @router.get("/{article_id}", response_model=Article)
-def get_article(article_id: UUID, db: Database = Depends(get_db)):
-    row = svc.get_article(db, article_id)
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
-    return row
+def get_article(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    return _guard_article(db, article_id, user)
 
 
 @router.patch("/{article_id}", response_model=Article)
@@ -133,6 +166,7 @@ def update_article(
     db: Database = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    _guard_article(db, article_id, user)
     fields = payload.model_dump(exclude_unset=True)
     # Approving/publishing is an editorial gate — writers may draft & submit only.
     if (
@@ -150,7 +184,12 @@ def update_article(
 
 
 @router.get("/{article_id}/versions", response_model=list[ArticleVersion])
-def list_versions(article_id: UUID, db: Database = Depends(get_db)):
+def list_versions(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    _guard_article(db, article_id, user)
     return svc.list_versions(db, article_id)
 
 
@@ -158,8 +197,12 @@ def list_versions(article_id: UUID, db: Database = Depends(get_db)):
     "/{article_id}/versions/{version_id}/restore", response_model=Article
 )
 def restore_version(
-    article_id: UUID, version_id: UUID, db: Database = Depends(get_db)
+    article_id: UUID,
+    version_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
 ):
+    _guard_article(db, article_id, user)
     row = svc.restore_version(db, article_id, version_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "version not found")
@@ -168,7 +211,12 @@ def restore_version(
 
 # --- review comments ---
 @router.get("/{article_id}/comments", response_model=list[Comment])
-def list_comments(article_id: UUID, db: Database = Depends(get_db)):
+def list_comments(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    _guard_comment_article(db, article_id, user)
     return comments_svc.list_comments(db, article_id)
 
 
@@ -183,6 +231,7 @@ def add_comment(
     db: Database = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    _guard_comment_article(db, article_id, user)
     return comments_svc.create_comment(
         db, article_id, user.id, payload.body, payload.anchor
     )
@@ -196,6 +245,7 @@ def edit_comment(
     db: Database = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    _guard_comment_article(db, article_id, user)
     existing = comments_svc.get_comment(db, comment_id)
     if existing is None or str(existing["article_id"]) != str(article_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "comment not found")
@@ -219,6 +269,7 @@ def remove_comment(
     db: Database = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    _guard_comment_article(db, article_id, user)
     existing = comments_svc.get_comment(db, comment_id)
     if existing is None or str(existing["article_id"]) != str(article_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "comment not found")
