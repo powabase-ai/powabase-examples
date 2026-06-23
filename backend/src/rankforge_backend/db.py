@@ -8,6 +8,7 @@ A single pooled `Database` is created at app startup and closed at shutdown.
 Always pass parameters separately — never f-string user input into SQL.
 """
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -57,3 +58,15 @@ class Database:
     def execute(self, query: str, params: Any = None) -> None:
         with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(query, params)
+
+    # Async variants — offload the blocking pool work to a thread so callers on the
+    # event loop (the background pipeline workers) don't stall it. Used on the
+    # highest-concurrency paths; the rest rely on the background-task cap.
+    async def afetch_one(self, query: str, params: Any = None) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self.fetch_one, query, params)
+
+    async def afetch_all(self, query: str, params: Any = None) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.fetch_all, query, params)
+
+    async def aexecute(self, query: str, params: Any = None) -> None:
+        await asyncio.to_thread(self.execute, query, params)

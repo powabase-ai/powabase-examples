@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from . import tasks
 from .config import get_settings
 from .db import Database
 from .powabase import PowabaseClient
@@ -59,7 +60,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         if scheduler is not None:
-            await scheduler.aclose()
+            scheduler.shutdown()  # stop new ticks
+        await tasks.drain()  # let in-flight background work finish (bounded)
         if powabase is not None:
             await powabase.aclose()
         if db is not None:

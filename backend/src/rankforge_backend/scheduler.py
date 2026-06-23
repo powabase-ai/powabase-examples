@@ -7,7 +7,6 @@ started in the app lifespan and only when a DB + Powabase client are configured,
 so the hermetic test app never starts it.
 """
 
-import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,6 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from .db import Database
 from .powabase import PowabaseClient
 from .services import scouts as scout_svc
+from .tasks import spawn
 
 log = logging.getLogger("rankforge.scheduler")
 
@@ -27,21 +27,25 @@ class ScoutScheduler:
         self._pb = pb
         self._sched = AsyncIOScheduler()
         self._running: set = set()
-        self._tasks: set[asyncio.Task] = set()
 
     def start(self) -> None:
         self._sched.add_job(
-            self._tick, "interval", seconds=TICK_SECONDS, id="scout-tick"
+            self._tick,
+            "interval",
+            seconds=TICK_SECONDS,
+            id="scout-tick",
+            # If a tick is delayed (busy loop), run it once when free rather than
+            # logging "missed by …" and stacking catch-up runs.
+            coalesce=True,
+            misfire_grace_time=TICK_SECONDS,
         )
         self._sched.start()
         log.info("scout scheduler started (tick=%ss)", TICK_SECONDS)
 
-    async def aclose(self) -> None:
-        """Stop ticking and give in-flight scout runs a bounded chance to finish
-        before the lifespan tears down the DB pool / Powabase client."""
+    def shutdown(self) -> None:
+        """Stop ticking. In-flight scout runs are drained by tasks.drain() in the
+        lifespan (they share the global background-task pool)."""
         self._sched.shutdown(wait=False)
-        if self._tasks:
-            await asyncio.wait(self._tasks, timeout=20)
 
     async def _tick(self) -> None:
         try:
@@ -54,9 +58,8 @@ class ScoutScheduler:
             if bid in self._running:
                 continue
             self._running.add(bid)
-            task = asyncio.create_task(self._run(bid))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+            # Capped + tracked by the shared task runner (global concurrency cap).
+            spawn(self._run(bid))
 
     async def _run(self, business_id) -> None:
         try:

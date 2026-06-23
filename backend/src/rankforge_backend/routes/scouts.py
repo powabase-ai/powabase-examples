@@ -1,6 +1,5 @@
 """Content-scout endpoints (M5) — config, manual run, and the opportunity inbox."""
 
-import asyncio
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -10,6 +9,7 @@ from ..db import Database
 from ..models.scout import Opportunity, ScoutConfig, ScoutConfigUpdate, ScoutRun
 from ..powabase import PowabaseClient
 from ..services import scouts as svc
+from ..tasks import spawn
 from .deps import get_db, get_powabase
 
 router = APIRouter(
@@ -17,14 +17,6 @@ router = APIRouter(
     tags=["scouts"],
     dependencies=[Depends(get_current_user)],
 )
-
-_bg_tasks: set[asyncio.Task] = set()
-
-
-def _spawn(coro) -> None:
-    task = asyncio.create_task(coro)
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
 
 
 # --- config ---
@@ -55,7 +47,7 @@ async def run_scout_now(
     _: object = Depends(require_editor),
 ):
     """Trigger a scout immediately. Poll GET /api/scouts/runs + /api/opportunities."""
-    _spawn(svc.run_scout(pb, db, business_id=business_id, trigger="manual"))
+    spawn(svc.run_scout(pb, db, business_id=business_id, trigger="manual"))
     return {"status": "started", "business_id": str(business_id)}
 
 
@@ -83,7 +75,7 @@ async def draft_opportunity(
     if opp["status"] in ("drafting", "drafted"):
         return opp
     queued = svc.set_opportunity_status(db, opp_id, "queued")
-    _spawn(svc.auto_draft(pb, db, opp))
+    spawn(svc.auto_draft(pb, db, opp))
     return queued
 
 

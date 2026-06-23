@@ -1,6 +1,5 @@
 """Research (Stage A) endpoints — async (background run + status polling)."""
 
-import asyncio
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -10,6 +9,7 @@ from ..db import Database
 from ..models.research import ResearchRun, ResearchRunCreate, ResearchSource
 from ..powabase import PowabaseClient
 from ..services import research as svc
+from ..tasks import spawn
 from .deps import get_db, get_powabase
 
 router = APIRouter(
@@ -17,9 +17,6 @@ router = APIRouter(
     tags=["research"],
     dependencies=[Depends(get_current_user)],
 )
-
-# keep references so background tasks aren't garbage-collected
-_bg_tasks: set[asyncio.Task] = set()
 
 
 @router.post("", response_model=ResearchRun, status_code=status.HTTP_201_CREATED)
@@ -36,7 +33,7 @@ async def create_research(
     run = svc.create_research_run(
         db, business_id=payload.business_id, topic=payload.topic, locale=payload.locale
     )
-    task = asyncio.create_task(
+    spawn(
         svc.run_research_task(
             pb,
             db,
@@ -47,8 +44,6 @@ async def create_research(
             depth=payload.depth,
         )
     )
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
     return run
 
 

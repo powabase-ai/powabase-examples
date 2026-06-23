@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:3007"
     db_pool_min_size: int = 1
     db_pool_max_size: int = 10
+    # Max concurrent heavy background tasks (generation/research/refine/scout).
+    # Kept well under the DB pool size so a burst can't starve the pool.
+    max_background_tasks: int = 4
 
     @property
     def cors_origins(self) -> list[str]:

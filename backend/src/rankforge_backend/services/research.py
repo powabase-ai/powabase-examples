@@ -30,6 +30,11 @@ TERMINAL = {"extracted", "attention_required", "failed", "cancelled"}
 # depth → (serp results to analyze, competitor pages to scrape)
 DEPTH_PRESETS = {"quick": (5, 3), "standard": (10, 5), "deep": (20, 10)}
 
+# How many competitor pages to import/poll/extract concurrently. Each page can poll
+# up to ~80s, so sequential scraping was the research bottleneck (≈ sum); bounded
+# concurrency makes it ≈ the slowest single page.
+SCRAPE_CONCURRENCY = 5
+
 _SYSTEM_PROMPT = """\
 You are RankForge's **SERP analyst**. Given a topic, you map its search landscape \
 with the `web_search` (Exa) tool and return a structured analysis.
@@ -183,6 +188,49 @@ def list_brand_sources(db: Database, business_id: UUID) -> list[dict[str, Any]]:
     )
 
 
+async def _scrape_one(
+    client: PowabaseClient, url: str, title_by_url: dict[str, str]
+) -> dict[str, Any] | None:
+    """Import one competitor URL as a Source, wait for extraction, build a teardown."""
+    try:
+        imp = await client.import_url(url)
+        source_id = (imp.get("sources") or [{}])[0].get("id")
+    except PowabaseError as e:
+        body = e.body if isinstance(e.body, dict) else {}
+        source_id = (body.get("duplicate") or {}).get("id")
+    if not source_id:
+        return None
+
+    status = None
+    for _ in range(40):  # poll up to ~80s
+        src = await client.get_source(source_id)
+        status = src.get("extraction_status")
+        if status in TERMINAL:
+            break
+        await asyncio.sleep(2)
+
+    md = ""
+    if status == "extracted":
+        try:
+            md = await client.get_source_markdown(source_id)
+        except PowabaseError:
+            md = ""
+
+    teardown = CompetitorTeardown(
+        url=url,
+        title=_first_title(md) or title_by_url.get(url) or url,
+        word_count=len(md.split()) if md else None,
+        headings=_extract_headings(md),
+        source_id=source_id,
+    )
+    return {
+        "teardown": teardown,
+        "status": status,
+        "source_id": source_id,
+        "url": url,
+    }
+
+
 # --- the background worker ---
 async def run_research_task(
     client: PowabaseClient,
@@ -236,58 +284,45 @@ async def run_research_task(
             progress={"phase": "scraping", "total": len(urls), "done": 0},
         )
 
-        # 2) import each competitor URL as a Powabase Source + teardown
-        competitors: list[dict[str, Any]] = []
-        for i, url in enumerate(urls):
+        # 2) import competitor URLs as Sources concurrently (bounded), then teardown
+        sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+        done = 0
+
+        async def _scrape_bounded(u: str) -> dict[str, Any] | None:
+            nonlocal done
+            async with sem:
+                result = await _scrape_one(client, u, title_by_url)
+            done += 1  # advisory live progress (racy writes are fine)
+            # Offload the DB write so it doesn't block the loop these run on.
             try:
-                imp = await client.import_url(url)
-                source_id = (imp.get("sources") or [{}])[0].get("id")
-            except PowabaseError as e:
-                body = e.body if isinstance(e.body, dict) else {}
-                source_id = (body.get("duplicate") or {}).get("id")
-            if not source_id:
+                await asyncio.to_thread(
+                    _update, db, run_id,
+                    progress={"phase": "scraping", "total": len(urls), "done": done},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return result
+
+        results = await asyncio.gather(*[_scrape_bounded(u) for u in urls])
+
+        competitors: list[dict[str, Any]] = []
+        for r in results:
+            if r is None:
                 continue
-
-            status = None
-            for _ in range(40):  # poll up to ~80s
-                src = await client.get_source(source_id)
-                status = src.get("extraction_status")
-                if status in TERMINAL:
-                    break
-                await asyncio.sleep(2)
-
-            md = ""
-            if status == "extracted":
-                try:
-                    md = await client.get_source_markdown(source_id)
-                except PowabaseError:
-                    md = ""
-
-            teardown = CompetitorTeardown(
-                url=url,
-                title=_first_title(md) or title_by_url.get(url) or url,
-                word_count=len(md.split()) if md else None,
-                headings=_extract_headings(md),
-                source_id=source_id,
-            )
-            db.execute(
+            t = r["teardown"]
+            await db.aexecute(
                 "insert into public.research_sources "
                 "(research_run_id, source_id, url, title, word_count, status) "
                 "values (%s, %s, %s, %s, %s, %s)",
-                (run_id, source_id, url, teardown.title, teardown.word_count, status),
+                (run_id, r["source_id"], r["url"], t.title, t.word_count, r["status"]),
             )
-            competitors.append(teardown.model_dump())
-            _update(
-                db,
-                run_id,
-                competitors=competitors,
-                progress={"phase": "scraping", "total": len(urls), "done": i + 1},
-            )
+            competitors.append(t.model_dump())
 
         _update(
             db,
             run_id,
             status="done",
+            competitors=competitors,
             progress={"phase": "done", "total": len(urls), "done": len(competitors)},
         )
     except Exception as e:  # noqa: BLE001 — surface any failure to the row

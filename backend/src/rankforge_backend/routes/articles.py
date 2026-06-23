@@ -1,6 +1,5 @@
 """Article (Stage C) endpoints — async generation + status polling."""
 
-import asyncio
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -23,6 +22,7 @@ from ..services import geo_optimize as geo_svc
 from ..services import quality as quality_svc
 from ..services import revise as revise_svc
 from ..services import scoring as scoring_svc
+from ..tasks import spawn
 from .deps import get_db, get_powabase
 
 # Every article endpoint requires an authenticated user.
@@ -34,8 +34,6 @@ router = APIRouter(
 
 # Status transitions that move an article forward are gated to editors/admins.
 _GATED_STATUSES = {"approved", "published"}
-
-_bg_tasks: set[asyncio.Task] = set()
 
 
 @router.post("", response_model=Article, status_code=status.HTTP_201_CREATED)
@@ -50,11 +48,7 @@ async def generate_article(
     if brief is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "brief not found")
     article = svc.create_article(db, brief, author_id=user.id)
-    task = asyncio.create_task(
-        svc.run_generation_task(pb, db, article_id=article["id"], brief=brief)
-    )
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
+    spawn(svc.run_generation_task(pb, db, article_id=article["id"], brief=brief))
     return article
 
 
@@ -115,9 +109,7 @@ async def refine_article(
         generation_status="refining",
         progress={"phase": "refining", "iteration": 0, "total": revise_svc.MAX_REVISIONS},
     )
-    task = asyncio.create_task(_refine_and_finish(pb, db, article_id))
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
+    spawn(_refine_and_finish(pb, db, article_id))
     return svc.get_article(db, article_id)
 
 
