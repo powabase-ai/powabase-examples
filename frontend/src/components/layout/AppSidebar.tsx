@@ -7,6 +7,7 @@ import {
   Layers,
   LogOut,
   PenLine,
+  Radar,
   Search,
   Settings,
   Users,
@@ -34,6 +35,7 @@ export function AppSidebar({ brandId }: { brandId: string }) {
     { title: "Research", href: `/brands/${brandId}`, icon: Search, exact: true },
     { title: "Sources", href: `/brands/${brandId}/sources`, icon: Layers },
     { title: "Articles", href: `/brands/${brandId}/articles`, icon: PenLine },
+    { title: "Scouts", href: `/brands/${brandId}/scouts`, icon: Radar },
     { title: "Team", href: `/brands/${brandId}/team`, icon: Users },
     { title: "Settings", href: `/brands/${brandId}/settings`, icon: Settings },
   ];

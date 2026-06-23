@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.27",
     "python-multipart>=0.0.12",
     "pyjwt>=2.9",
+    "apscheduler>=3.10,<4",
 ]
 
 [dependency-groups]

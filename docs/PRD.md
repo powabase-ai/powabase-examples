@@ -304,8 +304,12 @@ Still open:
   filters, version history/restore, **GoTrue auth** (Anon-key client + JWT-verified
   backend, JIT profiles, first user → admin), **roles** (writer/editor/admin gating
   approve/publish + role management), and inline **review comments**.
-- **M5** — Autonomous content scouts + opportunity inbox (Phase 9) — the
-  scheduled-job/queue framework.
+- **M5** — Autonomous content scouts + opportunity inbox (Phase 9). ✅
+  In-process APScheduler tick polls per-brand `scout_configs` (durable `next_run_at`);
+  a tool-using `rankforge-scout` agent (Exa) discovers timely topics, scored against
+  the brand into an `opportunities` inbox. `suggest` surfaces only; `auto_draft`
+  promotes top picks (≥min_score, capped) through research→brief→draft and stages them
+  `in_review` (never auto-publishes). Scouts UI: config + inbox + manual "Run now".
 - **M6** — Authority & linking: sitemap ingestion, internal/external links, monthly
   re-linking, linkable assets (Phase 12 + FR-11.4).
 - **M7** — Programmatic SEO (Phase 10) + media enrichment (Phase 11).

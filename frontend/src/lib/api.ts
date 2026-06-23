@@ -355,6 +355,83 @@ export function canApprove(role?: Role | null): boolean {
   return role === "editor" || role === "admin";
 }
 
+// --- Content scouts (M5) ---
+export type Autonomy = "suggest" | "auto_draft";
+export type OpportunityStatus =
+  | "new"
+  | "queued"
+  | "drafting"
+  | "drafted"
+  | "dismissed";
+
+export interface ScoutConfig {
+  business_id: string;
+  enabled: boolean;
+  cadence: "daily" | "weekly";
+  autonomy: Autonomy;
+  min_score: number;
+  max_drafts_per_run: number;
+  focus: string[];
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ScoutRun {
+  id: string;
+  business_id: string;
+  status: "running" | "done" | "failed";
+  trigger: "schedule" | "manual";
+  found: number;
+  drafted: number;
+  error?: string | null;
+  created_at: string;
+}
+
+export interface Opportunity {
+  id: string;
+  business_id: string;
+  scout_run_id?: string | null;
+  title: string;
+  angle?: string | null;
+  why_now?: string | null;
+  keyword?: string | null;
+  source_type?: string | null;
+  source_url?: string | null;
+  evidence: Record<string, unknown>;
+  score: number;
+  scores: Record<string, unknown>;
+  status: OpportunityStatus;
+  article_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const scoutsApi = {
+  config: (businessId: string) =>
+    request<ScoutConfig>(`/api/scouts/config?business_id=${businessId}`),
+  updateConfig: (businessId: string, data: Partial<ScoutConfig>) =>
+    request<ScoutConfig>(`/api/scouts/config?business_id=${businessId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  run: (businessId: string) =>
+    request<{ status: string }>(`/api/scouts/run?business_id=${businessId}`, {
+      method: "POST",
+    }),
+  runs: (businessId: string) =>
+    request<ScoutRun[]>(`/api/scouts/runs?business_id=${businessId}`),
+};
+
+export const opportunitiesApi = {
+  list: (businessId: string) =>
+    request<Opportunity[]>(`/api/opportunities?business_id=${businessId}`),
+  draft: (id: string) =>
+    request<Opportunity>(`/api/opportunities/${id}/draft`, { method: "POST" }),
+  dismiss: (id: string) =>
+    request<Opportunity>(`/api/opportunities/${id}/dismiss`, { method: "POST" }),
+};
+
 export interface ArticleUpdate {
   title?: string;
   content_md?: string;

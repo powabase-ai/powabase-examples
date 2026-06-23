@@ -19,9 +19,11 @@ from .routes import (
     business_profiles,
     health,
     research,
+    scouts,
     sources,
     templates,
 )
+from .scheduler import ScoutScheduler
 
 
 @asynccontextmanager
@@ -45,9 +47,18 @@ async def lifespan(app: FastAPI):
         )
     app.state.powabase = powabase
 
+    # Autonomous content scouts — only when fully configured (never in tests).
+    scheduler: ScoutScheduler | None = None
+    if db is not None and powabase is not None:
+        scheduler = ScoutScheduler(db, powabase)
+        scheduler.start()
+    app.state.scheduler = scheduler
+
     try:
         yield
     finally:
+        if scheduler is not None:
+            scheduler.shutdown()
         if powabase is not None:
             await powabase.aclose()
         if db is not None:
@@ -74,6 +85,7 @@ def create_app() -> FastAPI:
     app.include_router(sources.router)
     app.include_router(articles.router)
     app.include_router(templates.router)
+    app.include_router(scouts.router)
     return app
 
 
