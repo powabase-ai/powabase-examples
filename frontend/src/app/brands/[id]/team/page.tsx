@@ -4,6 +4,7 @@ import { Loader2, Users } from "lucide-react";
 import { toast } from "sonner";
 
 import { Card, CardContent } from "@/components/ui/card";
+import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import { useMembers, useSetRole } from "@/lib/hooks/useAccount";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import type { Role } from "@/lib/api";
@@ -32,11 +33,9 @@ export default function TeamPage() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-8">
-      <div className="mb-2 flex items-center gap-2">
-        <Users className="size-5 text-muted-foreground" />
-        <h1 className="font-display text-2xl font-bold">Team</h1>
-      </div>
+    <Page>
+      <PageHeader icon={Users} title="Team" />
+      <PageBody>
       <p className="mb-6 text-sm text-muted-foreground">
         Everyone shares this workspace. Roles gate the editorial workflow —{" "}
         <span className="font-medium">writers</span> draft and submit,{" "}
@@ -97,6 +96,7 @@ export default function TeamPage() {
           </div>
         ))}
       </div>
-    </div>
+      </PageBody>
+    </Page>
   );
 }

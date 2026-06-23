@@ -6,6 +6,7 @@ import { Loader2, PenLine, Search } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import { useArticles } from "@/lib/hooks/useArticles";
 import { ARTICLE_STATUSES, type ArticleStatus, type ArticleSummary } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -43,12 +44,9 @@ export default function ArticlesList({
   );
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-8">
-      <div className="mb-4 flex items-center gap-2">
-        <PenLine className="size-5 text-muted-foreground" />
-        <h1 className="font-display text-2xl font-bold">Articles</h1>
-      </div>
-
+    <Page>
+      <PageHeader icon={PenLine} title="Articles" />
+      <PageBody>
       <div className="mb-5 flex flex-col gap-3">
         <div className="relative">
           <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
@@ -115,6 +113,7 @@ export default function ArticlesList({
           </Link>
         ))}
       </div>
-    </div>
+      </PageBody>
+    </Page>
   );
 }

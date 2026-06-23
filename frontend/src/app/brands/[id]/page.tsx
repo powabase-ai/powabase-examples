@@ -24,6 +24,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Markdown } from "@/components/Markdown";
+import { Page, PageHeader } from "@/components/layout/PageHeader";
 import { useGenerateArticle } from "@/lib/hooks/useArticles";
 import { useBrands } from "@/lib/hooks/useBrands";
 import {
@@ -121,17 +122,12 @@ export default function BrandWorkspace({
   const selectedBrief = selectedRun ? briefByRun.get(selectedRun) : undefined;
 
   return (
-    <div>
-      <main className="mx-auto grid max-w-6xl gap-6 px-6 py-8 lg:grid-cols-[380px_1fr]">
-        <section className="flex flex-col gap-4">
-          <div>
-            <h1 className="font-display text-2xl font-bold">{brand?.name ?? "Brand"}</h1>
-            {brand?.niche && (
-              <p className="mt-1 text-sm text-muted-foreground">{brand.niche}</p>
-            )}
-          </div>
-
-          <Card>
+    <Page>
+      <PageHeader icon={Search} title="Research" meta={brand?.niche ?? undefined} />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto grid w-full max-w-6xl gap-6 px-6 py-8 lg:grid-cols-[380px_1fr]">
+          <section className="flex flex-col gap-4">
+            <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
                 <Search className="size-4" /> New research
@@ -275,10 +271,11 @@ export default function BrandWorkspace({
             </>
           )}
         </section>
-      </main>
+        </div>
+      </div>
 
       <SourceDialog sourceId={sourceForMd} onClose={() => setSourceForMd(null)} />
-    </div>
+    </Page>
   );
 }
 

@@ -24,6 +24,7 @@ import {
   useUpdateScoutConfig,
 } from "@/lib/hooks/useScouts";
 import { useAuth } from "@/lib/auth/AuthProvider";
+import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import { canApprove, type Opportunity, type ScoutConfig } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -293,28 +294,29 @@ export default function ScoutsPage({
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-8">
-      <div className="mb-1 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Radar className="size-5 text-muted-foreground" />
-          <h1 className="font-display text-2xl font-bold">Scouts</h1>
-        </div>
-        {canEdit && (
-          <Button
-            variant="gold"
-            size="sm"
-            onClick={run}
-            disabled={runScout.isPending || lastRun?.status === "running"}
-          >
-            {runScout.isPending || lastRun?.status === "running" ? (
-              <Loader2 className="animate-spin" />
-            ) : (
-              <Radar />
-            )}
-            Run now
-          </Button>
-        )}
-      </div>
+    <Page>
+      <PageHeader
+        icon={Radar}
+        title="Scouts"
+        actions={
+          canEdit && (
+            <Button
+              variant="gold"
+              size="sm"
+              onClick={run}
+              disabled={runScout.isPending || lastRun?.status === "running"}
+            >
+              {runScout.isPending || lastRun?.status === "running" ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Radar />
+              )}
+              Run now
+            </Button>
+          )
+        }
+      />
+      <PageBody>
       <p className="mb-5 text-sm text-muted-foreground">
         Scouts watch the market for timely, on-brand topics and surface scored
         opportunities here. At the auto-draft level they push the best ones through
@@ -370,6 +372,7 @@ export default function ScoutsPage({
           </div>
         </details>
       )}
-    </div>
+      </PageBody>
+    </Page>
   );
 }

@@ -39,8 +39,8 @@ export default function BrandLayout({
           </ResizablePanel>
           <ResizableHandle />
           <ResizablePanel minSize={50}>
-            {/* Panels set inline overflow:hidden; scroll must live on an inner box. */}
-            <div className="h-full overflow-y-auto">{children}</div>
+            {/* Each page owns its own scroll via the shared Page/PageBody frame. */}
+            <div className="h-full min-h-0 overflow-hidden">{children}</div>
           </ResizablePanel>
         </ResizablePanelGroup>
       </div>

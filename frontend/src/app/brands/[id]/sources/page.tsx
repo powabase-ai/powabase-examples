@@ -6,6 +6,7 @@ import { ExternalLink, FileText, Layers } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Markdown } from "@/components/Markdown";
+import { Page, PageHeader } from "@/components/layout/PageHeader";
 import { useBrandSources, useSourceMarkdown } from "@/lib/hooks/useResearch";
 import type { BrandSource } from "@/lib/api";
 
@@ -20,14 +21,12 @@ export default function SourcesLibrary({
   const md = useSourceMarkdown(selected?.source_id ?? null);
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border bg-card px-6">
-        <Layers className="size-4 text-muted-foreground" />
-        <h1 className="font-display text-lg font-bold">Sources</h1>
-        <span className="text-sm text-muted-foreground">
-          {sources?.length ? `· ${sources.length} scraped pages` : ""}
-        </span>
-      </header>
+    <Page>
+      <PageHeader
+        icon={Layers}
+        title="Sources"
+        meta={sources?.length ? `${sources.length} scraped pages` : undefined}
+      />
 
       <div className="grid min-h-0 flex-1 grid-cols-[360px_1fr]">
         {/* List */}
@@ -115,6 +114,6 @@ export default function SourcesLibrary({
           )}
         </div>
       </div>
-    </div>
+    </Page>
   );
 }

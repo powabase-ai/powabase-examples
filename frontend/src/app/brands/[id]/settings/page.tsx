@@ -3,12 +3,13 @@
 import * as React from "react";
 import { use } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, Settings as SettingsIcon, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BrandForm } from "@/components/BrandForm";
+import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import {
   BrandFields,
   brandToForm,
@@ -81,14 +82,17 @@ export default function BrandSettings({
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-8">
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="font-display text-2xl font-bold">Settings</h1>
-        <Button variant="outline" onClick={() => setNewOpen(true)}>
-          <Plus /> New brand
-        </Button>
-      </div>
-
+    <Page>
+      <PageHeader
+        icon={SettingsIcon}
+        title="Settings"
+        actions={
+          <Button variant="outline" size="sm" onClick={() => setNewOpen(true)}>
+            <Plus /> New brand
+          </Button>
+        }
+      />
+      <PageBody className="max-w-2xl">
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Brand profile</CardTitle>
@@ -126,6 +130,7 @@ export default function BrandSettings({
         onSave={createNew}
         saving={createBrand.isPending}
       />
-    </div>
+      </PageBody>
+    </Page>
   );
 }
