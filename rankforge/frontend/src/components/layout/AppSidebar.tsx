@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -13,10 +14,17 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
-import { useBrands } from "@/lib/hooks/useBrands";
+import { BrandForm } from "@/components/BrandForm";
+import { useBrands, useCreateBrand } from "@/lib/hooks/useBrands";
 import { useAuth } from "@/lib/auth/AuthProvider";
+import type { BusinessProfileInput } from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+// Sentinel option value: choosing it opens the create-brand dialog instead of
+// switching brands.
+const NEW_BRAND = "__new__";
 
 interface NavItem {
   title: string;
@@ -30,6 +38,18 @@ export function AppSidebar({ brandId }: { brandId: string }) {
   const router = useRouter();
   const { data: brands } = useBrands();
   const { profile, signOut } = useAuth();
+  const createBrand = useCreateBrand();
+  const [createOpen, setCreateOpen] = useState(false);
+
+  async function handleCreateBrand(data: BusinessProfileInput) {
+    try {
+      const b = await createBrand.mutateAsync(data);
+      setCreateOpen(false);
+      router.push(`/brands/${b.id}`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not create brand");
+    }
+  }
 
   const nav: NavItem[] = [
     { title: "Research", href: `/brands/${brandId}`, icon: Search, exact: true },
@@ -51,7 +71,10 @@ export function AppSidebar({ brandId }: { brandId: string }) {
         </Link>
         <select
           value={brandId}
-          onChange={(e) => router.push(`/brands/${e.target.value}`)}
+          onChange={(e) => {
+            if (e.target.value === NEW_BRAND) setCreateOpen(true);
+            else router.push(`/brands/${e.target.value}`);
+          }}
           className="mt-4 h-9 w-full rounded-md border border-[rgb(var(--iron-line))] bg-[rgb(var(--iron-hover))] px-2.5 text-sm text-[rgb(var(--iron-strong))] outline-none focus-visible:ring-2 focus-visible:ring-[rgb(var(--ember))]"
         >
           {brands?.map((b) => (
@@ -59,6 +82,12 @@ export function AppSidebar({ brandId }: { brandId: string }) {
               {b.name}
             </option>
           ))}
+          <option disabled className="bg-[rgb(var(--iron))]">
+            ──────────
+          </option>
+          <option value={NEW_BRAND} className="bg-[rgb(var(--iron))]">
+            + New brand…
+          </option>
         </select>
       </div>
 
@@ -120,6 +149,14 @@ export function AppSidebar({ brandId }: { brandId: string }) {
           </button>
         </div>
       </div>
+
+      <BrandForm
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        brand={null}
+        onSave={handleCreateBrand}
+        saving={createBrand.isPending}
+      />
     </aside>
   );
 }
