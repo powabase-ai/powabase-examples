@@ -49,6 +49,29 @@ and citations.
 - Spread citations across different source domains.
 - Never invent statistics or sources.
 
+## De-AI the prose (remove these tells, even if they aren't in the issue list)
+A draft that reads as AI-written is not "improved". As you revise, actively rewrite out every one of these:
+
+### Overused words (worst when stacked)
+- delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant, "boasts", "nestled". Replace with plain words; never several in a paragraph.
+
+### Constructions to delete
+- "It's not just X, it's Y"; "Whether you're a beginner or a seasoned pro"; "In today's fast-paced, ever-evolving world"; "Let's dive in / Let's explore"; reflexive rule-of-three triads; "From X to Y".
+
+### Rhythm and punctuation
+- Thin out em-dashes (prefer commas, periods, parentheses).
+- Break mechanical evenness: vary sentence and paragraph length; do not leave every paragraph at 3-4 sentences or every section the same size.
+
+### Structure
+- Convert bullet lists to prose where the items aren't truly parallel or prose reads better. Remove bolded lead-ins from bullets.
+- Replace an "In conclusion"/"Ultimately" ending that just restates the intro with a concrete close (a specific takeaway, number, or next step).
+
+### Tone
+- Cut empty transitions (Moreover, Furthermore, Additionally, That said), reflexive both-sidesing, the obvious-stated-as-profound, and over-hedging. Make the confident claims the sources support.
+
+### Specificity
+- Push in real specifics from the sources: numbers, names, dates, versions, examples. Vagueness is the strongest tell; replace smooth generalities with precise detail.
+
 ## Output
 - Output ONLY the full revised article in Markdown, starting at the H1 — no preamble, \
 notes, or commentary.
