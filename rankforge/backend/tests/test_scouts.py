@@ -94,6 +94,39 @@ def test_cadence_delta():
     assert svc._cadence_delta("bogus") == timedelta(days=1)  # safe default
 
 
+def test_gather_coverage_includes_articles_and_dismissed():
+    db = MagicMock()
+    db.fetch_all.side_effect = [
+        [{"title": "My Article", "keywords": ["my kw"], "slug": "my-article"}],
+        [{"title": "Open Opp", "keyword": "open kw"}],
+        [{"title": "Dismissed Topic"}],
+    ]
+    cov = svc._gather_coverage(db, "11111111-1111-1111-1111-111111111111")
+    assert svc._norm_title("My Article") in cov["seen"]
+    # dismissed topics are folded in so they don't keep resurfacing
+    assert svc._norm_title("Dismissed Topic") in cov["seen"]
+    assert svc._norm_title("my kw") in cov["keywords"]
+    assert svc._norm_title("my article") in cov["keywords"]  # from the slug
+
+
+def test_covers_existing_catches_dups_but_allows_new():
+    cov = {
+        "seen": {svc._norm_title("Best Headless CMS for Startups")},
+        "keywords": {svc._norm_title("headless cms")},
+        "token_sets": [svc._tokens("Best Headless CMS for Startups")],
+    }
+    # exact (normalized) title
+    assert svc._covers_existing("best headless cms for startups!", None, cov)
+    # same primary keyword, different title
+    assert svc._covers_existing("A New Spin", "Headless CMS", cov)
+    # reworded near-duplicate (high title-token overlap)
+    assert svc._covers_existing("Best Headless CMS for Startups in 2026", None, cov)
+    # genuinely new topic + keyword passes
+    assert not svc._covers_existing(
+        "Edge Caching Strategies for APIs", "edge caching", cov
+    )
+
+
 # --- routes (hermetic) ---
 def _brand_db() -> MagicMock:
     """A db mock whose fetch_one satisfies assert_brand_access (org match)."""

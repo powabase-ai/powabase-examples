@@ -47,6 +47,11 @@ niche and keywords.
 - Favor specific, actionable angles over evergreen restatements of well-covered topics.
 - Prefer timely opportunities — something changed recently that makes this worth \
 writing now.
+- **Never duplicate existing coverage.** You will be given the brand's already-\
+published, queued, and dismissed topics under "Already covered". Do not propose any \
+of them, nor a reworded variant, nor a topic that targets the same primary keyword. \
+Every opportunity must be genuinely NEW — a fresh angle, sub-topic, or keyword the \
+brand has not addressed.
 - Base every opportunity on a real search result; never fabricate sources or trends.
 
 ## For each opportunity provide
@@ -255,6 +260,81 @@ def score_candidate(
     }
 
 
+# --- existing-coverage awareness (don't re-suggest what the blog already covers) ---
+_SIM_THRESHOLD = 0.7  # title-token Jaccard above which a candidate is a near-duplicate
+
+
+def _gather_coverage(db: Database, business_id: UUID) -> dict[str, Any]:
+    """Everything the brand already covers — used both to brief the scout agent and
+    to filter its candidates: published/draft articles plus open AND dismissed
+    opportunities (a dismissed topic shouldn't keep coming back)."""
+    articles = db.fetch_all(
+        "select title, keywords, slug from public.articles "
+        "where business_id = %s order by updated_at desc",
+        (business_id,),
+    )
+    open_opps = db.fetch_all(
+        "select title, keyword from public.opportunities "
+        "where business_id = %s and status <> 'dismissed' order by created_at desc",
+        (business_id,),
+    )
+    dismissed = db.fetch_all(
+        "select title from public.opportunities "
+        "where business_id = %s and status = 'dismissed'",
+        (business_id,),
+    )
+    seen = {_norm_title(r["title"]) for r in articles}
+    seen |= {_norm_title(r["title"]) for r in open_opps}
+    seen |= {_norm_title(r["title"]) for r in dismissed}
+    # Covered primary keywords (article keywords + slug + open-opp keyword): two
+    # articles targeting the same keyword is redundant for SEO.
+    keywords: set[str] = set()
+    for a in articles:
+        for k in a.get("keywords") or []:
+            if k:
+                keywords.add(_norm_title(str(k)))
+        if a.get("slug"):
+            keywords.add(_norm_title(a["slug"].replace("-", " ")))
+    for o in open_opps:
+        if o.get("keyword"):
+            keywords.add(_norm_title(o["keyword"]))
+    token_sets = [t for r in (articles + open_opps) if (t := _tokens(r["title"]))]
+    return {
+        "seen": seen,
+        "keywords": keywords,
+        "token_sets": token_sets,
+        "articles": articles,
+        "opps": open_opps + dismissed,
+    }
+
+
+def _covers_existing(title: str, keyword: str | None, cov: dict[str, Any]) -> bool:
+    """True if this candidate duplicates existing coverage: same (normalized) title,
+    same primary keyword, or a high title-token overlap (a reworded variant)."""
+    nt = _norm_title(title)
+    if not nt or nt in cov["seen"]:
+        return True
+    if keyword and _norm_title(keyword) in cov["keywords"]:
+        return True
+    ct = _tokens(title)
+    if ct:
+        for ts in cov["token_sets"]:
+            if len(ct & ts) / len(ct | ts) >= _SIM_THRESHOLD:
+                return True
+    return False
+
+
+def _covered_block(cov: dict[str, Any], limit: int = 60) -> str:
+    """A compact 'already covered' list for the scout prompt (most-recent first)."""
+    lines: list[str] = []
+    for a in cov["articles"][:limit]:
+        kw = next((k for k in (a.get("keywords") or []) if k), None)
+        lines.append(f'- "{a["title"]}"' + (f" — targets: {kw}" if kw else ""))
+    for o in cov["opps"][: max(0, limit - len(lines))]:
+        lines.append(f'- "{o["title"]}"')
+    return "\n".join(lines) or "- (nothing published yet)"
+
+
 # --- the worker ---
 async def run_scout(
     client: PowabaseClient,
@@ -277,6 +357,7 @@ async def run_scout(
             raise RuntimeError("brand not found")
 
         focus = cfg.get("focus") or brand.get("seed_topics") or []
+        cov = _gather_coverage(db, business_id)
         agent_id = await ensure_scout_agent(client)
         msg = (
             "## Brand\n"
@@ -286,8 +367,12 @@ async def run_scout(
             f"- Focus topics: {', '.join(focus) or 'n/a'}\n"
             f"- Target keywords: {', '.join(brand.get('target_keywords') or []) or 'n/a'}\n"
             f"- Competitors: {', '.join(c.get('domain', '') for c in (brand.get('competitors') or [])) or 'n/a'}\n\n"
+            "## Already covered — do NOT propose these or close variants\n"
+            f"{_covered_block(cov)}\n\n"
             "## Task\n"
-            "- Find 5–8 timely content opportunities for this brand right now.\n\n"
+            "- Find 5–8 timely content opportunities for this brand right now.\n"
+            "- Each MUST be genuinely new — not listed above, not a reworded variant, "
+            "and not targeting a keyword the brand already covers.\n\n"
             "## Output\n"
             "- Output ONLY a single ```json block matching this shape:\n"
             f"{_SCHEMA_HINT}"
@@ -300,28 +385,20 @@ async def run_scout(
         candidates = candidates or []
 
         brand_terms = _brand_terms(brand)
-        seen = {
-            _norm_title(o["title"])
-            for o in db.fetch_all(
-                "select title from public.opportunities where business_id = %s "
-                "and status <> 'dismissed'",
-                (business_id,),
-            )
-        }
-        seen |= {
-            _norm_title(a["title"])
-            for a in db.fetch_all(
-                "select title from public.articles where business_id = %s",
-                (business_id,),
-            )
-        }
 
         stored: list[dict[str, Any]] = []
         for cand in candidates:
             title = (cand.get("title") or "").strip()
-            if not title or _norm_title(title) in seen:
+            keyword = cand.get("keyword")
+            # Skip anything the brand already covers — exact title, same primary
+            # keyword, or a paraphrase — and dedup candidates against each other.
+            if _covers_existing(title, keyword, cov):
                 continue
-            seen.add(_norm_title(title))
+            cov["seen"].add(_norm_title(title))
+            if tt := _tokens(title):
+                cov["token_sets"].append(tt)
+            if keyword:
+                cov["keywords"].add(_norm_title(keyword))
             score, breakdown = score_candidate(cand, brand_terms)
             if score < 40:  # not worth surfacing
                 continue
