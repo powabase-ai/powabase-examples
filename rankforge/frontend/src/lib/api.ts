@@ -445,6 +445,7 @@ export interface Opportunity {
   scores: Record<string, unknown>;
   status: OpportunityStatus;
   article_id?: string | null;
+  progress?: { phase?: string; message?: string };
   created_at: string;
   updated_at: string;
 }

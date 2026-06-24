@@ -240,9 +240,20 @@ function OpportunityCard({
                 </Button>
               </Link>
             ) : busy ? (
-              <span className="inline-flex items-center gap-1.5 text-xs text-[rgb(var(--ember-bright))]">
-                <Loader2 className="size-3.5 animate-spin" /> Drafting…
-              </span>
+              <div className="flex flex-col gap-1">
+                <span className="inline-flex items-center gap-1.5 text-xs text-[rgb(var(--ember-bright))]">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  {opp.progress?.message ?? "Drafting…"}
+                </span>
+                {opp.article_id && (
+                  <Link
+                    href={`/brands/${brandId}/articles/${opp.article_id}`}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-[rgb(var(--ember))] hover:underline"
+                  >
+                    View live progress →
+                  </Link>
+                )}
+              </div>
             ) : opp.status === "new" ? (
               <Button
                 variant="outline"

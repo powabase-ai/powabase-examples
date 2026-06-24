@@ -90,7 +90,8 @@ _RUN_COLUMNS = (
 )
 _OPP_COLUMNS = (
     "id, business_id, scout_run_id, title, angle, why_now, keyword, source_type, "
-    "source_url, evidence, score, scores, status, article_id, created_at, updated_at"
+    "source_url, evidence, score, scores, status, article_id, progress, "
+    "created_at, updated_at"
 )
 
 async def ensure_scout_agent(client: PowabaseClient) -> str:
@@ -507,6 +508,15 @@ async def run_scout(
     return get_run(db, run_id)
 
 
+def _set_opp_progress(db: Database, opp_id: UUID, phase: str, message: str) -> None:
+    """Narrate what an auto-draft is doing right now (shown on the inbox card)."""
+    db.execute(
+        "update public.opportunities set progress = %s, updated_at = now() "
+        "where id = %s",
+        (Json({"phase": phase, "message": message}), opp_id),
+    )
+
+
 async def auto_draft(
     client: PowabaseClient, db: Database, opp: dict[str, Any]
 ) -> bool:
@@ -515,6 +525,10 @@ async def auto_draft(
     business_id = opp["business_id"]
     topic = opp.get("keyword") or opp.get("title")
     set_opportunity_status(db, opp_id, "drafting")
+    _set_opp_progress(
+        db, opp_id, "researching",
+        "Researching the topic — competitors & the search landscape…",
+    )
     try:
         brand = brands.get_profile(db, business_id)
         rrun = research_svc.create_research_run(
@@ -534,10 +548,20 @@ async def auto_draft(
         if not research_svc.list_sources(db, rrun["id"]):
             set_opportunity_status(db, opp_id, "new")
             return False
+        _set_opp_progress(
+            db, opp_id, "briefing", "Building the content brief from the research…"
+        )
         brief = await brief_svc.generate_brief(
             client, db, research_run_id=rrun["id"]
         )
         article = generation.create_article(db, brief)
+        # Link the article now (still "drafting") so the user can open it and watch
+        # the detailed generation progress while it writes.
+        set_opportunity_status(db, opp_id, "drafting", article_id=article["id"])
+        _set_opp_progress(
+            db, opp_id, "writing",
+            "Writing the grounded draft — open it to watch live…",
+        )
         await generation.run_generation_task(
             client, db, article_id=article["id"], brief=brief
         )

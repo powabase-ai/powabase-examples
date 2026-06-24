@@ -62,5 +62,6 @@ class Opportunity(BaseModel):
     scores: dict = Field(default_factory=dict)
     status: str
     article_id: UUID | None = None
+    progress: dict = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
