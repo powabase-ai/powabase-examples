@@ -72,10 +72,14 @@ async def ensure_brand_kb(
 async def index_run_sources(
     client: PowabaseClient, db: Database, kb_id: str, run_id: UUID
 ) -> int:
-    """Add a research run's scraped sources to the KB and wait for indexing."""
+    """Add a research run's USABLE scraped sources to the KB and wait for indexing.
+    Thin/failed pages are filtered (research_svc.is_usable_source) so grounding only
+    draws on real, citable content."""
     sources = research_svc.list_sources(db, run_id)
     source_ids = [
-        s["source_id"] for s in sources if s.get("status") == "extracted" and s["source_id"]
+        s["source_id"]
+        for s in sources
+        if research_svc.is_usable_source(s) and s["source_id"]
     ]
     for sid in source_ids:
         try:

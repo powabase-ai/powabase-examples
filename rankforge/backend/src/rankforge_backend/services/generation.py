@@ -63,7 +63,9 @@ invent statistics or specifics.
 - Cite sources inline as Markdown links.
 - Make each link's anchor text a natural, descriptive phrase that reads well in the \
 sentence — never the source's page title, the site name, or a bare URL.
-- Spread citations across different source domains rather than repeatedly linking one.
+- Spread citations across DIFFERENT source domains. Across the whole article, don't \
+lean on any single source for more than about two citations. If only a couple of \
+sources are available, cite sparingly rather than linking the same page again and again.
 
 ## Style
 - Write in the brand's voice: specific, useful, concrete.
@@ -315,7 +317,13 @@ async def run_generation_task(
         source_ids: list[str] | None = None
         url_by_source: dict[str, str] = {}
         if research_run_id:
-            run_sources = research_svc.list_sources(db, research_run_id)
+            # Only ground on usable sources (extracted + enough real content) so the
+            # writer cites real articles, not failed/thin scrapes.
+            run_sources = [
+                s
+                for s in research_svc.list_sources(db, research_run_id)
+                if research_svc.is_usable_source(s)
+            ]
             source_ids = [
                 s["source_id"] for s in run_sources if s.get("source_id")
             ] or None

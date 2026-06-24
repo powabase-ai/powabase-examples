@@ -73,6 +73,27 @@ def test_diverse_urls_backfills_when_too_few_domains():
     assert len(svc.diverse_urls(urls, 2)) == 2
 
 
+def test_diverse_urls_skips_junk_domains():
+    urls = [
+        "https://youtube.com/watch?v=1",
+        "https://reddit.com/r/x",
+        "https://realsite.com/guide",
+        "https://docs.example.com/api",
+    ]
+    out = svc.diverse_urls(urls, 4)
+    domains = [svc._domain(u) for u in out]
+    assert "youtube.com" not in domains and "reddit.com" not in domains
+    assert "realsite.com" in domains and "docs.example.com" in domains
+
+
+def test_is_usable_source():
+    assert svc.is_usable_source({"status": "extracted", "word_count": 800})
+    # failed/thin pages are not citable
+    assert not svc.is_usable_source({"status": "failed", "word_count": 800})
+    assert not svc.is_usable_source({"status": "extracted", "word_count": 30})
+    assert not svc.is_usable_source({"status": "extracted", "word_count": None})
+
+
 def make_client() -> TestClient:
     app = create_app()
     db = MagicMock()

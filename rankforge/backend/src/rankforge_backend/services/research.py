@@ -30,13 +30,42 @@ SERP_AGENT_NAME = "rankforge-serp"
 SERP_MODEL = "claude-sonnet-4-6"
 TERMINAL = {"extracted", "attention_required", "failed", "cancelled"}
 
-# depth → (serp results to analyze, competitor pages to scrape)
-DEPTH_PRESETS = {"quick": (5, 3), "standard": (10, 5), "deep": (20, 10)}
+# depth → (serp results to analyze, competitor pages to scrape). Generous counts so,
+# after the trust/quality gate drops thin or failed pages, the article still has many
+# DISTINCT sources to cite (otherwise the writer re-cites the same one or two).
+DEPTH_PRESETS = {"quick": (10, 6), "standard": (20, 12), "deep": (40, 22)}
 
 # How many competitor pages to import/poll/extract concurrently. Each page can poll
 # up to ~80s, so sequential scraping was the research bottleneck (≈ sum); bounded
 # concurrency makes it ≈ the slowest single page.
-SCRAPE_CONCURRENCY = 5
+SCRAPE_CONCURRENCY = 8
+
+# A source is only trustworthy enough to cite if it actually extracted real content.
+MIN_SOURCE_WORDS = 200
+
+# Domains that aren't citable authority for an editorial article — social, video,
+# Q&A/forums, and aggregators. We skip these when picking competitor pages to scrape
+# so grounding/citations come from real articles, docs, and reporting.
+_JUNK_DOMAINS = {
+    "youtube.com", "m.youtube.com", "youtu.be", "twitter.com", "x.com",
+    "facebook.com", "instagram.com", "tiktok.com", "pinterest.com", "reddit.com",
+    "quora.com", "linkedin.com", "medium.com", "amazon.com", "ebay.com",
+    "play.google.com", "apps.apple.com",
+}
+
+
+def _is_junk_domain(url: str) -> bool:
+    d = _domain(url)
+    return any(d == j or d.endswith("." + j) for j in _JUNK_DOMAINS)
+
+
+def is_usable_source(s: dict[str, Any]) -> bool:
+    """A scraped source good enough to ground on: it extracted, and it has enough
+    real content to cite (drops failed scrapes and thin/boilerplate pages)."""
+    return (
+        s.get("status") == "extracted"
+        and (s.get("word_count") or 0) >= MIN_SOURCE_WORDS
+    )
 
 _SYSTEM_PROMPT = """\
 You are RankForge's **SERP analyst**. Given a topic, you map its search landscape \
@@ -135,7 +164,9 @@ def _domain(url: str) -> str:
 
 def diverse_urls(urls: list[str], n: int, per_domain: int = 1) -> list[str]:
     """Pick up to n URLs preferring distinct domains (so grounding/citations don't
-    all trace back to one parent source); backfill from remaining if too few."""
+    all trace back to one parent source); backfill from remaining if too few.
+    Skips non-citable junk domains (social/video/forums/aggregators)."""
+    urls = [u for u in urls if not _is_junk_domain(u)]
     out: list[str] = []
     counts: dict[str, int] = {}
     for u in urls:
