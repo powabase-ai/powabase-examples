@@ -334,14 +334,29 @@ export default function ScoutsPage({
         the pipeline and stage them as <span className="font-medium">in review</span>.
       </p>
 
-      {lastRun && (
+      {lastRun?.status === "running" ? (
+        <div className="mb-4 flex items-start gap-2.5 rounded-md border border-[rgb(var(--ember))]/30 bg-[rgb(var(--ember))]/[0.06] px-3 py-2.5">
+          <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-[rgb(var(--ember-bright))]" />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-foreground">
+              {lastRun.progress?.message ?? "Scouting…"}
+            </div>
+            {lastRun.progress?.considered &&
+              lastRun.progress.considered.length > 0 && (
+                <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                  Considering: {lastRun.progress.considered.join(" · ")}
+                </div>
+              )}
+          </div>
+        </div>
+      ) : lastRun ? (
         <p className="mb-4 text-xs text-muted-foreground">
           Last run:{" "}
           <span className="capitalize">{lastRun.status}</span> ·{" "}
           {lastRun.found} found · {lastRun.drafted} drafted
           {lastRun.error ? ` · ${lastRun.error}` : ""}
         </p>
-      )}
+      ) : null}
 
       {config.data && (
         <div className="mb-6">

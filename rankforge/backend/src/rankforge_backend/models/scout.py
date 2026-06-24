@@ -43,6 +43,7 @@ class ScoutRun(BaseModel):
     found: int = 0
     drafted: int = 0
     error: str | None = None
+    progress: dict = Field(default_factory=dict)
     created_at: datetime
 
 

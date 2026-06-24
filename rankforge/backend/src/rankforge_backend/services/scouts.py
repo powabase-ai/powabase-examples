@@ -86,7 +86,7 @@ _CONFIG_COLUMNS = (
     "focus, last_run_at, next_run_at, updated_at"
 )
 _RUN_COLUMNS = (
-    "id, business_id, status, trigger, found, drafted, error, created_at"
+    "id, business_id, status, trigger, found, drafted, error, progress, created_at"
 )
 _OPP_COLUMNS = (
     "id, business_id, scout_run_id, title, angle, why_now, keyword, source_type, "
@@ -343,6 +343,14 @@ def _covered_block(cov: dict[str, Any], limit: int = 60) -> str:
 
 
 # --- the worker ---
+def _set_progress(db: Database, run_id: UUID, phase: str, message: str, **extra: Any):
+    """Narrate what the scout is doing right now so the UI can show it live."""
+    db.execute(
+        "update public.scout_runs set progress = %s where id = %s",
+        (Json({"phase": phase, "message": message, **extra}), run_id),
+    )
+
+
 async def run_scout(
     client: PowabaseClient,
     db: Database,
@@ -354,9 +362,14 @@ async def run_scout(
     cfg = ensure_config(db, business_id)
     brand = brands.get_profile(db, business_id)
     run = db.fetch_one(
-        "insert into public.scout_runs (business_id, trigger) values (%s, %s) "
+        "insert into public.scout_runs (business_id, trigger, progress) "
+        "values (%s, %s, %s) "
         f"returning {_RUN_COLUMNS}",
-        (business_id, trigger),
+        (
+            business_id,
+            trigger,
+            Json({"phase": "starting", "message": "Starting scout…"}),
+        ),
     )
     run_id = run["id"]
     try:
@@ -365,6 +378,10 @@ async def run_scout(
 
         focus = cfg.get("focus") or brand.get("seed_topics") or []
         cov = _gather_coverage(db, business_id)
+        _set_progress(
+            db, run_id, "discovering",
+            "Searching the web for timely, on-brand topics…",
+        )
         agent_id = await ensure_scout_agent(client)
         msg = (
             "## Brand\n"
@@ -390,6 +407,13 @@ async def run_scout(
         data = extract_json(agent_run["content"])
         candidates = data.get("opportunities") if isinstance(data, dict) else None
         candidates = candidates or []
+        _set_progress(
+            db, run_id, "analyzing",
+            f"Found {len(candidates)} candidate topic"
+            f"{'' if len(candidates) == 1 else 's'} — filtering against your "
+            "existing blog coverage…",
+            considered=[c.get("title") for c in candidates if c.get("title")][:8],
+        )
 
         brand_terms = _brand_terms(brand)
 
@@ -428,6 +452,11 @@ async def run_scout(
             "update public.scout_runs set found = %s where id = %s",
             (len(stored), run_id),
         )
+        _set_progress(
+            db, run_id, "scored",
+            f"{len(stored)} new opportunit"
+            f"{'y' if len(stored) == 1 else 'ies'} surfaced.",
+        )
 
         # Auto-draft the best, on-threshold opportunities (L3).
         drafted = 0
@@ -438,10 +467,21 @@ async def run_scout(
             for opp in top:
                 if drafted >= cap or opp["score"] < floor:
                     break
+                _set_progress(
+                    db, run_id, "drafting",
+                    f"Drafting “{opp['title']}” ({drafted + 1}/{cap})…",
+                    drafted=drafted, total=cap,
+                )
                 ok = await auto_draft(client, db, opp)
                 if ok:
                     drafted += 1
 
+        _set_progress(
+            db, run_id, "done",
+            f"Done — {len(stored)} new opportunit"
+            f"{'y' if len(stored) == 1 else 'ies'}"
+            f"{f', {drafted} drafted' if drafted else ''}.",
+        )
         db.execute(
             "update public.scout_runs set status = 'done', drafted = %s where id = %s",
             (drafted, run_id),
@@ -452,6 +492,7 @@ async def run_scout(
             "update public.scout_runs set status = 'failed', error = %s where id = %s",
             ("scout run failed — see server logs", run_id),
         )
+        _set_progress(db, run_id, "failed", "Scout run failed — see server logs.")
     finally:
         # Roll the schedule forward regardless of outcome (guarded so a failure
         # here can't mask the original error or stop the run from returning).

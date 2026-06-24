@@ -410,6 +410,14 @@ export interface ScoutConfig {
   updated_at?: string | null;
 }
 
+export interface ScoutRunProgress {
+  phase?: string;
+  message?: string;
+  considered?: string[];
+  drafted?: number;
+  total?: number;
+}
+
 export interface ScoutRun {
   id: string;
   business_id: string;
@@ -418,6 +426,7 @@ export interface ScoutRun {
   found: number;
   drafted: number;
   error?: string | null;
+  progress?: ScoutRunProgress;
   created_at: string;
 }
 
