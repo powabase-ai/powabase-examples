@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BrandForm } from "@/components/BrandForm";
+import { BrandMaterials } from "@/components/brand/BrandMaterials";
 import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import {
   BrandFields,
@@ -108,6 +109,8 @@ export default function BrandSettings({
           </form>
         </CardContent>
       </Card>
+
+      <BrandMaterials brandId={id} />
 
       <Card className="mt-6 border-[rgb(var(--destructive))]/30">
         <CardHeader>

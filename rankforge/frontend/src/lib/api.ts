@@ -201,6 +201,57 @@ export const sourcesApi = {
     ),
 };
 
+// --- Brand materials (own-site KB) ---
+/** A page the brand fed into its materials KB (its own site/docs), via sitemap
+ *  crawl or manually added URL. Distinct from research `BrandSource` (scraped
+ *  competitor pages). */
+export interface BrandMaterialSource {
+  id: string;
+  url: string;
+  title?: string | null;
+  status?: string | null;
+  origin: "sitemap" | "manual";
+  source_id?: string | null;
+  created_at?: string | null;
+}
+
+export interface MaterialsProgress {
+  phase?: string;
+  message?: string;
+  total?: number;
+  done?: number;
+}
+
+export interface MaterialsView {
+  sources: BrandMaterialSource[];
+  progress: MaterialsProgress;
+  kb_ready: boolean;
+}
+
+/** Ingest is finished (idle) when progress is empty or its phase is terminal. */
+export function materialsRunning(progress?: MaterialsProgress | null): boolean {
+  const phase = progress?.phase;
+  if (!phase) return false;
+  return phase !== "done" && phase !== "failed";
+}
+
+export const materialsApi = {
+  get: (businessId: string) =>
+    request<MaterialsView>(
+      `/api/business-profiles/${businessId}/materials`
+    ),
+  ingest: (businessId: string, urls: string[]) =>
+    request<{ status: string }>(
+      `/api/business-profiles/${businessId}/materials/ingest`,
+      { method: "POST", body: JSON.stringify({ urls }) }
+    ),
+  remove: (businessId: string, rowId: string) =>
+    request<void>(
+      `/api/business-profiles/${businessId}/materials/${rowId}`,
+      { method: "DELETE" }
+    ),
+};
+
 // --- Articles (Stage C) ---
 export type GenerationStatus =
   | "queued"
