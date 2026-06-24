@@ -278,11 +278,13 @@ class PowabaseClient:
             json={"source_id": source_id},
         )
 
-    async def remove_source_from_kb(self, kb_id: str, source_id: str) -> Any:
-        """De-index a source from a KB (mirror of add_source_to_kb). Leaves the
-        Source itself intact — call delete_source() after to remove it fully."""
+    async def remove_source_from_kb(self, kb_id: str, indexed_source_id: str) -> Any:
+        """De-index a source from a KB. The path id is the KB's INDEXED-source id
+        (from list_kb_sources), which can differ from the raw source_id — resolve
+        it first. Leaves the Source itself intact — call delete_source() after to
+        remove it fully."""
         return await self._request(
-            "DELETE", f"/api/knowledge-bases/{kb_id}/sources/{source_id}"
+            "DELETE", f"/api/knowledge-bases/{kb_id}/sources/{indexed_source_id}"
         )
 
     async def list_kb_sources(self, kb_id: str) -> Any:

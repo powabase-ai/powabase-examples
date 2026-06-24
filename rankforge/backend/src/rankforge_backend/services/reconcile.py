@@ -43,9 +43,19 @@ def reconcile_interrupted(db: Database) -> None:
         "where generation_status in "
         "('grounding', 'outlining', 'drafting', 'optimizing', 'refining')",
     )
-    if opp or run or art:
+    # Brand-materials ingest narrates phase on business_profiles.materials_progress;
+    # a non-terminal phase at boot means an orphaned ingest the UI would poll forever.
+    mat = _count_update(
+        db,
+        "update public.business_profiles set materials_progress = "
+        "jsonb_build_object('phase', 'failed', 'message', "
+        "'Brand-materials ingest interrupted by a server restart.') "
+        "where materials_progress is not null "
+        "and coalesce(materials_progress->>'phase', '') not in ('done', 'failed')",
+    )
+    if opp or run or art or mat:
         log.info(
             "startup reconciliation: reset %s opportunity(ies), %s research run(s), "
-            "%s article(s) orphaned by a prior restart",
-            opp, run, art,
+            "%s article(s), %s materials ingest(s) orphaned by a prior restart",
+            opp, run, art, mat,
         )

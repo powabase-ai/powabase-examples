@@ -444,6 +444,27 @@ async def ingest_file(
         )
 
 
+async def _indexed_id(
+    client: PowabaseClient, kb_id: str, source_id: str
+) -> str:
+    """Resolve a raw source_id to the KB's INDEXED-source id used by the de-index
+    path (DELETE /knowledge-bases/{id}/sources/{indexed_source_id}).
+
+    The KB's source listing keys each entry by its own id; match the entry whose
+    source_id is ours and return its id. Best-effort — falls back to the raw
+    source_id (the historical behavior) if the lookup can't resolve it.
+    """
+    try:
+        listing = await client.list_kb_sources(kb_id)
+        items = listing.get("items", []) if isinstance(listing, dict) else []
+        for it in items:
+            if it.get("source_id") == source_id:
+                return it.get("id") or it.get("indexed_source_id") or source_id
+    except Exception:  # noqa: BLE001 — fall back to the raw id on any lookup failure
+        pass
+    return source_id
+
+
 async def remove_source(
     client: PowabaseClient, db: Database, business_id: UUID, row_id: UUID
 ) -> bool:
@@ -466,11 +487,15 @@ async def remove_source(
         brand = brands.get_profile(db, business_id)
         kb_id = (brand or {}).get("materials_kb_id")
         if kb_id:
+            # De-index uses the KB's INDEXED-source id, which can differ from the raw
+            # source_id — resolve it from the KB's source listing (fall back to the
+            # raw id). Best-effort: a de-index failure must not block deletion.
+            indexed_id = await _indexed_id(client, kb_id, source_id)
             try:
-                await client.remove_source_from_kb(kb_id, source_id)
+                await client.remove_source_from_kb(kb_id, indexed_id)
             except Exception:  # noqa: BLE001 — de-index failure must not block deletion
                 log.exception(
-                    "remove_source_from_kb failed for %s/%s", kb_id, source_id
+                    "remove_source_from_kb failed for %s/%s", kb_id, indexed_id
                 )
         try:
             await client.delete_source(source_id)
