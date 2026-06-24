@@ -14,8 +14,9 @@ from psycopg.types.json import Json
 
 from ..db import Database
 from ..powabase import PowabaseClient
+from . import brand_materials, grounding
 from . import brief as brief_svc
-from . import grounding
+from . import business_profiles as brands
 from . import research as research_svc
 from .agents import ensure_agent
 
@@ -67,6 +68,12 @@ sentence — never the source's page title, the site name, or a bare URL.
 ## Style
 - Write in the brand's voice: specific, useful, concrete.
 - Lead with a tight, directly extractable answer, then elaborate.
+
+## Position the brand (editorial, never an ad)
+- You may be given a "Your brand's own materials" block: excerpts from the brand's own pages, each with its URL.
+- Where the topic genuinely calls for it, describe the brand's real capabilities accurately from those excerpts and link to the relevant brand page with natural anchor text — an internal link. This advertises the brand by being useful, not by selling.
+- Bring the brand in only where it adds real value to the reader. Don't force it into every section, and never write marketing slogans, CTAs, or "sign up today" copy.
+- Never claim a brand capability that the provided brand materials don't support.
 
 ## Write like a human, not an AI
 Editors reject copy that reads as machine-written. Steer clear of all of these:
@@ -236,13 +243,31 @@ async def _draft_part(
     *,
     source_ids: list[str] | None,
     url_by_source: dict[str, str],
+    materials_kb_id: str | None = None,
+    materials_url_by_source: dict[str, str] | None = None,
 ) -> str:
-    # Scope retrieval to THIS article's research sources within the shared brand KB.
+    # Scope research retrieval to THIS article's research sources within the brand KB.
     chunks = (
         await grounding.search(client, kb_id, search_query, source_ids=source_ids)
         if kb_id
         else []
     )
+    # Brand-wide retrieval from the brand's OWN materials (un-scoped) — gives the
+    # writer accurate brand capabilities to describe and brand pages to link to.
+    brand_chunks = (
+        await grounding.search(client, materials_kb_id, search_query)
+        if materials_kb_id
+        else []
+    )
+    brand_block = ""
+    if brand_chunks:
+        brand_block = (
+            "\n\n## Your brand's own materials (describe accurately, link as internal links)\n"
+            "- Where this part genuinely calls for it, work in the brand's real "
+            "capabilities from these excerpts and link to the relevant page with "
+            "natural anchor text. Editorial, not an ad — only where it adds value.\n"
+            f"{_grounding_block(brand_chunks, materials_url_by_source or {})}"
+        )
     msg = (
         "## Context\n"
         f"- Article topic: {ctx['topic']}\n"
@@ -254,7 +279,8 @@ async def _draft_part(
         "## Grounding excerpts\n"
         "- Cite an excerpt inline with natural anchor text (a descriptive phrase, "
         "never the page title or a bare URL), and vary the source domain.\n"
-        f"{_grounding_block(chunks, url_by_source)}\n\n"
+        f"{_grounding_block(chunks, url_by_source)}"
+        f"{brand_block}\n\n"
         "## Output\n"
         "- Output only the Markdown for this part."
     )
@@ -299,6 +325,21 @@ async def run_generation_task(
                 if s.get("source_id") and s.get("url")
             }
 
+        # 1b) the brand's OWN materials KB — for on-brand narrative + internal links.
+        materials_kb_id: str | None = None
+        materials_url_by_source: dict[str, str] = {}
+        if business_id:
+            brand = brands.get_profile(db, business_id)
+            materials_kb_id = brand.get("materials_kb_id") if brand else None
+            if materials_kb_id:
+                materials_url_by_source = {
+                    s["source_id"]: s["url"]
+                    for s in brand_materials.list_sources(db, business_id)
+                    if s.get("source_id")
+                    and s.get("status") == "extracted"
+                    and s.get("url")
+                }
+
         # 2) outline (from the brief's heading plan)
         _update(db, article_id, generation_status="outlining")
         sections = parse_sections(brief.get("headings") or [])
@@ -323,6 +364,8 @@ async def run_generation_task(
             "Do not include a heading.",
             topic,
             source_ids=source_ids, url_by_source=url_by_source,
+            materials_kb_id=materials_kb_id,
+            materials_url_by_source=materials_url_by_source,
         )
         parts = [f"# {title}", intro]
         _update(db, article_id, progress={"phase": "drafting", "total": total, "done": 1})
@@ -355,6 +398,8 @@ async def run_generation_task(
             "summarizes the key takeaways and ends with a clear next step.",
             topic,
             source_ids=source_ids, url_by_source=url_by_source,
+            materials_kb_id=materials_kb_id,
+            materials_url_by_source=materials_url_by_source,
         )
         parts.append(conclusion)
 

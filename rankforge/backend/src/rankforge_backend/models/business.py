@@ -49,6 +49,7 @@ class BusinessProfile(BaseModel):
     competitors: list = []
     brand_kb_id: str | None = None
     sitemap_url: str | None = None
+    materials_progress: dict = {}
     created_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
