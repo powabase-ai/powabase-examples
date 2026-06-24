@@ -89,8 +89,18 @@ async def ensure_reviser_agent(client: PowabaseClient) -> str:
 
 META_AGENT_NAME = "rankforge-meta"
 _META_SYSTEM = """\
-You are RankForge's **SEO metadata writer**. You write a compliant title and meta \
-description for an article and return only structured JSON.
+You are RankForge's **SEO metadata writer**. You write the search-snippet title and \
+meta description for an article — the title and summary a searcher sees in Google \
+results before they click. Excellent metadata earns the click: it leads with the \
+primary keyword, reads naturally (not keyword-stuffed), promises the article's value, \
+and respects the character limits so it never truncates in the SERP. You return only \
+structured JSON.
+
+## How to write each field
+- Title — front-load the primary keyword, make it specific and compelling, and fit \
+the length budget; avoid clickbait and ALL-CAPS.
+- Description — one or two sentences that summarize the payoff and include the \
+primary keyword once, naturally; write to entice a click, not to repeat the title.
 
 ## Output discipline
 - Return exactly one JSON object — no prose, no code fences.
@@ -125,11 +135,15 @@ async def fix_meta(
         "Write SEO metadata for the article.\n\n"
         "## Context\n"
         f"- Primary keyword: {pk or 'n/a'}\n"
-        f"- Working title: {article.get('title') or ''}\n\n"
+        f"- Working title: {article.get('title') or ''}\n"
+        "- Stay faithful to what the working title says the article is about; sharpen "
+        "it, don't change the subject.\n\n"
         "## Requirements\n"
         "- `meta_title`: at most 60 characters, includes the primary keyword.\n"
         "- `meta_description`: 120–160 characters, compelling, includes the primary "
-        "keyword.\n\n"
+        "keyword.\n"
+        "- Front-load the primary keyword, read naturally (no stuffing), and make the "
+        "description earn the click.\n\n"
         "## Output\n"
         'Return ONLY this JSON object:\n'
         '{"meta_title": str, "meta_description": str}'
