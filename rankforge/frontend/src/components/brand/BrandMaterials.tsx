@@ -4,19 +4,29 @@ import * as React from "react";
 import {
   CheckCircle2,
   ExternalLink,
+  Eye,
   Globe,
   Loader2,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import {
   useBrandMaterials,
   useIngestMaterials,
+  useMaterialContent,
   useRemoveMaterial,
+  useUploadMaterialFile,
 } from "@/lib/hooks/useBrandMaterials";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import {
@@ -58,6 +68,7 @@ function MaterialRow({
   canEdit: boolean;
 }) {
   const remove = useRemoveMaterial(brandId);
+  const [inspecting, setInspecting] = React.useState(false);
 
   return (
     <li className="flex items-center gap-3 border-b border-border px-3 py-2.5 last:border-b-0">
@@ -90,11 +101,25 @@ function MaterialRow({
         <span className="rounded bg-secondary px-1.5 py-0.5 capitalize text-muted-foreground">
           {source.origin}
         </span>
+        <button
+          type="button"
+          aria-label="Inspect content"
+          onClick={() => setInspecting(true)}
+          className="inline-flex items-center text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <Eye className="size-3.5" />
+        </button>
         {canEdit && (
           <button
             type="button"
             aria-label="Remove page"
             onClick={() => {
+              if (
+                !window.confirm(
+                  "Remove this page from the KB and delete its source?"
+                )
+              )
+                return;
               remove.mutate(source.id, {
                 onError: (e) =>
                   toast.error(
@@ -113,7 +138,58 @@ function MaterialRow({
           </button>
         )}
       </div>
+      <InspectDialog
+        brandId={brandId}
+        source={source}
+        open={inspecting}
+        onOpenChange={setInspecting}
+      />
     </li>
+  );
+}
+
+function InspectDialog({
+  brandId,
+  source,
+  open,
+  onOpenChange,
+}: {
+  brandId: string;
+  source: BrandMaterialSource;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
+  // Only fetch while the dialog is open (rowId gates the query's `enabled`).
+  const { data, isLoading, error } = useMaterialContent(
+    brandId,
+    open ? source.id : null
+  );
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="truncate pr-6">
+            {source.title || source.url}
+          </DialogTitle>
+        </DialogHeader>
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" /> Loading scraped content…
+          </div>
+        ) : error ? (
+          <p className="py-6 text-sm text-destructive">
+            {error instanceof Error
+              ? error.message
+              : "No extracted content for this source yet."}
+          </p>
+        ) : (
+          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-3 font-data text-xs leading-relaxed">
+            {data?.content?.trim() || "No content."}
+          </pre>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -122,6 +198,8 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
   const canEdit = canApprove(profile?.role);
   const { data, isLoading } = useBrandMaterials(brandId);
   const ingest = useIngestMaterials(brandId);
+  const upload = useUploadMaterialFile(brandId);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const [urls, setUrls] = React.useState("");
 
@@ -141,8 +219,22 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
     });
   }
 
+  function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    upload.mutate(file, {
+      onSuccess: () => toast.success(`Uploading ${file.name}…`),
+      onError: (err) =>
+        toast.error(
+          err instanceof Error ? err.message : "Could not upload file"
+        ),
+    });
+  }
+
   const typedUrls = parseUrls(urls);
   const ingestDisabled = ingest.isPending || running;
+  const uploadDisabled = upload.isPending || running;
 
   return (
     <Card className="mt-6">
@@ -205,6 +297,26 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
                   Add &amp; ingest ({typedUrls.length})
                 </Button>
               )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.md,.txt,.doc,.docx,.html"
+                className="hidden"
+                onChange={onPickFile}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadDisabled}
+              >
+                {upload.isPending ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <Upload />
+                )}
+                Upload PDF/file
+              </Button>
             </div>
           </div>
         )}

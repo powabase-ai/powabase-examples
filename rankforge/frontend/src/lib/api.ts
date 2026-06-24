@@ -250,7 +250,50 @@ export const materialsApi = {
       `/api/business-profiles/${businessId}/materials/${rowId}`,
       { method: "DELETE" }
     ),
+  content: (businessId: string, rowId: string) =>
+    request<{ content: string }>(
+      `/api/business-profiles/${businessId}/materials/${rowId}/content`
+    ),
+  uploadFile: (businessId: string, file: File) =>
+    uploadMaterial(businessId, file),
 };
+
+/** Multipart upload of a brand-materials file. Mirrors request()'s auth +
+ *  401→refresh→retry, but lets the browser set the multipart Content-Type
+ *  boundary (request() hard-codes application/json, which breaks file uploads). */
+async function uploadMaterial(
+  businessId: string,
+  file: File,
+  retry = false
+): Promise<{ status: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  const token = getAccessToken();
+  const res = await fetch(
+    `${API_BASE_URL}/api/business-profiles/${businessId}/materials/upload`,
+    {
+      method: "POST",
+      cache: "no-store",
+      body: form,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }
+  );
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return uploadMaterial(businessId, file, true);
+  }
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      const body = await res.json();
+      detail = body.detail ?? JSON.stringify(body);
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, friendlyMessage(res.status, detail));
+  }
+  return res.json();
+}
 
 // --- Articles (Stage C) ---
 export type GenerationStatus =

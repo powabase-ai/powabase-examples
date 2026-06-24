@@ -30,11 +30,32 @@ export function useIngestMaterials(businessId: string) {
   });
 }
 
+export function useUploadMaterialFile(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => materialsApi.uploadFile(businessId, file),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["materials", businessId] }),
+  });
+}
+
 export function useRemoveMaterial(businessId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (rowId: string) => materialsApi.remove(businessId, rowId),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ["materials", businessId] }),
+  });
+}
+
+/** Fetch one source's extracted markdown on demand (for the inspect modal).
+ *  Only runs when a row is being inspected (rowId non-null) and is cached so
+ *  re-opening the same source doesn't refetch. */
+export function useMaterialContent(businessId: string, rowId: string | null) {
+  return useQuery({
+    queryKey: ["material-content", businessId, rowId],
+    queryFn: () => materialsApi.content(businessId, rowId as string),
+    enabled: !!businessId && !!rowId,
+    staleTime: 5 * 60 * 1000,
   });
 }

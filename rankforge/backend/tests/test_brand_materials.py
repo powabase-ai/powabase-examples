@@ -3,7 +3,7 @@
 Mocks at the Database / Powabase boundary; no real network or DB calls.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import httpx
@@ -122,12 +122,47 @@ def test_add_urls_inserts_dedups_and_skips_empty():
     assert params == (BID, "https://a.example/x", "manual")
 
 
-def test_remove_source_returns_deleted():
+async def test_remove_source_cascades_kb_then_source_then_row(monkeypatch):
+    """Cascade: remove_source_from_kb → delete_source → delete the tracking row."""
     db = MagicMock()
-    db.fetch_one.return_value = {"id": RID}
-    assert svc.remove_source(MagicMock(), db, BID, RID) is True
-    db.fetch_one.return_value = None
-    assert svc.remove_source(MagicMock(), db, BID, RID) is False
+    # afetch_one: 1) fetch the row (id+source_id), 2) the delete...returning row
+    db.afetch_one = AsyncMock(
+        side_effect=[{"id": RID, "source_id": "src_1"}, {"id": RID}]
+    )
+    monkeypatch.setattr(
+        svc.brands, "get_profile", lambda d, bid: {"materials_kb_id": "kb_1"}
+    )
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+
+    assert await svc.remove_source(client, db, BID, RID) is True
+    client.remove_source_from_kb.assert_awaited_once_with("kb_1", "src_1")
+    client.delete_source.assert_awaited_once_with("src_1")
+    # the final afetch_one is the delete...returning
+    last_q = db.afetch_one.await_args_list[-1][0][0]
+    assert "delete from public.brand_sources" in last_q
+
+
+async def test_remove_source_false_when_missing():
+    db = MagicMock()
+    db.afetch_one = AsyncMock(return_value=None)
+    assert await svc.remove_source(MagicMock(), db, BID, RID) is False
+
+
+async def test_remove_source_kb_failure_still_deletes_row(monkeypatch):
+    """A KB-removal failure must not block the row delete (best-effort cascade)."""
+    db = MagicMock()
+    db.afetch_one = AsyncMock(
+        side_effect=[{"id": RID, "source_id": "src_1"}, {"id": RID}]
+    )
+    monkeypatch.setattr(
+        svc.brands, "get_profile", lambda d, bid: {"materials_kb_id": "kb_1"}
+    )
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock(side_effect=RuntimeError("boom"))
+    client.delete_source = AsyncMock(side_effect=RuntimeError("boom"))
+    assert await svc.remove_source(client, db, BID, RID) is True
 
 
 # --- routes (hermetic) ---
@@ -196,12 +231,96 @@ def test_ingest_requires_editor(monkeypatch):
 
 
 def test_delete_material_404_when_missing(monkeypatch):
-    monkeypatch.setattr(svc, "remove_source", lambda c, d, bid, rid: False)
+    async def fake_remove(c, d, bid, rid):
+        return False
+
+    monkeypatch.setattr(svc, "remove_source", fake_remove)
     resp = _client().delete(f"/api/business-profiles/{BID}/materials/{RID}")
     assert resp.status_code == 404
 
 
 def test_delete_material_204_when_removed(monkeypatch):
-    monkeypatch.setattr(svc, "remove_source", lambda c, d, bid, rid: True)
+    async def fake_remove(c, d, bid, rid):
+        return True
+
+    monkeypatch.setattr(svc, "remove_source", fake_remove)
     resp = _client().delete(f"/api/business-profiles/{BID}/materials/{RID}")
     assert resp.status_code == 204
+
+
+# --- upload route (hermetic) ---
+def test_upload_is_202_for_editor(monkeypatch):
+    async def fake_ingest_file(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc, "ingest_file", fake_ingest_file)
+    resp = _client().post(
+        f"/api/business-profiles/{BID}/materials/upload",
+        files={"file": ("brand.pdf", b"%PDF-1.4 hello", "application/pdf")},
+    )
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "started"
+
+
+def test_upload_requires_editor(monkeypatch):
+    async def fake_ingest_file(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc, "ingest_file", fake_ingest_file)
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).post(
+        f"/api/business-profiles/{BID}/materials/upload",
+        files={"file": ("brand.pdf", b"%PDF-1.4 hello", "application/pdf")},
+    )
+    assert resp.status_code == 403
+
+
+def test_upload_too_large_is_413(monkeypatch):
+    async def fake_ingest_file(*a, **k):  # pragma: no cover — should never run
+        return None
+
+    monkeypatch.setattr(svc, "ingest_file", fake_ingest_file)
+    big = b"x" * (20 * 1024 * 1024 + 1)
+    resp = _client().post(
+        f"/api/business-profiles/{BID}/materials/upload",
+        files={"file": ("big.pdf", big, "application/pdf")},
+    )
+    assert resp.status_code == 413
+
+
+# --- content route (hermetic) ---
+def test_get_content_returns_markdown(monkeypatch):
+    async def fake_content(c, d, bid, rid):
+        return "# Hello\n\nbrand body"
+
+    monkeypatch.setattr(svc, "source_content", fake_content)
+    resp = _client().get(f"/api/business-profiles/{BID}/materials/{RID}/content")
+    assert resp.status_code == 200
+    assert resp.json()["content"] == "# Hello\n\nbrand body"
+
+
+def test_get_content_404_when_none(monkeypatch):
+    async def fake_content(c, d, bid, rid):
+        return None
+
+    monkeypatch.setattr(svc, "source_content", fake_content)
+    resp = _client().get(f"/api/business-profiles/{BID}/materials/{RID}/content")
+    assert resp.status_code == 404
+
+
+# --- source_content service (hermetic) ---
+async def test_source_content_returns_none_without_source_id():
+    db = MagicMock()
+    db.fetch_one.return_value = {"source_id": None}
+    out = await svc.source_content(MagicMock(), db, BID, RID)
+    assert out is None
+
+
+async def test_source_content_fetches_markdown():
+    db = MagicMock()
+    db.fetch_one.return_value = {"source_id": "src_1"}
+    client = MagicMock()
+    client.get_source_markdown = AsyncMock(return_value="# md")
+    out = await svc.source_content(client, db, BID, RID)
+    assert out == "# md"
+    client.get_source_markdown.assert_awaited_once_with("src_1")

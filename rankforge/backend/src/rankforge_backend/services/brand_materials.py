@@ -345,18 +345,159 @@ async def ingest(
         )
 
 
-def remove_source(
+async def ingest_file(
+    client: PowabaseClient,
+    db: Database,
+    business_id: UUID,
+    *,
+    file_name: str,
+    content: bytes,
+    mime: str,
+) -> None:
+    """Background worker for ONE uploaded file (mirrors `ingest` for a single page).
+
+    Uploads the file as a Powabase Source, tracks it as a brand_sources row
+    (origin='manual', url=file_name), polls extraction, then indexes it into the
+    materials KB. Narrates progress on the brand row; any failure is surfaced as a
+    safe 'failed' phase rather than bubbling out of the detached task.
+    """
+    try:
+        _set_progress(db, business_id, "uploading", f"Uploading {file_name}…")
+        kb_id = await ensure_materials_kb(client, db, business_id)
+
+        uploaded = await client.upload_source(file_name, content, mime)
+        source_id = uploaded.get("id") or (uploaded.get("source") or {}).get("id")
+        if not source_id:
+            _set_progress(
+                db, business_id, "failed", f"Upload failed for {file_name}."
+            )
+            return
+
+        # Track it. Dedup on the unique lower(url) index (url == file_name here).
+        row = db.fetch_one(
+            "insert into public.brand_sources "
+            "(business_id, url, origin, source_id, status) "
+            "values (%s, %s, 'manual', %s, %s) "
+            "on conflict do nothing returning id",
+            (
+                business_id,
+                file_name,
+                source_id,
+                uploaded.get("extraction_status") or "pending",
+            ),
+        )
+        if row is None:
+            # A row for this file_name already exists — adopt this source on it.
+            row = db.fetch_one(
+                "update public.brand_sources set source_id = %s "
+                "where business_id = %s and lower(url) = lower(%s) returning id",
+                (source_id, business_id, file_name),
+            )
+        row_id = row["id"] if row else None
+
+        status = uploaded.get("extraction_status")
+        title = uploaded.get("title") or uploaded.get("name")
+        _set_progress(
+            db, business_id, "scraping", f"Extracting {file_name}…"
+        )
+        for _ in range(40):  # poll up to ~80s
+            src = await client.get_source(source_id)
+            status = src.get("extraction_status")
+            title = title or src.get("title") or src.get("name")
+            if status in _EXTRACTION_TERMINAL:
+                break
+            await asyncio.sleep(2)
+
+        if row_id is not None:
+            await db.aexecute(
+                "update public.brand_sources set status = %s, "
+                "title = coalesce(%s, title) where id = %s",
+                (status, title, row_id),
+            )
+
+        if status == "extracted":
+            try:
+                await client.add_source_to_kb(kb_id, source_id)
+            except Exception:  # noqa: BLE001 — indexing failure shouldn't fail the upload
+                log.exception("add_source_to_kb failed for %s", source_id)
+            # Wait for indexing to settle (bounded), like `ingest`.
+            for _ in range(45):
+                listing = await client.list_kb_sources(kb_id)
+                items = listing.get("items", []) if isinstance(listing, dict) else []
+                statuses = [i.get("index_status") for i in items]
+                if statuses and all(s in _INDEX_TERMINAL for s in statuses):
+                    break
+                await asyncio.sleep(2)
+
+        n = len(list_sources(db, business_id))
+        _set_progress(
+            db, business_id, "done",
+            f"{file_name} added — {n} brand page{'' if n == 1 else 's'} total.",
+        )
+    except Exception:  # noqa: BLE001 — surface a safe failure on the brand row
+        log.exception(
+            "brand-materials file ingest failed for business %s", business_id
+        )
+        _set_progress(
+            db, business_id, "failed",
+            "Brand-materials upload failed — see server logs.",
+        )
+
+
+async def remove_source(
     client: PowabaseClient, db: Database, business_id: UUID, row_id: UUID
 ) -> bool:
-    """Delete one brand_sources row. Returns whether a row was deleted.
+    """Cascade-delete one brand source: KB de-index → Source delete → tracking row.
 
-    v1 keeps the KB (and its other sources) intact — removing a single source from
-    the KB isn't critical, so we only drop the tracking row. `client` is accepted
-    for parity/future use.
+    Each remote step is best-effort and isolated (a KB-removal or Source-delete
+    failure must not block dropping the local row). Idempotent — returns whether a
+    tracking row was actually deleted.
     """
-    row = db.fetch_one(
+    row = await db.afetch_one(
+        "select id, source_id from public.brand_sources "
+        "where id = %s and business_id = %s",
+        (row_id, business_id),
+    )
+    if row is None:
+        return False
+
+    source_id = row.get("source_id")
+    if source_id:
+        brand = brands.get_profile(db, business_id)
+        kb_id = (brand or {}).get("materials_kb_id")
+        if kb_id:
+            try:
+                await client.remove_source_from_kb(kb_id, source_id)
+            except Exception:  # noqa: BLE001 — de-index failure must not block deletion
+                log.exception(
+                    "remove_source_from_kb failed for %s/%s", kb_id, source_id
+                )
+        try:
+            await client.delete_source(source_id)
+        except Exception:  # noqa: BLE001 — Source delete failure must not block row delete
+            log.exception("delete_source failed for %s", source_id)
+
+    deleted = await db.afetch_one(
         "delete from public.brand_sources where id = %s and business_id = %s "
         "returning id",
         (row_id, business_id),
     )
-    return row is not None
+    return deleted is not None
+
+
+async def source_content(
+    client: PowabaseClient, db: Database, business_id: UUID, row_id: UUID
+) -> str | None:
+    """Return a brand source's extracted markdown, or None if unavailable."""
+    row = db.fetch_one(
+        "select source_id from public.brand_sources "
+        "where id = %s and business_id = %s",
+        (row_id, business_id),
+    )
+    source_id = (row or {}).get("source_id")
+    if not source_id:
+        return None
+    try:
+        return await client.get_source_markdown(source_id)
+    except PowabaseError:
+        return None

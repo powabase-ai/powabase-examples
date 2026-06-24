@@ -235,6 +235,10 @@ class PowabaseClient:
     async def get_source(self, source_id: str) -> Any:
         return await self._request("GET", f"/api/sources/{source_id}")
 
+    async def delete_source(self, source_id: str) -> Any:
+        """Delete a Source project-wide. Use after removing it from any KB."""
+        return await self._request("DELETE", f"/api/sources/{source_id}")
+
     async def import_url(self, url: str) -> Any:
         """Import a web page as a Source (Firecrawl-backed). Returns
         {count, sources:[{id, name, url}]}. Project-wide dedup: re-importing the
@@ -272,6 +276,13 @@ class PowabaseClient:
             "POST",
             f"/api/knowledge-bases/{kb_id}/sources",
             json={"source_id": source_id},
+        )
+
+    async def remove_source_from_kb(self, kb_id: str, source_id: str) -> Any:
+        """De-index a source from a KB (mirror of add_source_to_kb). Leaves the
+        Source itself intact — call delete_source() after to remove it fully."""
+        return await self._request(
+            "DELETE", f"/api/knowledge-bases/{kb_id}/sources/{source_id}"
         )
 
     async def list_kb_sources(self, kb_id: str) -> Any:
