@@ -294,7 +294,7 @@ class PowabaseClient:
         kb_id: str,
         query: str,
         *,
-        top_k: int = 5,
+        top_k: int = 12,
         source_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Search the KB → list of {chunk_id, score, text, source_id, meta}.

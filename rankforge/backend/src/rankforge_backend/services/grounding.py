@@ -16,14 +16,15 @@ from . import research as research_svc
 
 _INDEX_TERMINAL = {"indexed", "failed", "cancelled"}
 
-# chunk_embed + hybrid, reranked: retrieve 100 candidates -> zerank -> top 20.
-# zerank needs a platform-level ZeroEntropy key (admin); it FAILS OPEN (falls back
-# to base hybrid truncated to top_k) if the key is absent.
+# chunk_embed + hybrid (dense embeddings + keyword), reranked: retrieve 120 candidates
+# -> zerank -> top 24, so per-section drafting sees enough chunks to span many distinct
+# sources. zerank needs a platform-level ZeroEntropy key (admin); it FAILS OPEN (falls
+# back to base hybrid truncated to top_k) if the key is absent.
 RERANKER_MODEL = "zerank-2"
 RETRIEVAL_CONFIG: dict[str, Any] = {
     "method": "hybrid",
-    "top_k": 20,
-    "reranker": {"model": RERANKER_MODEL, "candidate_count": 100},
+    "top_k": 24,
+    "reranker": {"model": RERANKER_MODEL, "candidate_count": 120},
 }
 
 
@@ -123,7 +124,7 @@ async def search(
     kb_id: str,
     query: str,
     *,
-    top_k: int = 20,
+    top_k: int = 24,
     source_ids: list[str] | None = None,
     filter_weak: bool = True,
 ) -> list[dict[str, Any]]:

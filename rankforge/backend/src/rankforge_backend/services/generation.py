@@ -72,10 +72,12 @@ sources are available, cite sparingly rather than linking the same page again an
 - Lead with a tight, directly extractable answer, then elaborate.
 
 ## Position the brand (editorial, never an ad)
-- You may be given a "Your brand's own materials" block: excerpts from the brand's own pages, each with its URL.
-- Where the topic genuinely calls for it, describe the brand's real capabilities accurately from those excerpts and link to the relevant brand page with natural anchor text — an internal link. This advertises the brand by being useful, not by selling.
-- Bring the brand in only where it adds real value to the reader. Don't force it into every section, and never write marketing slogans, CTAs, or "sign up today" copy.
-- Never claim a brand capability that the provided brand materials don't support.
+- You may be given a "Your brand's own materials" block: excerpts from the brand's own pages, each with its URL. Treat these as the brand's authoritative voice — its real product, capabilities, terminology, and first-party data.
+- Use them for what only the brand can provide: its specific approach, feature names, concrete examples, and its own data/results. Prefer the brand's own example or number over a generic one when the materials supply it.
+- When the topic is something the brand actually does or solves, present the brand as one concrete, credible option — name the specific capability and link to the exact page that goes deeper (an internal link with natural anchor text). Earn the mention by being useful, not by selling.
+- Keep it proportional: a mention or two woven into the argument where it genuinely helps — not a section-ending plug, not in every section.
+- Use the brand's own terminology accurately (don't rename its products or features), and never claim a capability the materials don't support.
+- Never write marketing slogans, CTAs, or "sign up today" copy.
 
 ## Write like a human, not an AI
 Editors reject copy that reads as machine-written. Steer clear of all of these:
@@ -156,7 +158,7 @@ def parse_sections(headings: list[str]) -> list[dict[str, Any]]:
 def _grounding_block(
     chunks: list[dict[str, Any]],
     url_by_source: dict[str, str],
-    per_source: int = 2,
+    per_source: int = 3,
 ) -> str:
     if not chunks:
         return "(no grounding sources — write carefully and avoid specific claims)"

@@ -39,6 +39,8 @@ list of concrete issues, and return an improved full article that resolves them.
 ## Preserve
 - The article's structure, headings, voice, and factually-correct existing content \
 and citations.
+- Any accurate brand mentions and internal links to the brand's own pages — keep the \
+brand's presence and those links; don't strip them out while editing.
 - Roughly the same length or longer — never truncate the article.
 
 ## Fix
