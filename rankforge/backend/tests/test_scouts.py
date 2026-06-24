@@ -234,6 +234,31 @@ def test_dismiss(monkeypatch):
     assert resp.json()["status"] == "dismissed"
 
 
+def test_restore_undismisses(monkeypatch):
+    monkeypatch.setattr(
+        svc, "get_opportunity", lambda db, oid: {**OPP, "status": "dismissed"}
+    )
+    monkeypatch.setattr(
+        svc, "set_opportunity_status", lambda db, oid, st, **k: {**OPP, "status": st}
+    )
+    resp = _client().post(f"/api/opportunities/{OID}/restore")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "new"
+
+
+def test_restore_noop_when_not_dismissed(monkeypatch):
+    monkeypatch.setattr(svc, "get_opportunity", lambda db, oid: {**OPP, "status": "new"})
+    called: list[str] = []
+    monkeypatch.setattr(
+        svc,
+        "set_opportunity_status",
+        lambda db, oid, st, **k: called.append(st) or {**OPP, "status": st},
+    )
+    resp = _client().post(f"/api/opportunities/{OID}/restore")
+    assert resp.status_code == 200
+    assert called == []  # a non-dismissed opp is returned unchanged
+
+
 def test_draft_spawns(monkeypatch):
     monkeypatch.setattr(svc, "get_opportunity", lambda db, oid: OPP)
     # The route now claims the opportunity atomically (compare-and-set) before

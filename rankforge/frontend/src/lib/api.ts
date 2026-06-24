@@ -463,6 +463,8 @@ export const opportunitiesApi = {
     request<Opportunity>(`/api/opportunities/${id}/draft`, { method: "POST" }),
   dismiss: (id: string) =>
     request<Opportunity>(`/api/opportunities/${id}/dismiss`, { method: "POST" }),
+  restore: (id: string) =>
+    request<Opportunity>(`/api/opportunities/${id}/restore`, { method: "POST" }),
 };
 
 // --- Publishing / export (M8) ---

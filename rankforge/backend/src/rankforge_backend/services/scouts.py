@@ -262,6 +262,11 @@ def score_candidate(
 
 # --- existing-coverage awareness (don't re-suggest what the blog already covers) ---
 _SIM_THRESHOLD = 0.7  # title-token Jaccard above which a candidate is a near-duplicate
+# Bound the dedup working set to the most-recent N rows per brand so a very large
+# blog can't make every scout run load (and Jaccard-scan) unbounded history. The
+# most-recent N comfortably covers timely-topic collisions; older long-tail posts
+# rarely collide with fresh opportunities.
+_COVERAGE_LIMIT = 500
 
 
 def _gather_coverage(db: Database, business_id: UUID) -> dict[str, Any]:
@@ -270,17 +275,19 @@ def _gather_coverage(db: Database, business_id: UUID) -> dict[str, Any]:
     opportunities (a dismissed topic shouldn't keep coming back)."""
     articles = db.fetch_all(
         "select title, keywords, slug from public.articles "
-        "where business_id = %s order by updated_at desc",
+        f"where business_id = %s order by updated_at desc limit {_COVERAGE_LIMIT}",
         (business_id,),
     )
     open_opps = db.fetch_all(
         "select title, keyword from public.opportunities "
-        "where business_id = %s and status <> 'dismissed' order by created_at desc",
+        "where business_id = %s and status <> 'dismissed' "
+        f"order by created_at desc limit {_COVERAGE_LIMIT}",
         (business_id,),
     )
     dismissed = db.fetch_all(
         "select title from public.opportunities "
-        "where business_id = %s and status = 'dismissed'",
+        "where business_id = %s and status = 'dismissed' "
+        f"order by created_at desc limit {_COVERAGE_LIMIT}",
         (business_id,),
     )
     seen = {_norm_title(r["title"]) for r in articles}

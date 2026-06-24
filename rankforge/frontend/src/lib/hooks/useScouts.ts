@@ -82,3 +82,11 @@ export function useDismissOpportunity(businessId: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["opportunities", businessId] }),
   });
 }
+
+export function useRestoreOpportunity(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => opportunitiesApi.restore(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["opportunities", businessId] }),
+  });
+}

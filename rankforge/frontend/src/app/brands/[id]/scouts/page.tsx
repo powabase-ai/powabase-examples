@@ -7,6 +7,7 @@ import {
   Loader2,
   PenLine,
   Radar,
+  RotateCcw,
   Sparkles,
   Trash2,
 } from "lucide-react";
@@ -18,6 +19,7 @@ import {
   useDismissOpportunity,
   useDraftOpportunity,
   useOpportunities,
+  useRestoreOpportunity,
   useRunScout,
   useScoutConfig,
   useScoutRuns,
@@ -188,6 +190,7 @@ function OpportunityCard({
 }) {
   const draft = useDraftOpportunity(brandId);
   const dismiss = useDismissOpportunity(brandId);
+  const restore = useRestoreOpportunity(brandId);
   const busy = opp.status === "queued" || opp.status === "drafting";
 
   return (
@@ -257,6 +260,16 @@ function OpportunityCard({
                 className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
               >
                 <Trash2 className="size-3" /> Dismiss
+              </button>
+            )}
+
+            {opp.status === "dismissed" && (
+              <button
+                onClick={() => restore.mutate(opp.id)}
+                disabled={restore.isPending}
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <RotateCcw className="size-3" /> Restore
               </button>
             )}
           </div>

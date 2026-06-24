@@ -125,3 +125,21 @@ def dismiss_opportunity(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "opportunity not found")
     assert_brand_access(db, opp["business_id"], user)
     return svc.set_opportunity_status(db, opp_id, "dismissed")
+
+
+@router.post("/opportunities/{opp_id}/restore", response_model=Opportunity)
+def restore_opportunity(
+    opp_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Undo a dismissal (e.g. a misclick) — move the opportunity back to the inbox.
+    Only a dismissed opportunity can be restored; one that's already been drafted
+    stays as-is."""
+    opp = svc.get_opportunity(db, opp_id)
+    if opp is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "opportunity not found")
+    assert_brand_access(db, opp["business_id"], user)
+    if opp["status"] != "dismissed":
+        return opp
+    return svc.set_opportunity_status(db, opp_id, "new")
