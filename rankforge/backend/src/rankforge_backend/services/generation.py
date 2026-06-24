@@ -95,8 +95,8 @@ Editors reject copy that reads as machine-written. Steer clear of all of these:
 _ARTICLE_COLUMNS = (
     "id, business_id, brief_id, research_run_id, title, slug, status, "
     "generation_status, generation_error, progress, content_md, meta_title, "
-    "meta_description, seo_score, geo_score, json_ld, grounding_report, "
-    "created_at, updated_at"
+    "meta_description, seo_score, geo_score, readability_score, json_ld, "
+    "grounding_report, created_at, updated_at"
 )
 _SUMMARY_COLUMNS = "id, title, status, generation_status, progress, updated_at"
 
@@ -176,7 +176,10 @@ def create_article(
 
 
 def _update(db: Database, article_id: UUID, **fields: Any) -> None:
-    jsonb = {"progress", "seo_score", "geo_score", "json_ld", "grounding_report"}
+    jsonb = {
+        "progress", "seo_score", "geo_score", "readability_score", "json_ld",
+        "grounding_report",
+    }
     sets, params = [], []
     for k, v in fields.items():
         sets.append(f"{k} = %s")

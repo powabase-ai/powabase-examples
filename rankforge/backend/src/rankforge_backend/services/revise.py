@@ -154,45 +154,55 @@ def _gap(score: dict) -> int:
     return max(0, score["target"] - score["total"])
 
 
-def _decide(cs_seo: dict, cs_geo: dict, ns_seo: dict, ns_geo: dict) -> bool:
-    """Accept a revision iff it closes (or holds) the SEO/GEO gap to target without
-    pushing an already-met axis below its target. Measuring distance-to-target
-    rather than raw totals means an above-target axis can't veto a revision that
-    improves the failing one."""
-    for cur, new in ((cs_seo, ns_seo), (cs_geo, ns_geo)):
-        if cur["total"] >= cur["target"] and new["total"] < cur["target"]:
+def _decide(cur: list[dict], new: list[dict]) -> bool:
+    """Accept a revision iff it closes (or holds) the combined gap-to-target across
+    axes without pushing an already-met axis below its target. Measuring
+    distance-to-target rather than raw totals means an above-target axis can't veto
+    a revision that improves a failing one."""
+    for c, n in zip(cur, new, strict=True):
+        if c["total"] >= c["target"] and n["total"] < c["target"]:
             return False  # don't regress a met axis below its target
-    cur_gap = _gap(cs_seo) + _gap(cs_geo)
-    new_gap = _gap(ns_seo) + _gap(ns_geo)
+    cur_gap = sum(_gap(c) for c in cur)
+    new_gap = sum(_gap(n) for n in new)
     # Allow gap-neutral edits through; the outer combined-score check (which also
     # weighs grounding) then decides whether the pass actually helped.
     return new_gap <= cur_gap
 
 
-def _det_scores(md: str, title: str, meta: str | None, brief: dict) -> tuple[dict, dict]:
-    """Cheap deterministic SEO + GEO scores (no LLM) for the commit gate."""
+def _det_scores(
+    md: str, title: str, meta: str | None, brief: dict
+) -> list[dict]:
+    """Cheap deterministic SEO + GEO + Readability scores (no LLM) for the commit
+    gate. Readability's deterministic AI-tell signals let the gate reject a revision
+    that makes the prose read more machine-generated."""
     from . import scoring
 
-    seo = scoring.score_seo(md, title, meta, brief)
-    geo = scoring.score_geo(md, brief, None, has_structured_data=True)
-    return seo, geo
+    return [
+        scoring.score_seo(md, title, meta, brief),
+        scoring.score_geo(md, brief, None, has_structured_data=True),
+        scoring.score_readability(md, None),
+    ]
 
 
 def _accept_revision(
     cur_md: str, new_md: str, title: str, meta: str | None, brief: dict
 ) -> bool:
-    cs_seo, cs_geo = _det_scores(cur_md, title, meta, brief)
-    ns_seo, ns_geo = _det_scores(new_md, title, meta, brief)
-    return _decide(cs_seo, cs_geo, ns_seo, ns_geo)
+    return _decide(
+        _det_scores(cur_md, title, meta, brief),
+        _det_scores(new_md, title, meta, brief),
+    )
 
 
 # --- evaluation helpers (pure) ---
 def collect_issues(
-    seo: dict | None, geo: dict | None, grounding_report: dict | None
+    seo: dict | None,
+    geo: dict | None,
+    grounding_report: dict | None,
+    readability: dict | None = None,
 ) -> list[str]:
     """Turn failing evaluator signals into concrete revision instructions."""
     issues: list[str] = []
-    for score in (seo, geo):
+    for score in (seo, geo, readability):
         if not score or score.get("met"):
             continue
         for s in score.get("signals", []):
@@ -213,21 +223,30 @@ def collect_issues(
 
 
 def satisfied(
-    seo: dict | None, geo: dict | None, grounding_report: dict | None
+    seo: dict | None,
+    geo: dict | None,
+    grounding_report: dict | None,
+    readability: dict | None = None,
 ) -> bool:
     if not (seo and seo.get("met")):
         return False
     if not (geo and geo.get("met")):
+        return False
+    if readability is not None and not readability.get("met"):
         return False
     gs = grounding_report.get("grounding_score") if grounding_report else None
     return gs is None or gs >= GROUNDING_TARGET
 
 
 def combined_score(
-    seo: dict | None, geo: dict | None, grounding_report: dict | None
+    seo: dict | None,
+    geo: dict | None,
+    grounding_report: dict | None,
+    readability: dict | None = None,
 ) -> int:
     total = (seo or {}).get("total", 0) + (geo or {}).get("total", 0)
     total += (grounding_report or {}).get("grounding_score") or 0
+    total += (readability or {}).get("total", 0)
     return total
 
 
@@ -361,13 +380,14 @@ async def refine(
         seo = article.get("seo_score")
         geo = article.get("geo_score")
         gr = article.get("grounding_report")
-        if satisfied(seo, geo, gr):
+        read = article.get("readability_score")
+        if satisfied(seo, geo, gr, read):
             break
-        score_now = combined_score(seo, geo, gr)
+        score_now = combined_score(seo, geo, gr, read)
         if score_now <= prev_combined:  # last pass didn't help — stop
             break
         prev_combined = score_now
-        issues = collect_issues(seo, geo, gr)
+        issues = collect_issues(seo, geo, gr, read)
         if not issues:
             break
 

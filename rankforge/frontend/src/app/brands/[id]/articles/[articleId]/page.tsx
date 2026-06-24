@@ -54,7 +54,7 @@ const PHASE_LABEL: Record<string, string> = {
   outlining: "Outlining…",
   drafting: "Drafting sections…",
   optimizing: "Optimizing & scoring…",
-  refining: "Refining to hit SEO/GEO targets…",
+  refining: "Refining to hit SEO/GEO/Readability targets…",
   queued: "Queued…",
 };
 
@@ -246,6 +246,7 @@ function GenerationProgress({ a }: { a: Article }) {
           <div className="mt-3 flex flex-wrap gap-4 text-xs text-muted-foreground">
             <LiveScore label="SEO" score={a.seo_score} />
             <LiveScore label="GEO" score={a.geo_score} />
+            <LiveScore label="Readability" score={a.readability_score} />
             <span>
               Grounding{" "}
               <b className="font-data text-foreground">
@@ -275,7 +276,9 @@ export default function ArticleView({
   const mayApprove = canApprove(profile?.role);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const [tab, setTab] = useState<"SEO" | "GEO" | "Grounding" | "Comments">("SEO");
+  const [tab, setTab] = useState<
+    "SEO" | "GEO" | "Readability" | "Grounding" | "Comments"
+  >("SEO");
   const [showHistory, setShowHistory] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
 
@@ -306,7 +309,12 @@ export default function ArticleView({
     ((a?.json_ld?.["@graph"] as Array<{ "@type"?: string }>) ?? [])
       .map((g) => g["@type"])
       .filter(Boolean) as string[];
-  const current = tab === "SEO" ? a?.seo_score : a?.geo_score;
+  const current =
+    tab === "GEO"
+      ? a?.geo_score
+      : tab === "Readability"
+        ? a?.readability_score
+        : a?.seo_score;
 
   async function save() {
     try {
@@ -356,8 +364,15 @@ export default function ArticleView({
       <ResizablePanel defaultSize={26} minSize={16} maxSize={45}>
         <aside className="flex h-full w-full flex-col bg-card">
         <div className="flex border-b border-border">
-          {(["SEO", "GEO", "Grounding", "Comments"] as const).map((t) => {
-            const sc = t === "SEO" ? a?.seo_score : t === "GEO" ? a?.geo_score : null;
+          {(["SEO", "GEO", "Readability", "Grounding", "Comments"] as const).map((t) => {
+            const sc =
+              t === "SEO"
+                ? a?.seo_score
+                : t === "GEO"
+                  ? a?.geo_score
+                  : t === "Readability"
+                    ? a?.readability_score
+                    : null;
             const g = t === "Grounding" ? a?.grounding_report?.grounding_score : null;
             const badge = sc ? sc.total : g ?? null;
             const color = sc
@@ -379,7 +394,13 @@ export default function ArticleView({
                 )}
                 title={t}
               >
-                {t === "Comments" ? <MessageSquare className="size-3.5" /> : t}
+                {t === "Comments" ? (
+                  <MessageSquare className="size-3.5" />
+                ) : t === "Readability" ? (
+                  "Read"
+                ) : (
+                  t
+                )}
                 {badge != null && (
                   <span className="font-data" style={{ color: `rgb(${color})` }}>
                     {badge}
@@ -419,7 +440,9 @@ export default function ArticleView({
                   onClick={() =>
                     refine.mutate(undefined, {
                       onSuccess: () =>
-                        toast.success("Refining against SEO/GEO/Grounding…"),
+                        toast.success(
+                          "Refining against SEO/GEO/Readability/Grounding…"
+                        ),
                       onError: (e) =>
                         toast.error(
                           e instanceof Error ? e.message : "Refine failed"

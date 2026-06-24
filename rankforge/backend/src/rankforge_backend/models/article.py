@@ -34,6 +34,7 @@ class Article(BaseModel):
     meta_description: str | None = None
     seo_score: dict | None = None
     geo_score: dict | None = None
+    readability_score: dict | None = None
     json_ld: dict | None = None
     grounding_report: dict | None = None
     created_at: datetime

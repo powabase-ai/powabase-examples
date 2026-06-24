@@ -77,20 +77,20 @@ def test_decide_accepts_seo_gain_while_geo_stays_above_target():
     # SEO 72→78 (gap 8→2); GEO 88→86 (both ≥85). Old raw-total guard would veto
     # this (160→164 is fine, but 72+90→78+86 = 162→164 ok; the real win is when GEO
     # drops): SEO 72→78, GEO 90→86 — raw total 162→164 up, but the key is targets.
-    assert revise._decide(_s(72, 80), _s(90, 85), _s(78, 80), _s(86, 85))
+    assert revise._decide([_s(72, 80), _s(90, 85)], [_s(78, 80), _s(86, 85)])
 
 
 def test_decide_rejects_pushing_met_axis_below_target():
     # SEO improves but GEO falls from 90 to 84 (below its 85 target).
-    assert not revise._decide(_s(72, 80), _s(90, 85), _s(78, 80), _s(84, 85))
+    assert not revise._decide([_s(72, 80), _s(90, 85)], [_s(78, 80), _s(84, 85)])
 
 
 def test_decide_rejects_widening_the_gap():
     # SEO regresses 78→74 (gap 2→6); GEO unchanged & met.
-    assert not revise._decide(_s(78, 80), _s(88, 85), _s(74, 80), _s(88, 85))
+    assert not revise._decide([_s(78, 80), _s(88, 85)], [_s(74, 80), _s(88, 85)])
 
 
 def test_decide_allows_gap_neutral_edit():
     # Unchanged SEO/GEO — let it through; the outer combined-score check (grounding)
     # decides whether the pass actually helped.
-    assert revise._decide(_s(73, 80), _s(88, 85), _s(73, 80), _s(88, 85))
+    assert revise._decide([_s(73, 80), _s(88, 85)], [_s(73, 80), _s(88, 85)])

@@ -70,3 +70,39 @@ def test_band_and_helpers():
     assert scoring._band(1.0, 0.5, 1.5, 1.0) == 100
     assert scoring._band(2.5, 0.5, 1.5, 1.0) == 0
     assert scoring._flesch("This is easy to read. Short words help.") > 0
+
+
+def test_readability_flags_ai_tells():
+    aiish = (
+        "In today's fast-paced world, we delve into the vibrant landscape. "
+        "It's not just powerful, it's seamless and robust. Let's dive in. "
+        "Moreover, this is pivotal. Furthermore, it is crucial. In conclusion, "
+        "we unlock and elevate and harness and leverage the realm."
+    )
+    s = scoring.score_readability(aiish, None)
+    assert {"total", "target", "met", "signals"} <= set(s)
+    by = {x["key"]: x["score"] for x in s["signals"]}
+    assert by["ai_vocabulary"] < 50  # stacked delve/leverage/robust/… register
+    assert by["tell_phrases"] < 50  # "in today's…", "it's not just", "let's dive in"
+    assert not s["met"]
+    # LLM signals default to neutral 50 when the judge is absent.
+    assert by["human_voice"] == 50
+
+
+def test_readability_clean_prose_scores_well():
+    clean = (
+        "The API returns 200 in about 40ms. We measured it across 1,000 requests "
+        "on a t3.micro. Sarah on the platform team flagged a regression last March; "
+        "the fix shipped in v2.3. Short sentence. Then a longer one that explains "
+        "the trade-off between cache size and cold-start latency in concrete terms."
+    )
+    by = {x["key"]: x["score"] for x in scoring.score_readability(clean, None)["signals"]}
+    assert by["ai_vocabulary"] == 100
+    assert by["tell_phrases"] == 100
+
+
+def test_readability_uses_llm_human_voice_when_present():
+    s = scoring.score_readability("Some prose.", {"human_voice": 90, "flow": 80})
+    by = {x["key"]: x for x in s["signals"]}
+    assert by["human_voice"]["score"] == 90
+    assert by["human_voice"]["method"] == "llm"

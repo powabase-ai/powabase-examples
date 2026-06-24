@@ -20,6 +20,36 @@ from .agents import ensure_agent
 
 SEO_TARGET = 80
 GEO_TARGET = 85
+READABILITY_TARGET = 80
+
+# AI "tells" — the register/constructions search engines now penalize as machine-
+# written. Detected deterministically (density matters more than any single use).
+_AI_WORDS = (
+    "delve", "delved", "delving", "tapestry", "realm", "realms", "landscape",
+    "leverage", "leverages", "leveraging", "leveraged", "robust", "seamless",
+    "seamlessly", "navigate", "navigating", "underscore", "underscores",
+    "underscoring", "foster", "fosters", "fostering", "harness", "harnessing",
+    "elevate", "elevates", "elevating", "unlock", "unlocks", "unlocking",
+    "embark", "embarking", "testament", "pivotal", "crucial", "vibrant",
+    "boasts", "boasting", "nestled",
+)
+_AI_WORD_RE = re.compile(r"(?<![a-z])(?:" + "|".join(_AI_WORDS) + r")(?![a-z])", re.I)
+_TELL_RE = re.compile(
+    r"it'?s not (?:just|merely)\b"
+    r"|\bisn'?t (?:just|merely)\b"
+    r"|\bwhether you'?re an?\b"
+    r"|\bin today'?s\b.{0,40}?\b(?:world|landscape|era|age)\b"
+    r"|\blet'?s (?:dive in|explore|take a look|unpack)\b"
+    r"|\bbuckle up\b"
+    r"|\bin conclusion\b"
+    r"|\bat the end of the day\b",
+    re.I,
+)
+_EMPTY_TRANSITION_RE = re.compile(
+    r"(?<![a-z])(?:moreover|furthermore|additionally|that said)(?![a-z])", re.I
+)
+_BOLD_BULLET_RE = re.compile(r"^\s*[-*]\s+\*\*[^*]+\*\*\s*[:\-—]", re.MULTILINE)
+_BULLET_RE = re.compile(r"^\s*[-*]\s+\S", re.MULTILINE)
 
 
 # ---------- text helpers (deterministic) ----------
@@ -265,6 +295,97 @@ def score_geo(
     return _aggregate(sig, geo_target)
 
 
+# ---------- Readability (does it read human, not machine-generated?) ----------
+def score_readability(content_md: str, llm: dict | None) -> dict:
+    """Hybrid: deterministic AI-tell detection + an LLM 'human voice' judgment.
+    Search engines penalize content that reads as AI-generated, so this is a
+    first-class scored dimension alongside SEO/GEO/Grounding."""
+    text = _clean(content_md)
+    words = _words(text)
+    wc = len(words) or 1
+    sents = _sentences(text)
+
+    sig: list[dict] = []
+
+    ai_hits = len(_AI_WORD_RE.findall(content_md))
+    ai_density = ai_hits / wc * 1000
+    ai_score = max(0.0, 100.0 * (1 - max(0.0, ai_density - 1.5) / 7.5))
+    sig.append(_signal(
+        "ai_vocabulary", "AI-tell vocabulary", ai_score, 0.18,
+        f"{ai_hits} flagged word(s) (~{ai_density:.1f}/1k) from the "
+        "delve/leverage/robust/seamless/elevate register.",
+        ["Swap the flagged words for plain language; never stack several in a "
+         "paragraph."] if ai_score < 80 else []))
+
+    tell_hits = len(_TELL_RE.findall(content_md))
+    tell_score = max(0.0, 100.0 - tell_hits * 25)
+    sig.append(_signal(
+        "tell_phrases", "Formulaic constructions", tell_score, 0.16,
+        f"{tell_hits} AI-tell construction(s) (\"it's not just X…\", \"whether "
+        "you're a…\", \"in today's… world\", \"let's dive in\", \"in conclusion\").",
+        ["Rewrite the formulaic openers/closers in a natural voice."]
+        if tell_hits else []))
+
+    em = content_md.count("—")
+    em_density = em / wc * 1000
+    sig.append(_signal(
+        "em_dashes", "Em-dash restraint", _band(em_density, 0, 3, 5), 0.10,
+        f"{em} em-dash(es) (~{em_density:.1f}/1k).",
+        ["Thin out em-dashes; prefer commas, periods, or parentheses."]
+        if em_density > 3 else []))
+
+    et = len(_EMPTY_TRANSITION_RE.findall(text))
+    sig.append(_signal(
+        "transitions", "Natural transitions", max(0.0, 100.0 - et * 12), 0.08,
+        f"{et} filler transition(s) (Moreover / Furthermore / Additionally / "
+        "That said).",
+        ["Cut the filler transitions; let the sentences connect directly."]
+        if et else []))
+
+    sl = [len(_words(s)) for s in sents]
+    mean_sl = (sum(sl) / len(sl)) if sl else 0
+    if len(sl) > 1 and mean_sl:
+        var = sum((x - mean_sl) ** 2 for x in sl) / len(sl)
+        cv = (var ** 0.5) / mean_sl  # coefficient of variation
+    else:
+        cv = 0.0
+    sig.append(_signal(
+        "rhythm", "Sentence-length variety", _band(cv, 0.5, 2.0, 0.5), 0.12,
+        f"Sentence length varies with CV ~{cv:.2f}; mechanical evenness reads "
+        "as machine-made.",
+        ["Mix short and long sentences; avoid uniform sentence/paragraph length."]
+        if cv < 0.5 else []))
+
+    bullets = len(_BULLET_RE.findall(content_md))
+    bolded = len(_BOLD_BULLET_RE.findall(content_md))
+    frac = (bolded / bullets) if bullets else 0.0
+    sig.append(_signal(
+        "bullet_style", "Bullet style",
+        100 if frac < 0.5 else max(0.0, 100.0 - (frac - 0.5) * 200), 0.06,
+        f"{bolded}/{bullets} bullets use a bolded lead-in." if bullets
+        else "No bullet lists.",
+        ["Don't bold the lead-in of every bullet; use prose where items aren't "
+         "truly parallel."] if frac >= 0.5 else []))
+
+    # Always-include LLM signals (neutral 50 when the judge is unavailable) so the
+    # weight denominator — and the target's meaning — is stable.
+    _NEUTRAL = "Not evaluated (LLM judge unavailable)."
+    sig.append(_signal(
+        "human_voice", "Human voice",
+        llm.get("human_voice", 0) if llm else 50, 0.18,
+        llm.get("human_voice_note", "LLM judgment of how human the writing reads.")
+        if llm else _NEUTRAL,
+        llm.get("human_voice_fixes", []) if llm else [], method="llm"))
+    sig.append(_signal(
+        "flow", "Flow & specificity",
+        llm.get("flow", 0) if llm else 50, 0.12,
+        llm.get("flow_note", "LLM judgment of smoothness, rhythm, and specificity.")
+        if llm else _NEUTRAL,
+        llm.get("flow_fixes", []) if llm else [], method="llm"))
+
+    return _aggregate(sig, READABILITY_TARGET)
+
+
 JUDGE_AGENT_NAME = "rankforge-geo-judge"
 # Evaluation/judgment with short JSON output — top model + extended thinking.
 JUDGE_MODEL = "claude-opus-4-7"
@@ -316,6 +437,65 @@ async def judge_geo(client: PowabaseClient, content_md: str) -> dict | None:
         return None
 
 
+READ_JUDGE_AGENT_NAME = "rankforge-readability-judge"
+READ_JUDGE_MODEL = "claude-opus-4-7"
+_READ_JUDGE_SYSTEM = """\
+You are a **human-writing auditor**. Search engines now penalize content that reads \
+as AI-generated, so you rate how human and natural an article reads. You return only \
+structured JSON.
+
+## Output discipline
+- Return exactly one JSON object — no prose, no commentary, no code fences.
+"""
+_READ_JUDGE_PROMPT = """\
+Rate the article on two axes (0–100 each) for how HUMAN it reads. High means a \
+knowledgeable person clearly wrote it; low means it reads as machine-generated.
+
+## Axes
+- human_voice — a real point of view, confident unqualified claims, and concrete \
+specificity (numbers, names, dates, examples). Penalize: the AI register (delve, \
+leverage, robust, seamless, navigate, elevate, unlock, pivotal, crucial, vibrant, \
+boasts, nestled…); formulaic constructions ("it's not just X, it's Y"; "whether \
+you're a beginner or a pro"; "in today's fast-paced world"; "let's dive in"; "in \
+conclusion"); and generic, hedge-everything, specificity-free prose.
+- flow — natural rhythm (a mix of short and long sentences, uneven section lengths) \
+that reads smoothly, NOT the mechanical evenness and over-even paragraphing of \
+machine text. Penalize excessive em-dashes and filler transitions (moreover, \
+furthermore, additionally, that said).
+
+## For each axis return
+- The score (0–100).
+- A one-line note explaining the score.
+- A short list of concrete fixes (empty when none are needed).
+
+## Output
+Return ONLY this JSON object:
+{"human_voice": int, "human_voice_note": str, "human_voice_fixes": [str], \
+"flow": int, "flow_note": str, "flow_fixes": [str]}\
+"""
+
+
+async def ensure_read_judge_agent(client: PowabaseClient) -> str:
+    return await ensure_agent(
+        client,
+        name=READ_JUDGE_AGENT_NAME,
+        model=READ_JUDGE_MODEL,
+        system_prompt=_READ_JUDGE_SYSTEM,
+        settings={"reasoning_effort": "high"},
+    )
+
+
+async def judge_readability(client: PowabaseClient, content_md: str) -> dict | None:
+    try:
+        agent_id = await ensure_read_judge_agent(client)
+        res = await client.run_agent(
+            agent_id, f"{_READ_JUDGE_PROMPT}\n\n---ARTICLE---\n{content_md[:16000]}"
+        )
+        return extract_json(res.get("content") or "")
+    except Exception:  # noqa: BLE001 — scoring degrades to deterministic-only
+        return None
+
+
 async def score_and_store(
     client: PowabaseClient, db: Database, article_id
 ) -> dict[str, Any] | None:
@@ -335,6 +515,10 @@ async def score_and_store(
         has_structured_data=bool(article.get("json_ld")),
         geo_target=template["geo_target"] if template else GEO_TARGET,
     )
+    read_llm = await judge_readability(client, md)
+    readability = score_readability(md, read_llm)
 
-    gen_svc._update(db, article_id, seo_score=seo, geo_score=geo)
-    return {"seo_score": seo, "geo_score": geo}
+    gen_svc._update(
+        db, article_id, seo_score=seo, geo_score=geo, readability_score=readability
+    )
+    return {"seo_score": seo, "geo_score": geo, "readability_score": readability}

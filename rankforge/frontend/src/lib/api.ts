@@ -270,6 +270,7 @@ export interface Article extends ArticleSummary {
   meta_description?: string | null;
   seo_score?: Score | null;
   geo_score?: Score | null;
+  readability_score?: Score | null;
   json_ld?: Record<string, unknown> | null;
   grounding_report?: GroundingReport | null;
   created_at: string;
