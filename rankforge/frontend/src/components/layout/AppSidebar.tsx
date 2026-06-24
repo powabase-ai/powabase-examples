@@ -1,10 +1,8 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
-  ChevronLeft,
   Layers,
   LogOut,
   PenLine,
@@ -14,17 +12,10 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react";
-import { toast } from "sonner";
 
-import { BrandForm } from "@/components/BrandForm";
-import { useBrands, useCreateBrand } from "@/lib/hooks/useBrands";
+import { BrandSwitcher } from "@/components/layout/BrandSwitcher";
 import { useAuth } from "@/lib/auth/AuthProvider";
-import type { BusinessProfileInput } from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-// Sentinel option value: choosing it opens the create-brand dialog instead of
-// switching brands.
-const NEW_BRAND = "__new__";
 
 interface NavItem {
   title: string;
@@ -35,21 +26,7 @@ interface NavItem {
 
 export function AppSidebar({ brandId }: { brandId: string }) {
   const pathname = usePathname();
-  const router = useRouter();
-  const { data: brands } = useBrands();
   const { profile, signOut } = useAuth();
-  const createBrand = useCreateBrand();
-  const [createOpen, setCreateOpen] = useState(false);
-
-  async function handleCreateBrand(data: BusinessProfileInput) {
-    try {
-      const b = await createBrand.mutateAsync(data);
-      setCreateOpen(false);
-      router.push(`/brands/${b.id}`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not create brand");
-    }
-  }
 
   const nav: NavItem[] = [
     { title: "Research", href: `/brands/${brandId}`, icon: Search, exact: true },
@@ -69,26 +46,7 @@ export function AppSidebar({ brandId }: { brandId: string }) {
         >
           Rank<span className="text-[rgb(var(--ember))]">Forge</span>
         </Link>
-        <select
-          value={brandId}
-          onChange={(e) => {
-            if (e.target.value === NEW_BRAND) setCreateOpen(true);
-            else router.push(`/brands/${e.target.value}`);
-          }}
-          className="mt-4 h-9 w-full rounded-md border border-[rgb(var(--iron-line))] bg-[rgb(var(--iron-hover))] px-2.5 text-sm text-[rgb(var(--iron-strong))] outline-none focus-visible:ring-2 focus-visible:ring-[rgb(var(--ember))]"
-        >
-          {brands?.map((b) => (
-            <option key={b.id} value={b.id} className="bg-[rgb(var(--iron))]">
-              {b.name}
-            </option>
-          ))}
-          <option disabled className="bg-[rgb(var(--iron))]">
-            ──────────
-          </option>
-          <option value={NEW_BRAND} className="bg-[rgb(var(--iron))]">
-            + New brand…
-          </option>
-        </select>
+        <BrandSwitcher brandId={brandId} />
       </div>
 
       <nav className="flex flex-col gap-0.5 px-3">
@@ -119,16 +77,8 @@ export function AppSidebar({ brandId }: { brandId: string }) {
         })}
       </nav>
 
-      <div className="mt-auto">
-        <div className="px-5 pb-3">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-1 text-xs text-[rgb(var(--iron-text))] transition-colors hover:text-[rgb(var(--iron-strong))]"
-          >
-            <ChevronLeft className="size-3.5" /> All brands
-          </Link>
-        </div>
-        <div className="flex items-center justify-between gap-2 border-t border-[rgb(var(--iron-line))] px-5 py-3.5">
+      <div className="mt-auto border-t border-[rgb(var(--iron-line))]">
+        <div className="flex items-center justify-between gap-2 px-5 py-3.5">
           <div className="min-w-0">
             <div className="truncate text-xs font-medium text-[rgb(var(--iron-strong))]">
               {profile?.email ?? "—"}
@@ -149,14 +99,6 @@ export function AppSidebar({ brandId }: { brandId: string }) {
           </button>
         </div>
       </div>
-
-      <BrandForm
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        brand={null}
-        onSave={handleCreateBrand}
-        saving={createBrand.isPending}
-      />
     </aside>
   );
 }
