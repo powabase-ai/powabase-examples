@@ -30,6 +30,7 @@ from .routes import (
     templates,
 )
 from .scheduler import ScoutScheduler
+from .services.reconcile import reconcile_interrupted
 
 
 @asynccontextmanager
@@ -45,6 +46,13 @@ async def lifespan(app: FastAPI):
             timeout=settings.db_pool_timeout,
         )
         db.open()
+        # A fresh process has no in-flight background tasks, so reset any rows left
+        # mid-flight (drafting/searching/generating) by a previous restart/crash —
+        # otherwise the UI shows them stuck forever.
+        try:
+            reconcile_interrupted(db)
+        except Exception:  # noqa: BLE001 — never block startup on housekeeping
+            logging.getLogger("rankforge").exception("startup reconciliation failed")
     app.state.db = db
 
     powabase: PowabaseClient | None = None
