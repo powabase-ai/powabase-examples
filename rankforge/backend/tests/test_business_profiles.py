@@ -46,6 +46,7 @@ def test_create_inserts_and_returns_201():
             "niche": "SaaS",
             "seed_topics": ["seo"],
             "competitors": [{"name": "Rival", "domain": "rival.com"}],
+            "url_pattern": "https://blog.acme.com/{slug}",
         },
     )
 
@@ -54,6 +55,9 @@ def test_create_inserts_and_returns_201():
     assert resp.json()["competitors"][0]["domain"] == "rival.com"
     sql = db.fetch_one.call_args.args[0].lower()
     assert "insert into public.business_profiles" in sql
+    # url_pattern must be persisted at create time, not silently dropped
+    assert "url_pattern" in sql
+    assert "https://blog.acme.com/{slug}" in db.fetch_one.call_args.args[1]
 
 
 def test_create_duplicate_name_returns_409():

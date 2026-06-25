@@ -300,19 +300,16 @@ def suggest_link_suggestions(
 @router.post(
     "/{article_id}/links/{suggestion_id}/apply", response_model=LinkSuggestion
 )
-async def apply_link_suggestion(
+def apply_link_suggestion(
     article_id: UUID,
     suggestion_id: UUID,
     db: Database = Depends(get_db),
-    pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Insert the link into the body, re-score, and mark the suggestion accepted."""
+    """Insert the link into the body, re-score (SEO), and mark the suggestion accepted."""
     article = _guard_article(db, article_id, user)
     _require_editor(user)
-    row = await linking_svc.apply_suggestion(
-        pb, db, article["business_id"], suggestion_id
-    )
+    row = linking_svc.apply_suggestion(db, article["business_id"], suggestion_id)
     if row is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "link suggestion not found or not pending"

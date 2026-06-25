@@ -56,8 +56,9 @@ def create_profile(
         f"""
         insert into public.business_profiles
             (org_id, name, domain, description, niche, audience,
-             seed_topics, target_keywords, competitors, brand_kb_id, sitemap_url)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             seed_topics, target_keywords, competitors, brand_kb_id, sitemap_url,
+             url_pattern)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         returning {_COLUMNS}
         """,
         (
@@ -72,6 +73,7 @@ def create_profile(
             Json([c.model_dump() for c in data.competitors]),
             data.brand_kb_id,
             data.sitemap_url,
+            data.url_pattern,
         ),
     )
 

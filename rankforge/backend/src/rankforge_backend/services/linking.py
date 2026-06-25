@@ -33,8 +33,11 @@ _MIN_ANCHOR_LEN = 4
 
 def _render_pattern(pattern: str, article: dict[str, Any]) -> str | None:
     """Render a brand URL pattern for one article. Tokens: {slug}, {id}. Returns None
-    if the pattern needs a slug the article doesn't have (so we never emit a URL with
-    an empty path segment)."""
+    when the pattern can't yield a per-article URL: it has no token at all (would map
+    every article to the SAME url), or it needs a slug the article doesn't have (would
+    emit an empty path segment)."""
+    if "{slug}" not in pattern and "{id}" not in pattern:
+        return None
     slug = (article.get("slug") or "").strip()
     if "{slug}" in pattern and not slug:
         return None
@@ -200,8 +203,8 @@ def suggest_links(
     return out
 
 
-async def apply_suggestion(
-    client: Any, db: Database, business_id: UUID, suggestion_id: UUID
+def apply_suggestion(
+    db: Database, business_id: UUID, suggestion_id: UUID
 ) -> dict[str, Any] | None:
     """Insert the link into the article body, re-score, mark the suggestion accepted.
 
@@ -225,9 +228,20 @@ async def apply_suggestion(
     (a, b), span_text = found
     new_md = f"{md[:a]}[{span_text}]({s['target_url']}){md[b:]}"
     gen_svc._update(db, s["article_id"], content_md=new_md)
-    # A link changes the on-page signals (outbound/internal links) — re-score so the
-    # editor sees the effect. Local import avoids a service import cycle.
+    # Re-score SEO DETERMINISTICALLY (no LLM): a single internal link only moves the
+    # on-page link signals, so re-judging GEO/readability with the model on every
+    # "Add" click would be pure latency + token cost. Local imports avoid a cycle.
+    from . import brief as brief_svc
     from . import scoring
 
-    await scoring.score_and_store(client, db, s["article_id"])
+    brief = (
+        brief_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
+    ) or {}
+    seo = scoring.score_seo(
+        new_md,
+        art.get("meta_title") or art.get("title") or "",
+        art.get("meta_description"),
+        brief,
+    )
+    gen_svc._update(db, s["article_id"], seo_score=seo)
     return _set_status(db, business_id, suggestion_id, "accepted")

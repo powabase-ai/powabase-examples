@@ -1,6 +1,6 @@
 """Internal linking (M6 / Phase 12.1) — deterministic anchor logic + route wiring."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from uuid import UUID
 
 from conftest import ADMIN_ORG, with_auth
@@ -69,6 +69,11 @@ def test_canonical_url_resolution():
     assert linking.canonical_url({}, art) is None
     # {slug} pattern but the article has no slug → None (no empty path segment)
     assert linking.canonical_url(_PATTERN_BRAND, {"id": TID, "slug": ""}) is None
+    # a token-less pattern can't make a per-article URL → None (else every article
+    # would resolve to the SAME url and all internal links would collide)
+    assert linking.canonical_url(
+        {"url_pattern": "https://blog.example.com/"}, {"id": TID, "slug": "guide"}
+    ) is None
 
 
 def test_suggest_links_requires_a_brand_pattern(monkeypatch):
@@ -117,51 +122,50 @@ def test_suggest_links_skips_text_already_linked(monkeypatch):
     db.fetch_one.assert_not_called()  # nothing to stage
 
 
-async def test_apply_inserts_link_rescores_and_accepts(monkeypatch):
+def test_apply_inserts_link_rescores_and_accepts(monkeypatch):
     db = MagicMock()
+    # 1) fetch the suggestion, 2) _set_status ... returning (no brief_id → no brief fetch)
     db.fetch_one.side_effect = [
         {"id": SID, "article_id": AID, "anchor_text": "headless cms",
-         "target_url": f"/p/{TID}", "status": "pending"},
+         "target_url": "https://blog.x.com/guide", "status": "pending"},
         {"id": SID, "status": "accepted"},
     ]
     monkeypatch.setattr(
         linking.gen_svc, "get_article",
-        lambda d, aid: {"content_md": "We weigh headless cms options."},
+        lambda d, aid: {"content_md": "We weigh headless cms options.", "title": "T"},
     )
     updates: dict = {}
     monkeypatch.setattr(
         linking.gen_svc, "_update", lambda d, aid, **f: updates.update(f)
     )
-    score = AsyncMock()
-    monkeypatch.setattr("rankforge_backend.services.scoring.score_and_store", score)
-    out = await linking.apply_suggestion(MagicMock(), db, BID, SID)
-    assert f"[headless cms](/p/{TID})" in updates["content_md"]  # link inserted
-    score.assert_awaited_once()  # re-scored
+    out = linking.apply_suggestion(db, BID, SID)
+    assert "[headless cms](https://blog.x.com/guide)" in updates["content_md"]
+    assert "seo_score" in updates  # re-scored deterministically (no LLM call)
     assert out["status"] == "accepted"
 
 
-async def test_apply_dismisses_a_stale_anchor(monkeypatch):
+def test_apply_dismisses_a_stale_anchor(monkeypatch):
     db = MagicMock()
     db.fetch_one.side_effect = [
         {"id": SID, "article_id": AID, "anchor_text": "headless cms",
-         "target_url": "/p/x", "status": "pending"},
+         "target_url": "https://blog.x.com/guide", "status": "pending"},
         {"id": SID, "status": "dismissed"},
     ]
     monkeypatch.setattr(
         linking.gen_svc, "get_article",
         lambda d, aid: {"content_md": "the phrase is gone now"},
     )
-    out = await linking.apply_suggestion(MagicMock(), db, BID, SID)
+    out = linking.apply_suggestion(db, BID, SID)
     assert out["status"] == "dismissed"
 
 
-async def test_apply_noop_when_not_pending():
+def test_apply_noop_when_not_pending():
     db = MagicMock()
     db.fetch_one.return_value = {
         "id": SID, "article_id": AID, "anchor_text": "x",
-        "target_url": "/p/x", "status": "accepted",
+        "target_url": "https://blog.x.com/guide", "status": "accepted",
     }
-    assert await linking.apply_suggestion(MagicMock(), db, BID, SID) is None
+    assert linking.apply_suggestion(db, BID, SID) is None
 
 
 # --- routes (hermetic) ---
@@ -204,11 +208,10 @@ def test_suggest_links_requires_editor(monkeypatch):
 
 def test_apply_link_route(monkeypatch):
     monkeypatch.setattr(gsvc, "get_article", lambda d, aid: ARTICLE)
-
-    async def fake_apply(c, d, bid, sid):
-        return {**SUGGESTION, "status": "accepted"}
-
-    monkeypatch.setattr(linking, "apply_suggestion", fake_apply)
+    monkeypatch.setattr(
+        linking, "apply_suggestion",
+        lambda d, bid, sid: {**SUGGESTION, "status": "accepted"},
+    )
     resp = _client().post(f"/api/articles/{AID}/links/{SID}/apply")
     assert resp.status_code == 200
     assert resp.json()["status"] == "accepted"
@@ -216,11 +219,7 @@ def test_apply_link_route(monkeypatch):
 
 def test_apply_link_404_when_missing(monkeypatch):
     monkeypatch.setattr(gsvc, "get_article", lambda d, aid: ARTICLE)
-
-    async def fake_apply(c, d, bid, sid):
-        return None
-
-    monkeypatch.setattr(linking, "apply_suggestion", fake_apply)
+    monkeypatch.setattr(linking, "apply_suggestion", lambda d, bid, sid: None)
     resp = _client().post(f"/api/articles/{AID}/links/{SID}/apply")
     assert resp.status_code == 404
 
