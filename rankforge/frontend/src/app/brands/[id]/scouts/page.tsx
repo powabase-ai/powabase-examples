@@ -4,6 +4,7 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   ExternalLink,
+  Link2,
   Loader2,
   PenLine,
   Radar,
@@ -19,15 +20,23 @@ import {
   useDismissOpportunity,
   useDraftOpportunity,
   useOpportunities,
+  useRelinkConfig,
   useRestoreOpportunity,
+  useRunRelink,
   useRunScout,
   useScoutConfig,
   useScoutRuns,
+  useUpdateRelink,
   useUpdateScoutConfig,
 } from "@/lib/hooks/useScouts";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
-import { canApprove, type Opportunity, type ScoutConfig } from "@/lib/api";
+import {
+  canApprove,
+  type Opportunity,
+  type RelinkConfig,
+  type ScoutConfig,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 function scoreColor(s: number) {
@@ -181,6 +190,91 @@ function ConfigPanel({
   );
 }
 
+function RelinkCard({
+  brandId,
+  config,
+  canEdit,
+}: {
+  brandId: string;
+  config: RelinkConfig;
+  canEdit: boolean;
+}) {
+  const update = useUpdateRelink(brandId);
+  const run = useRunRelink(brandId);
+  const field =
+    "h-9 rounded-md border border-input bg-card px-2 text-sm outline-none focus:ring-1 focus:ring-[rgb(var(--ember))] disabled:opacity-60";
+
+  const value = config.enabled ? config.cadence : "off";
+  function change(v: string) {
+    const body =
+      v === "off"
+        ? { enabled: false }
+        : { enabled: true, cadence: v as RelinkConfig["cadence"] };
+    update.mutate(body, {
+      onSuccess: () => toast.success("Re-linking schedule saved"),
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Save failed"),
+    });
+  }
+
+  return (
+    <Card>
+      <CardContent className="space-y-3 py-5">
+        <div className="flex items-center gap-2">
+          <Link2 className="size-4 text-[rgb(var(--ember))]" />
+          <h3 className="text-sm font-semibold">Internal re-linking</h3>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Periodically re-scans your <strong>published</strong> library and stages
+          internal links between new and older articles. Suggestions appear on each
+          article&apos;s <span className="font-medium">Links</span> tab for review —
+          nothing is published automatically.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">
+              Schedule
+            </label>
+            <select
+              value={value}
+              disabled={!canEdit || update.isPending}
+              onChange={(e) => change(e.target.value)}
+              className={cn(field, "w-44")}
+            >
+              <option value="off">Off — manual only</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </div>
+          {canEdit && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                run.mutate(undefined, {
+                  onSuccess: () =>
+                    toast.success("Re-linking the library — check back shortly"),
+                  onError: (e) =>
+                    toast.error(e instanceof Error ? e.message : "Could not start"),
+                })
+              }
+              disabled={run.isPending}
+            >
+              {run.isPending ? <Loader2 className="animate-spin" /> : <Link2 />}
+              Run now
+            </Button>
+          )}
+        </div>
+        {config.last_run_at && (
+          <p className="text-xs text-muted-foreground">
+            Last run staged {config.last_found} link
+            {config.last_found === 1 ? "" : "s"} for review.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function OpportunityCard({
   brandId,
   opp,
@@ -299,6 +393,7 @@ export default function ScoutsPage({
   const { profile } = useAuth();
   const canEdit = canApprove(profile?.role);
   const config = useScoutConfig(id);
+  const relinkConfig = useRelinkConfig(id);
   const runs = useScoutRuns(id);
   const opps = useOpportunities(id);
   const runScout = useRunScout(id);
@@ -370,8 +465,18 @@ export default function ScoutsPage({
       ) : null}
 
       {config.data && (
-        <div className="mb-6">
+        <div className="mb-4">
           <ConfigPanel brandId={id} config={config.data} canEdit={canEdit} />
+        </div>
+      )}
+
+      {relinkConfig.data && (
+        <div className="mb-6">
+          <RelinkCard
+            brandId={id}
+            config={relinkConfig.data}
+            canEdit={canEdit}
+          />
         </div>
       )}
 

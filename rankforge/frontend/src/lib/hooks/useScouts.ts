@@ -4,11 +4,44 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   opportunitiesApi,
+  relinkApi,
   scoutsApi,
   type Opportunity,
+  type RelinkConfig,
   type ScoutConfig,
   type ScoutRun,
 } from "@/lib/api";
+
+// --- re-linking schedule (M6 / Phase 12.3) ---
+export function useRelinkConfig(businessId: string) {
+  return useQuery({
+    queryKey: ["relinkConfig", businessId],
+    queryFn: () => relinkApi.get(businessId),
+    enabled: !!businessId,
+  });
+}
+
+export function useUpdateRelink(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Partial<Pick<RelinkConfig, "enabled" | "cadence">>) =>
+      relinkApi.update(businessId, data),
+    onSuccess: (data) => qc.setQueryData(["relinkConfig", businessId], data),
+  });
+}
+
+export function useRunRelink(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => relinkApi.run(businessId),
+    // Results land async; refetch the config shortly so last_found updates.
+    onSuccess: () =>
+      setTimeout(
+        () => qc.invalidateQueries({ queryKey: ["relinkConfig", businessId] }),
+        4000
+      ),
+  });
+}
 
 export function useScoutConfig(businessId: string) {
   return useQuery({

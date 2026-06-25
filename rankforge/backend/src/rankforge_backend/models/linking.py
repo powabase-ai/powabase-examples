@@ -1,6 +1,7 @@
-"""Internal-link suggestion schemas (M6 / Phase 12.1)."""
+"""Internal-link suggestion schemas (M6 / Phase 12.1) + re-link schedule (12.3)."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -17,3 +18,18 @@ class LinkSuggestion(BaseModel):
     reason: str | None = None
     status: str
     created_at: datetime | None = None
+
+
+class RelinkConfig(BaseModel):
+    business_id: UUID
+    enabled: bool
+    cadence: str
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+    last_found: int = 0
+    updated_at: datetime | None = None
+
+
+class RelinkConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    cadence: Literal["weekly", "monthly"] | None = None

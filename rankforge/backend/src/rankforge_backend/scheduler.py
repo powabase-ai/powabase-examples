@@ -7,12 +7,14 @@ started in the app lifespan and only when a DB + Powabase client are configured,
 so the hermetic test app never starts it.
 """
 
+import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .db import Database
 from .powabase import PowabaseClient
+from .services import relink as relink_svc
 from .services import scouts as scout_svc
 from .tasks import spawn
 
@@ -27,6 +29,7 @@ class ScoutScheduler:
         self._pb = pb
         self._sched = AsyncIOScheduler()
         self._running: set = set()
+        self._relinking: set = set()
 
     def start(self) -> None:
         self._sched.add_job(
@@ -52,7 +55,7 @@ class ScoutScheduler:
             due = scout_svc.due_configs(self._db)
         except Exception:  # noqa: BLE001
             log.exception("scout tick: failed to query due configs")
-            return
+            due = []
         for cfg in due:
             bid = cfg["business_id"]
             if bid in self._running:
@@ -60,6 +63,19 @@ class ScoutScheduler:
             self._running.add(bid)
             # Capped + tracked by the shared task runner (global concurrency cap).
             spawn(self._run(bid))
+
+        # Re-linking maintenance shares the same tick (its own due-check + cadence).
+        try:
+            due_relink = relink_svc.due_configs(self._db)
+        except Exception:  # noqa: BLE001
+            log.exception("relink tick: failed to query due configs")
+            return
+        for cfg in due_relink:
+            bid = cfg["business_id"]
+            if bid in self._relinking:
+                continue
+            self._relinking.add(bid)
+            spawn(self._run_relink(bid))
 
     async def _run(self, business_id) -> None:
         try:
@@ -70,3 +86,13 @@ class ScoutScheduler:
             log.exception("scout run failed for %s", business_id)
         finally:
             self._running.discard(business_id)
+
+    async def _run_relink(self, business_id) -> None:
+        # run_relink is sync (pure DB) — run it off the event loop so a big library
+        # doesn't block the scheduler/API.
+        try:
+            await asyncio.to_thread(relink_svc.run_relink, self._db, business_id)
+        except Exception:  # noqa: BLE001
+            log.exception("relink run failed for %s", business_id)
+        finally:
+            self._relinking.discard(business_id)

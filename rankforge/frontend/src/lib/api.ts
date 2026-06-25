@@ -509,6 +509,35 @@ export interface LinkSuggestion {
   created_at?: string | null;
 }
 
+/** Per-brand schedule for the monthly re-linking scout (M6 / Phase 12.3). */
+export interface RelinkConfig {
+  business_id: string;
+  enabled: boolean;
+  cadence: "weekly" | "monthly";
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  last_found: number;
+  updated_at?: string | null;
+}
+
+export const relinkApi = {
+  get: (businessId: string) =>
+    request<RelinkConfig>(`/api/business-profiles/${businessId}/relink`),
+  update: (
+    businessId: string,
+    body: { enabled?: boolean; cadence?: "weekly" | "monthly" }
+  ) =>
+    request<RelinkConfig>(`/api/business-profiles/${businessId}/relink`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  run: (businessId: string) =>
+    request<{ status: string }>(
+      `/api/business-profiles/${businessId}/relink/run`,
+      { method: "POST" }
+    ),
+};
+
 // --- Auth / membership ---
 export type Role = "writer" | "editor" | "admin";
 
