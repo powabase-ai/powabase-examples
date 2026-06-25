@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  AlertTriangle,
   CheckCircle2,
   ExternalLink,
   Eye,
@@ -383,6 +384,7 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
   }
 
   const uploadDisabled = upload.isPending || running;
+  const failed = data?.progress?.phase === "failed";
 
   return (
     <Card className="mt-6">
@@ -404,9 +406,22 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
               {data?.progress?.message ?? "Ingesting brand materials…"}
             </div>
           </div>
-        ) : data?.kb_ready ? (
+        ) : failed ? (
+          <div className="flex items-start gap-2.5 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2.5">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
+            <div className="min-w-0 text-sm">
+              <span className="font-medium text-destructive">
+                Last ingest didn&apos;t finish.
+              </span>{" "}
+              <span className="text-muted-foreground">
+                {data?.progress?.message ?? "Please try again."}
+              </span>
+            </div>
+          </div>
+        ) : sources.length > 0 ? (
           <div className="inline-flex items-center gap-1.5 text-xs text-[rgb(var(--success))]">
-            <CheckCircle2 className="size-3.5" /> Materials KB is ready
+            <CheckCircle2 className="size-3.5" /> Materials KB is ready —{" "}
+            {sources.length} page{sources.length === 1 ? "" : "s"}
           </div>
         ) : null}
 

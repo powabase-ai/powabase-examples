@@ -124,6 +124,20 @@ def _track_source(
         )
 
 
+def _reason(e: Exception) -> str:
+    """A short, UI-safe failure reason. Prefers a Powabase API body's `error`
+    message (e.g. 'URL import is currently unavailable'), else the exception text,
+    capped so the progress banner stays readable."""
+    if isinstance(e, PowabaseError):
+        body = e.body if isinstance(e.body, dict) else {}
+        msg = body.get("error") or body.get("message") or str(e.body) or str(e)
+        msg = f"{msg} (HTTP {e.status_code})"
+    else:
+        msg = str(e) or e.__class__.__name__
+    msg = " ".join(msg.split())  # collapse whitespace/newlines
+    return msg[:160] + ("…" if len(msg) > 160 else "")
+
+
 def _set_progress(
     db: Database, business_id: UUID, phase: str, message: str, **extra: Any
 ) -> None:
@@ -313,11 +327,11 @@ async def ingest(
             db, business_id, "done",
             f"{n} brand page{'' if n == 1 else 's'} indexed.",
         )
-    except Exception:  # noqa: BLE001 — surface a safe failure on the brand row
+    except Exception as e:  # noqa: BLE001 — surface a safe failure on the brand row
         log.exception("brand-materials ingest failed for business %s", business_id)
         _set_progress(
             db, business_id, "failed",
-            "Brand-materials ingest failed — see server logs.",
+            f"Couldn't finish ingest: {_reason(e)}",
         )
 
 
@@ -412,13 +426,13 @@ async def ingest_file(
             db, business_id, "done",
             f"{file_name} added — {n} brand page{'' if n == 1 else 's'} total.",
         )
-    except Exception:  # noqa: BLE001 — surface a safe failure on the brand row
+    except Exception as e:  # noqa: BLE001 — surface a safe failure on the brand row
         log.exception(
             "brand-materials file ingest failed for business %s", business_id
         )
         _set_progress(
             db, business_id, "failed",
-            "Brand-materials upload failed — see server logs.",
+            f"Couldn't finish upload: {_reason(e)}",
         )
 
 
