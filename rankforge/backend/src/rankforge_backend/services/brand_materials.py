@@ -13,9 +13,12 @@ the data access the routes need; generation consumes the KB elsewhere.
 
 import asyncio
 import logging
+import re
 from typing import Any
+from urllib.parse import urljoin, urlparse
 from uuid import UUID
 
+import httpx
 from psycopg.types.json import Json
 
 from ..db import Database
@@ -148,6 +151,98 @@ def _set_progress(
     )
 
 
+# --- crawl preview (read-only discovery, no import) ---
+_HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+_LOC_RE = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.IGNORECASE)
+# Asset/non-content extensions and path fragments to drop from discovery so the
+# preview lists real pages, not bundled JS/CSS/fonts/images.
+_ASSET_EXT = (
+    ".css", ".js", ".mjs", ".map", ".json", ".xml", ".rss", ".atom",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".zip", ".gz", ".mp4", ".webm", ".mp3", ".pdf",
+)
+_ASSET_SEGMENTS = ("/_next/", "/static/", "/assets/", "/_nuxt/", "/cdn-cgi/")
+
+
+def _is_asset(path: str) -> bool:
+    low = path.lower()
+    return low.endswith(_ASSET_EXT) or any(seg in low for seg in _ASSET_SEGMENTS)
+
+
+def _registrable(host: str) -> str:
+    """Best-effort eTLD+1 (last two labels). Good enough to keep a crawl on the
+    brand's own domain while allowing its subdomains (docs./app./blog.)."""
+    parts = (host or "").lower().split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (host or "")
+
+
+def discover_pages(root_url: str, max_pages: int = DEFAULT_MAX_PAGES) -> list[str]:
+    """Shallow, READ-ONLY page discovery for the crawl preview — collect same-site
+    links (including subdomains) from the root page and its sitemap, so the user can
+    see which subdomains/pages were found and confirm BEFORE anything is imported.
+
+    Best-effort: returns [] on failure. Nothing here touches Powabase or the DB; the
+    actual import still runs on the platform once the user confirms a URL set.
+    """
+    raw = (root_url or "").strip()
+    if not raw:
+        return []
+    if not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+    base = urlparse(raw)
+    site = _registrable(base.netloc)
+    found: dict[str, None] = {}
+
+    def _add(u: str) -> None:
+        u = (u or "").split("#")[0].strip()
+        if not u:
+            return
+        p = urlparse(u)
+        if p.scheme not in ("http", "https") or _registrable(p.netloc) != site:
+            return
+        if _is_asset(p.path):
+            return
+        found.setdefault(u.rstrip("/") or u, None)
+
+    _add(raw)
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as c:
+            try:
+                r = c.get(raw)
+                r.raise_for_status()
+                for href in _HREF_RE.findall(r.text):
+                    _add(urljoin(raw, href))
+            except httpx.HTTPError:
+                pass
+            # sitemap (one level of sitemap-index), bounded
+            if len(found) < max_pages:
+                try:
+                    sm = c.get(f"{base.scheme}://{base.netloc}/sitemap.xml")
+                    if sm.status_code < 400:
+                        locs = _LOC_RE.findall(sm.text)
+                        children = [u for u in locs if u.lower().endswith(".xml")]
+                        for u in locs:
+                            if not u.lower().endswith(".xml"):
+                                _add(u)
+                        for child in children[:5]:
+                            if len(found) >= max_pages:
+                                break
+                            try:
+                                cr = c.get(child)
+                                if cr.status_code < 400:
+                                    for loc in _LOC_RE.findall(cr.text):
+                                        _add(loc)
+                            except httpx.HTTPError:
+                                continue
+                except httpx.HTTPError:
+                    pass
+    except Exception:  # noqa: BLE001 — discovery must never raise into the route
+        log.exception("discover_pages failed for %s", raw)
+
+    return sorted(found)[:max_pages]
+
+
 # --- page discovery (delegated to the platform) ---
 # What the UI sends; "sitemap" defaults to the brand's configured sitemap_url.
 _DISCOVERY_MODES = ("sitemap", "crawl", "urls")
@@ -163,6 +258,7 @@ async def _discover_and_track(
     url: str | None,
     extra_urls: tuple[str, ...],
     max_pages: int,
+    origin: str | None = None,
 ) -> int:
     """Discover the brand's pages via the platform's import-url (crawl/sitemap/urls),
     importing each as a Source, and track them as brand_sources rows. Returns the
@@ -173,7 +269,7 @@ async def _discover_and_track(
             return 0
         _set_progress(db, business_id, "scraping", "Crawling your site for pages…")
         sources = await client.import_urls("crawl", url=root, max_pages=max_pages)
-        origin = "crawl"
+        row_origin = origin or "crawl"
     elif mode == "urls":
         urls = [u.strip() for u in extra_urls if u and u.strip()]
         if not urls:
@@ -184,30 +280,38 @@ async def _discover_and_track(
             f"Importing {n} page{'' if n == 1 else 's'}…",
         )
         sources = await client.import_urls("urls", urls=urls, max_pages=max_pages)
-        origin = "manual"
+        row_origin = origin or "manual"
     else:  # sitemap
         sm = (url or (brand or {}).get("sitemap_url") or "").strip()
         if not sm:
             return 0
         _set_progress(db, business_id, "scraping", "Reading your sitemap…")
         sources = await client.import_urls("sitemap", url=sm, max_pages=max_pages)
-        origin = "sitemap"
+        row_origin = origin or "sitemap"
 
     for s in sources:
         _track_source(
             db, business_id,
             url=s.get("url") or s.get("name") or "",
             source_id=s.get("id"),
-            origin=origin,
+            origin=row_origin,
         )
     return len(sources)
 
 
 # --- the background worker ---
 async def _import_one(
-    client: PowabaseClient, db: Database, kb_id: str, row: dict[str, Any]
+    client: PowabaseClient,
+    db: Database,
+    kb_id: str,
+    row: dict[str, Any],
+    already_indexed: set[str],
 ) -> None:
-    """Import one brand page as a Source, wait for extraction, add to the KB."""
+    """Import one brand page as a Source, wait for extraction, add to the KB.
+
+    Skips the KB add for a source already indexed in this KB (`already_indexed`),
+    so re-ingesting duplicate material doesn't trigger a wasteful re-index.
+    """
     row_id = row["id"]
     source_id = row.get("source_id")
     if not source_id:
@@ -243,7 +347,9 @@ async def _import_one(
         "title = coalesce(%s, title) where id = %s",
         (status, title, row_id),
     )
-    if status == "extracted":
+    if status == "extracted" and source_id not in already_indexed:
+        # Powabase dedups Source content by hash (no re-extraction); we additionally
+        # skip re-indexing a source that's already in this KB.
         try:
             await client.add_source_to_kb(kb_id, source_id)
         except Exception:  # noqa: BLE001 — a source that won't index shouldn't fail all
@@ -259,12 +365,14 @@ async def ingest(
     url: str | None = None,
     extra_urls: tuple[str, ...] = (),
     max_pages: int = DEFAULT_MAX_PAGES,
+    origin: str | None = None,
 ) -> None:
     """Build/refresh the brand's materials KB.
 
     `mode` picks how pages are discovered (crawl / sitemap / urls); discovery +
     import run on the platform. Then every tracked page that isn't indexed yet is
-    polled to extraction and added to the KB.
+    polled to extraction and added to the KB. `origin` overrides the row provenance
+    tag (used when ingesting crawl-discovered URLs the user confirmed).
     """
     try:
         _set_progress(db, business_id, "starting", "Gathering brand pages…")
@@ -274,7 +382,17 @@ async def ingest(
         await _discover_and_track(
             client, db, business_id, brand,
             mode=mode, url=url, extra_urls=extra_urls, max_pages=max_pages,
+            origin=origin,
         )
+
+        # Sources already indexed in this KB — skip re-indexing them (dedup).
+        existing = await client.list_kb_sources(kb_id)
+        e_items = existing.get("items", []) if isinstance(existing, dict) else []
+        already_indexed = {
+            i.get("source_id")
+            for i in e_items
+            if i.get("index_status") == "indexed" and i.get("source_id")
+        }
 
         # Everything not yet successfully indexed: never imported, or import/extract
         # didn't reach 'extracted'.
@@ -297,7 +415,7 @@ async def ingest(
         async def _bounded(row: dict[str, Any]) -> None:
             nonlocal done
             async with sem:
-                await _import_one(client, db, kb_id, row)
+                await _import_one(client, db, kb_id, row, already_indexed)
             done += 1  # advisory live progress (racy writes are fine)
             try:
                 await asyncio.to_thread(

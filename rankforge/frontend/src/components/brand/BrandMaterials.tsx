@@ -27,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   useBrandMaterials,
+  useDiscoverMaterials,
   useIngestMaterials,
   useMaterialContent,
   useRemoveMaterial,
@@ -37,6 +38,7 @@ import {
   canApprove,
   materialsRunning,
   type BrandMaterialSource,
+  type MaterialsDiscovery,
   type MaterialsIngestRequest,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -223,28 +225,27 @@ function AddPagesDialog({
   disabled: boolean;
 }) {
   const ingest = useIngestMaterials(brandId);
+  const discover = useDiscoverMaterials(brandId);
   const [mode, setMode] = React.useState<IngestMode>("sitemap");
   const [url, setUrl] = React.useState("");
   const [urlsText, setUrlsText] = React.useState("");
   const [maxPages, setMaxPages] = React.useState(30);
+  // Crawl preview: discovered pages (grouped by subdomain) + which hosts to keep.
+  const [found, setFound] = React.useState<MaterialsDiscovery | null>(null);
+  const [keepHosts, setKeepHosts] = React.useState<Set<string>>(new Set());
 
-  function submit() {
-    const body: MaterialsIngestRequest = { mode, max_pages: maxPages };
-    if (mode === "crawl") {
-      if (!url.trim()) return toast.error("Enter a site URL to crawl");
-      body.url = url.trim();
-    } else if (mode === "sitemap") {
-      if (url.trim()) body.url = url.trim(); // else backend uses the saved sitemap
-    } else {
-      const list = parseUrls(urlsText);
-      if (!list.length) return toast.error("Paste at least one URL");
-      body.urls = list;
-    }
+  function pickMode(m: IngestMode) {
+    setMode(m);
+    setFound(null); // leaving/entering crawl resets any preview
+  }
+
+  function startIngest(body: MaterialsIngestRequest, label: string) {
     ingest.mutate(body, {
       onSuccess: () => {
-        toast.success("Ingesting brand materials…");
+        toast.success(label);
         setUrl("");
         setUrlsText("");
+        setFound(null);
         onOpenChange(false);
       },
       onError: (e) =>
@@ -252,7 +253,53 @@ function AddPagesDialog({
     });
   }
 
+  function runDiscover() {
+    if (!url.trim()) return toast.error("Enter a site URL to crawl");
+    discover.mutate(
+      { url: url.trim(), maxPages },
+      {
+        onSuccess: (res) => {
+          if (!res.total) {
+            toast.error("No pages found — try a different URL.");
+            return;
+          }
+          setFound(res);
+          setKeepHosts(new Set(res.hosts.map((h) => h.host)));
+        },
+        onError: (e) =>
+          toast.error(e instanceof Error ? e.message : "Discovery failed"),
+      }
+    );
+  }
+
+  function submit() {
+    if (mode === "sitemap") {
+      const body: MaterialsIngestRequest = { mode, max_pages: maxPages };
+      if (url.trim()) body.url = url.trim(); // else backend uses the saved sitemap
+      startIngest(body, "Ingesting brand materials…");
+    } else {
+      const list = parseUrls(urlsText);
+      if (!list.length) return toast.error("Paste at least one URL");
+      startIngest({ mode: "urls", urls: list }, "Ingesting brand materials…");
+    }
+  }
+
+  function confirmCrawl() {
+    const urls = (found?.hosts ?? [])
+      .filter((h) => keepHosts.has(h.host))
+      .flatMap((h) => h.urls);
+    if (!urls.length) return toast.error("Select at least one subdomain");
+    // Ingest the confirmed pages, tagged as crawl provenance.
+    startIngest(
+      { mode: "urls", urls, origin: "crawl", max_pages: maxPages },
+      `Ingesting ${urls.length} page${urls.length === 1 ? "" : "s"}…`
+    );
+  }
+
   const urlCount = parseUrls(urlsText).length;
+  const selectedCount = (found?.hosts ?? [])
+    .filter((h) => keepHosts.has(h.host))
+    .reduce((n, h) => n + h.urls.length, 0);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -270,7 +317,7 @@ function AddPagesDialog({
             <button
               key={m.key}
               type="button"
-              onClick={() => setMode(m.key)}
+              onClick={() => pickMode(m.key)}
               className={cn(
                 "flex-1 rounded px-2 py-1.5 text-xs font-medium transition-colors",
                 mode === m.key
@@ -295,7 +342,9 @@ function AddPagesDialog({
             </p>
           </div>
         )}
-        {mode === "crawl" && (
+
+        {/* crawl: step 1 = enter URL & discover; step 2 = confirm subdomains */}
+        {mode === "crawl" && !found && (
           <div className="space-y-1.5">
             <Input
               value={url}
@@ -303,11 +352,47 @@ function AddPagesDialog({
               placeholder="https://yoursite.com"
             />
             <p className="text-xs text-muted-foreground">
-              No sitemap needed — we crawl from this page to discover related
-              pages.
+              No sitemap needed — we&apos;ll find pages across your domain and
+              subdomains, then let you confirm before importing.
             </p>
           </div>
         )}
+        {mode === "crawl" && found && (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              Found {found.total} page{found.total === 1 ? "" : "s"} across{" "}
+              {found.hosts.length} subdomain
+              {found.hosts.length === 1 ? "" : "s"}. Choose what to ingest:
+            </p>
+            <ul className="max-h-56 space-y-0.5 overflow-y-auto rounded-md border border-border p-1">
+              {found.hosts.map((h) => (
+                <li key={h.host}>
+                  <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-secondary">
+                    <input
+                      type="checkbox"
+                      checked={keepHosts.has(h.host)}
+                      onChange={(e) =>
+                        setKeepHosts((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(h.host);
+                          else next.delete(h.host);
+                          return next;
+                        })
+                      }
+                    />
+                    <span className="min-w-0 flex-1 truncate font-medium">
+                      {h.host}
+                    </span>
+                    <span className="shrink-0 font-data text-xs text-muted-foreground">
+                      {h.urls.length}
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {mode === "urls" && (
           <div className="space-y-1.5">
             <Textarea
@@ -323,7 +408,8 @@ function AddPagesDialog({
           </div>
         )}
 
-        {mode !== "urls" && (
+        {/* page cap for discovery modes (hidden once a crawl preview is shown) */}
+        {mode !== "urls" && !(mode === "crawl" && found) && (
           <label className="flex items-center justify-between gap-3 text-sm">
             <span className="text-muted-foreground">Max pages</span>
             <Input
@@ -340,18 +426,60 @@ function AddPagesDialog({
         )}
 
         <DialogFooter>
-          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            variant="gold"
-            size="sm"
-            onClick={submit}
-            disabled={ingest.isPending || disabled}
-          >
-            {ingest.isPending && <Loader2 className="animate-spin" />}
-            Start ingest
-          </Button>
+          {mode === "crawl" && found ? (
+            <>
+              <Button variant="outline" size="sm" onClick={() => setFound(null)}>
+                Back
+              </Button>
+              <Button
+                variant="gold"
+                size="sm"
+                onClick={confirmCrawl}
+                disabled={ingest.isPending || disabled || selectedCount === 0}
+              >
+                {ingest.isPending && <Loader2 className="animate-spin" />}
+                Ingest {selectedCount} page{selectedCount === 1 ? "" : "s"}
+              </Button>
+            </>
+          ) : mode === "crawl" ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onOpenChange(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="gold"
+                size="sm"
+                onClick={runDiscover}
+                disabled={discover.isPending || disabled}
+              >
+                {discover.isPending && <Loader2 className="animate-spin" />}
+                Discover pages
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onOpenChange(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="gold"
+                size="sm"
+                onClick={submit}
+                disabled={ingest.isPending || disabled}
+              >
+                {ingest.isPending && <Loader2 className="animate-spin" />}
+                Start ingest
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -79,6 +79,67 @@ async def test_discover_noops_when_nothing_to_discover():
     client.import_urls.assert_not_awaited()
 
 
+# --- discover_pages (crawl preview, unit) ---
+def test_discover_pages_keeps_same_site_and_subdomains(monkeypatch):
+    root = "https://brand.example"
+    html = (
+        '<a href="/about">a</a>'
+        '<a href="https://docs.brand.example/guide">d</a>'
+        '<a href="https://other.com/x">o</a>'
+        '<a href="https://brand.example/pricing">p</a>'
+    )
+
+    class Resp:
+        def __init__(self, text, code=200):
+            self.text = text
+            self.status_code = code
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            return Resp(html) if url == root else Resp("", 404)  # sitemap 404
+
+    monkeypatch.setattr(svc.httpx, "Client", FakeClient)
+    out = svc.discover_pages(root, 50)
+    assert "https://brand.example/about" in out
+    assert "https://docs.brand.example/guide" in out  # subdomain kept
+    assert "https://brand.example/pricing" in out
+    assert all("other.com" not in u for u in out)  # cross-site dropped
+
+
+def test_discover_route_groups_by_host(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "discover_pages",
+        lambda url, max_pages: [
+            "https://brand.example/a",
+            "https://docs.brand.example/x",
+            "https://brand.example/b",
+        ],
+    )
+    resp = _client().post(
+        f"/api/business-profiles/{BID}/materials/discover",
+        json={"url": "https://brand.example"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 3
+    hosts = {h["host"]: h["urls"] for h in body["hosts"]}
+    assert set(hosts) == {"brand.example", "docs.brand.example"}
+    assert len(hosts["brand.example"]) == 2
+
+
 # --- _track_source SQL shape (unit) ---
 def test_track_source_inserts_with_source_id():
     db = MagicMock()

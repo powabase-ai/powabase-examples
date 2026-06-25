@@ -5,6 +5,8 @@ and imports each as a Powabase Source (slow), so the POST spawns a background
 worker and returns 202; the GET polls `materials_progress` + the source list.
 """
 
+import asyncio
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import (
@@ -18,7 +20,13 @@ from fastapi import (
 
 from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
-from ..models.materials import MaterialsIngest, MaterialsView
+from ..models.materials import (
+    DiscoveredHost,
+    MaterialsDiscover,
+    MaterialsDiscovery,
+    MaterialsIngest,
+    MaterialsView,
+)
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
 from ..ratelimit import rate_limit
@@ -55,9 +63,36 @@ async def ingest_materials(
             url=payload.url,
             extra_urls=tuple(payload.urls),
             max_pages=payload.max_pages or svc.DEFAULT_MAX_PAGES,
+            origin=payload.origin,
         )
     )
     return {"status": "started"}
+
+
+@router.post(
+    "/{business_id}/materials/discover",
+    response_model=MaterialsDiscovery,
+    dependencies=[Depends(rate_limit("materials:ingest"))],
+)
+async def discover_materials(
+    business_id: UUID,
+    payload: MaterialsDiscover,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Preview a crawl: discover the brand's pages (grouped by subdomain) WITHOUT
+    importing anything, so the user can confirm what to ingest. Read-only."""
+    assert_brand_access(db, business_id, user)
+    urls = await asyncio.to_thread(
+        svc.discover_pages, payload.url, payload.max_pages or svc.DEFAULT_MAX_PAGES
+    )
+    groups: dict[str, list[str]] = {}
+    for u in urls:
+        groups.setdefault(urlparse(u).netloc, []).append(u)
+    hosts = [
+        DiscoveredHost(host=h, urls=groups[h]) for h in sorted(groups)
+    ]
+    return MaterialsDiscovery(hosts=hosts, total=len(urls))
 
 
 # Reject oversized uploads before buffering them into a Source (413).

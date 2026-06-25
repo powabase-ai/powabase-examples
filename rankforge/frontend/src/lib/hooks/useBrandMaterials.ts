@@ -32,6 +32,14 @@ export function useIngestMaterials(businessId: string) {
   });
 }
 
+/** Crawl preview: discover pages (grouped by subdomain) without importing. */
+export function useDiscoverMaterials(businessId: string) {
+  return useMutation({
+    mutationFn: (vars: { url: string; maxPages?: number }) =>
+      materialsApi.discover(businessId, vars.url, vars.maxPages),
+  });
+}
+
 export function useUploadMaterialFile(businessId: string) {
   const qc = useQueryClient();
   return useMutation({

@@ -221,6 +221,17 @@ export interface MaterialsIngestRequest {
   url?: string;
   urls?: string[];
   max_pages?: number;
+  origin?: "sitemap" | "manual" | "crawl";
+}
+
+/** Crawl preview — pages discovered (grouped by subdomain) without importing. */
+export interface DiscoveredHost {
+  host: string;
+  urls: string[];
+}
+export interface MaterialsDiscovery {
+  hosts: DiscoveredHost[];
+  total: number;
 }
 
 export interface MaterialsProgress {
@@ -252,6 +263,11 @@ export const materialsApi = {
     request<{ status: string }>(
       `/api/business-profiles/${businessId}/materials/ingest`,
       { method: "POST", body: JSON.stringify(body) }
+    ),
+  discover: (businessId: string, url: string, maxPages?: number) =>
+    request<MaterialsDiscovery>(
+      `/api/business-profiles/${businessId}/materials/discover`,
+      { method: "POST", body: JSON.stringify({ url, max_pages: maxPages }) }
     ),
   remove: (businessId: string, rowId: string) =>
     request<void>(
