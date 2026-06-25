@@ -143,9 +143,11 @@ async def ensure_writer_agent(client: PowabaseClient) -> str:
         name=WRITER_AGENT_NAME,
         model=WRITER_MODEL,
         system_prompt=_SYSTEM_PROMPT,
-        # max_tokens raised: one pass now emits the WHOLE article (~2–3k words), not a
-        # single ~400-word section, so the default output cap would truncate it.
-        settings={"temperature": 0.4, "max_tokens": 8000},
+        # max_tokens is the OUTPUT ceiling (input/grounding is separate, on the 200k
+        # context window). One pass emits the whole article — a generous ceiling so a
+        # long pillar piece is never truncated; the model still writes to the brief's
+        # target_word_count and stops, so this costs nothing extra in practice.
+        settings={"temperature": 0.4, "max_tokens": 32000},
     )
 
 

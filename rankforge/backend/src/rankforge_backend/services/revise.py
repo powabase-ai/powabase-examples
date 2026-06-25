@@ -85,7 +85,9 @@ async def ensure_reviser_agent(client: PowabaseClient) -> str:
         name=REVISER_AGENT_NAME,
         model=REVISER_MODEL,
         system_prompt=_SYSTEM,
-        settings={"temperature": 0.2},
+        # whole-article rewrites — a generous OUTPUT ceiling so a long article isn't
+        # truncated (input is separate, on the context window). See ensure_writer_agent.
+        settings={"temperature": 0.2, "max_tokens": 32000},
     )
 
 

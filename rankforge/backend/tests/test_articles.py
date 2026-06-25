@@ -90,7 +90,7 @@ async def test_ensure_writer_agent_passes_system_prompt_and_budget(monkeypatch):
     monkeypatch.setattr(svc, "ensure_agent", fake_ensure_agent)
     assert await svc.ensure_writer_agent(MagicMock()) == "writer-id"
     assert captured.get("system_prompt")  # the bug that slipped through
-    assert captured["settings"]["max_tokens"] == 8000
+    assert captured["settings"]["max_tokens"] == 32000
 
 
 def _brand_db() -> MagicMock:
