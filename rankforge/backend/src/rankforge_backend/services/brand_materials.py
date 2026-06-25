@@ -216,7 +216,7 @@ def _is_public_host(host: str) -> bool:
         try:
             addr = ipaddress.ip_address(info[4][0])
         except ValueError:
-            continue
+            return False  # fail closed: can't classify it → don't fetch it
         if not addr.is_global:  # rejects if ANY resolved address is non-public
             return False
     return True
