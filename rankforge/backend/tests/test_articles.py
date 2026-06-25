@@ -53,6 +53,31 @@ def test_outline_text_marks_sections_and_subsections():
     assert "Pricing  (## section)" in out
 
 
+async def test_gather_grounding_gives_each_query_a_fair_share(monkeypatch):
+    """Every query (incl. section-heading queries) must contribute — a broad early
+    query must NOT fill the budget and starve later sections of grounding."""
+    from collections import Counter
+
+    async def fake_search(client, kb, q, **kw):
+        return [
+            {"chunk_id": f"{q}-{i}", "source_id": f"{q}-s{i}", "text": q}
+            for i in range(10)
+        ]
+
+    monkeypatch.setattr(svc.grounding, "search", fake_search)
+    out = await svc._gather_grounding(
+        MagicMock(), "kb", ["A", "B", "C"], per_query=2
+    )
+    cnt = Counter(c["text"] for c in out)
+    assert set(cnt) == {"A", "B", "C"}  # no query starved
+    assert all(v <= 2 for v in cnt.values())  # per_query respected
+
+
+async def test_gather_grounding_empty_without_kb_or_queries():
+    assert await svc._gather_grounding(MagicMock(), None, ["q"]) == []
+    assert await svc._gather_grounding(MagicMock(), "kb", [None, ""]) == []
+
+
 async def test_ensure_writer_agent_passes_system_prompt_and_budget(monkeypatch):
     """Regression: the writer agent must carry its system prompt (and a raised
     max_tokens for whole-article output) — dropping either breaks all generation."""

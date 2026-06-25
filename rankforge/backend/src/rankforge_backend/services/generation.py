@@ -1,10 +1,11 @@
 """Stage C — generation. Turns a brief into a grounded long-form draft.
 
 Backend-orchestrated (async, status-tracked): ground (brand KB from research
-sources) -> outline (from the brief) -> per-section grounded drafting (KB retrieval
-injected as context, cited inline) -> assemble -> store as a draft article.
+sources) -> broad grounding retrieval -> whole-article drafting in one streamed pass
+(retrieval injected as context, cited inline) -> store as a draft article.
 """
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -34,8 +35,8 @@ _ACTIVE_GEN_STATUSES = (
 )
 
 WRITER_AGENT_NAME = "rankforge-writer"
-# Long-form prose IS the product — top model. Keep temperature for natural variety
-# (per-section calls, so we avoid stacking extended-thinking latency ~10×/article).
+# Long-form prose IS the product — top model. Temperature (not extended thinking) for
+# natural variety: one big streamed draft, where thinking would add the most latency.
 WRITER_MODEL = "claude-opus-4-7"
 
 _SYSTEM_PROMPT = """\
@@ -275,36 +276,46 @@ async def _gather_grounding(
     queries: list[str | None],
     *,
     source_ids: list[str] | None = None,
-    top_k: int = 12,
-    per_source: int = 3,
-    limit: int = 40,
+    top_k: int = 8,
+    per_source: int = 2,
+    per_query: int = 3,
+    limit: int = 60,
 ) -> list[dict[str, Any]]:
     """Retrieve grounding across the WHOLE article's scope by running several queries
-    (primary keyword, topic, secondary keywords, section headings), deduped by chunk
-    and capped per source for domain variety — so the single-pass writer has evidence
-    for every section, not just one query's worth."""
-    if not kb_id:
+    (primary keyword, topic, secondary keywords, section headings) CONCURRENTLY, then
+    giving each query a fair share (`per_query`) of the result — so a broad early
+    query can't fill the budget and starve the heading queries (which is what leaves
+    later sections with no evidence). Deduped by chunk; capped per source for variety."""
+    qs = [q for q in queries if q]
+    if not kb_id or not qs:
         return []
+    results = await asyncio.gather(
+        *(
+            grounding.search(client, kb_id, q, top_k=top_k, source_ids=source_ids)
+            for q in qs
+        )
+    )
     seen: set[str] = set()
     per: dict[Any, int] = {}
     out: list[dict[str, Any]] = []
-    for q in queries:
-        if not q:
-            continue
-        for c in await grounding.search(
-            client, kb_id, q, top_k=top_k, source_ids=source_ids
-        ):
+    for res in results:  # one list per query — each contributes up to `per_query`
+        got = 0
+        for c in res:
+            if len(out) >= limit:
+                return out
+            if got >= per_query:
+                break
             cid, sid = c.get("chunk_id"), c.get("source_id")
             if cid and cid in seen:
                 continue
-            if per.get(sid, 0) >= per_source:
+            if sid and per.get(sid, 0) >= per_source:  # only cap real source ids
                 continue
             if cid:
                 seen.add(cid)
-            per[sid] = per.get(sid, 0) + 1
+            if sid:
+                per[sid] = per.get(sid, 0) + 1
             out.append(c)
-            if len(out) >= limit:
-                return out
+            got += 1
     return out
 
 
@@ -341,17 +352,21 @@ async def _draft_article(
         for h in headings
         if h.lower().lstrip().startswith("h2") and ":" in h
     ]
+    # Bound the query set so the fan-out stays sane: primary + topic + a few
+    # secondaries + every H2 (capped), so each section topic gets its own retrieval.
     queries: list[str | None] = [
         ctx.get("primary_keyword"),
         ctx["topic"],
-        *(ctx.get("secondary_keywords") or []),
-        *h2s,
+        *(ctx.get("secondary_keywords") or [])[:5],
+        *h2s[:12],
     ]
     # Scope research to this article's own sources; pull brand materials brand-wide.
     research = await _gather_grounding(
         client, kb_id, queries, source_ids=source_ids
     )
-    brand = await _gather_grounding(client, materials_kb_id, queries, limit=24)
+    brand = await _gather_grounding(
+        client, materials_kb_id, queries, per_query=2, limit=30
+    )
 
     brand_block = ""
     if brand:
@@ -386,7 +401,13 @@ async def _draft_article(
     res = await client.run_agent_collect(agent_id, msg)
     if res.get("error"):
         raise RuntimeError(f"draft failed: {res['error']}")
-    return (res.get("content") or "").strip()
+    body = (res.get("content") or "").strip()
+    # A real article is thousands of chars. An empty/near-empty body (a refusal or a
+    # broken stream) would otherwise ship as a bare "# Title" stub — fail loudly so
+    # the task is marked failed and the user can retry, rather than producing junk.
+    if len(body) < 500:
+        raise RuntimeError(f"draft too short ({len(body)} chars) — empty or refused")
+    return body
 
 
 async def run_generation_task(
@@ -462,8 +483,10 @@ async def run_generation_task(
             materials_kb_id=materials_kb_id,
             materials_url_by_source=materials_url_by_source,
         )
-        # Prepend the canonical H1; strip a stray H1 the writer may have added anyway.
-        body = re.sub(r"^\s*#\s+[^\n]*\n+", "", body, count=1)
+        # Prepend the canonical H1. Strip ANY H1 line the writer emitted anyway
+        # (multiline — a stray H1 after a preamble line would otherwise leave the
+        # article with two titles). H2/H3 (`## `, `### `) are untouched.
+        body = re.sub(r"(?m)^[ \t]*#[ \t]+[^\n]*\n?", "", body).strip()
         content_md = f"# {title}\n\n{body}".strip()
         _update(
             db, article_id,
