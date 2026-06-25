@@ -1,6 +1,7 @@
 """Brand-materials schemas (M6) — the brand's own pages → a grounding KB."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -17,7 +18,17 @@ class BrandSource(BaseModel):
 
 
 class MaterialsIngest(BaseModel):
+    """How to discover the brand's pages.
+
+    - `sitemap`: parse `url` (or the brand's saved sitemap_url if omitted).
+    - `crawl`:   crawl from `url` to discover pages (for sites with no sitemap).
+    - `urls`:    import the exact `urls` list.
+    """
+
+    mode: Literal["sitemap", "crawl", "urls"] = "sitemap"
+    url: str | None = None
     urls: list[str] = Field(default_factory=list)
+    max_pages: int | None = Field(default=None, ge=1, le=200)
 
 
 class MaterialsView(BaseModel):

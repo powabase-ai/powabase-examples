@@ -5,8 +5,8 @@ import {
   CheckCircle2,
   ExternalLink,
   Eye,
-  Globe,
   Loader2,
+  Plus,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -17,9 +17,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   useBrandMaterials,
@@ -33,8 +36,22 @@ import {
   canApprove,
   materialsRunning,
   type BrandMaterialSource,
+  type MaterialsIngestRequest,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+type IngestMode = "sitemap" | "crawl" | "urls";
+
+const INGEST_MODES: { key: IngestMode; label: string }[] = [
+  { key: "sitemap", label: "Sitemap" },
+  { key: "crawl", label: "Crawl site" },
+  { key: "urls", label: "Paste URLs" },
+];
+
+// Powabase extracts these natively; mirror its supported set (PDF, Word, slides,
+// sheets, markdown/text, HTML).
+const UPLOAD_ACCEPT =
+  ".pdf,.doc,.docx,.md,.markdown,.txt,.rtf,.html,.htm,.pptx,.xlsx,.csv";
 
 /** Parse a comma/newline-separated blob into trimmed, non-empty URLs. */
 function parseUrls(raw: string): string[] {
@@ -193,31 +210,164 @@ function InspectDialog({
   );
 }
 
+function AddPagesDialog({
+  brandId,
+  open,
+  onOpenChange,
+  disabled,
+}: {
+  brandId: string;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  disabled: boolean;
+}) {
+  const ingest = useIngestMaterials(brandId);
+  const [mode, setMode] = React.useState<IngestMode>("sitemap");
+  const [url, setUrl] = React.useState("");
+  const [urlsText, setUrlsText] = React.useState("");
+  const [maxPages, setMaxPages] = React.useState(30);
+
+  function submit() {
+    const body: MaterialsIngestRequest = { mode, max_pages: maxPages };
+    if (mode === "crawl") {
+      if (!url.trim()) return toast.error("Enter a site URL to crawl");
+      body.url = url.trim();
+    } else if (mode === "sitemap") {
+      if (url.trim()) body.url = url.trim(); // else backend uses the saved sitemap
+    } else {
+      const list = parseUrls(urlsText);
+      if (!list.length) return toast.error("Paste at least one URL");
+      body.urls = list;
+    }
+    ingest.mutate(body, {
+      onSuccess: () => {
+        toast.success("Ingesting brand materials…");
+        setUrl("");
+        setUrlsText("");
+        onOpenChange(false);
+      },
+      onError: (e) =>
+        toast.error(e instanceof Error ? e.message : "Could not start ingest"),
+    });
+  }
+
+  const urlCount = parseUrls(urlsText).length;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Add brand pages</DialogTitle>
+          <DialogDescription>
+            Pull pages from your own site so drafts can describe and link to them.
+          </DialogDescription>
+        </DialogHeader>
+
+        {/* discovery mode */}
+        <div className="flex gap-1 rounded-md bg-secondary p-1">
+          {INGEST_MODES.map((m) => (
+            <button
+              key={m.key}
+              type="button"
+              onClick={() => setMode(m.key)}
+              className={cn(
+                "flex-1 rounded px-2 py-1.5 text-xs font-medium transition-colors",
+                mode === m.key
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "sitemap" && (
+          <div className="space-y-1.5">
+            <Input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://yoursite.com/sitemap.xml"
+            />
+            <p className="text-xs text-muted-foreground">
+              Leave blank to use the sitemap saved in Settings.
+            </p>
+          </div>
+        )}
+        {mode === "crawl" && (
+          <div className="space-y-1.5">
+            <Input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://yoursite.com"
+            />
+            <p className="text-xs text-muted-foreground">
+              No sitemap needed — we crawl from this page to discover related
+              pages.
+            </p>
+          </div>
+        )}
+        {mode === "urls" && (
+          <div className="space-y-1.5">
+            <Textarea
+              value={urlsText}
+              onChange={(e) => setUrlsText(e.target.value)}
+              placeholder="https://yoursite.com/about&#10;https://yoursite.com/docs/…"
+              className="min-h-[88px] font-data text-xs"
+            />
+            <p className="text-xs text-muted-foreground">
+              One per line or comma-separated.
+              {urlCount > 0 ? ` ${urlCount} URL${urlCount === 1 ? "" : "s"}.` : ""}
+            </p>
+          </div>
+        )}
+
+        {mode !== "urls" && (
+          <label className="flex items-center justify-between gap-3 text-sm">
+            <span className="text-muted-foreground">Max pages</span>
+            <Input
+              type="number"
+              min={1}
+              max={200}
+              value={maxPages}
+              onChange={(e) =>
+                setMaxPages(Math.max(1, Math.min(200, Number(e.target.value) || 1)))
+              }
+              className="w-24"
+            />
+          </label>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="gold"
+            size="sm"
+            onClick={submit}
+            disabled={ingest.isPending || disabled}
+          >
+            {ingest.isPending && <Loader2 className="animate-spin" />}
+            Start ingest
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function BrandMaterials({ brandId }: { brandId: string }) {
   const { profile } = useAuth();
   const canEdit = canApprove(profile?.role);
   const { data, isLoading } = useBrandMaterials(brandId);
-  const ingest = useIngestMaterials(brandId);
   const upload = useUploadMaterialFile(brandId);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-  const [urls, setUrls] = React.useState("");
+  const [addOpen, setAddOpen] = React.useState(false);
 
   const running = materialsRunning(data?.progress);
   const sources = data?.sources ?? [];
-
-  function startIngest(typed: string[]) {
-    ingest.mutate(typed, {
-      onSuccess: () => {
-        toast.success("Ingesting brand materials…");
-        if (typed.length) setUrls("");
-      },
-      onError: (e) =>
-        toast.error(
-          e instanceof Error ? e.message : "Could not start ingest"
-        ),
-    });
-  }
 
   function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -232,8 +382,6 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
     });
   }
 
-  const typedUrls = parseUrls(urls);
-  const ingestDisabled = ingest.isPending || running;
   const uploadDisabled = upload.isPending || running;
 
   return (
@@ -244,8 +392,8 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">
           Pages from your own site/docs that drafts can describe and link to
-          (internal links). Set a sitemap on the brand to crawl automatically,
-          or add specific URLs.
+          (internal links). Crawl your site, pull from a sitemap, add specific
+          URLs, or upload files (PDF, Word, Markdown).
         </p>
 
         {/* KB status / live progress */}
@@ -265,42 +413,20 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
         {/* Add / ingest controls */}
         {canEdit && (
           <div className="space-y-2">
-            <Textarea
-              value={urls}
-              onChange={(e) => setUrls(e.target.value)}
-              placeholder="https://yoursite.com/about, https://yoursite.com/docs/…&#10;(one per line or comma-separated — optional)"
-              className="min-h-[64px] font-data text-xs"
-              disabled={ingestDisabled}
-            />
             <div className="flex flex-wrap gap-2">
               <Button
-                variant="outline"
+                variant="gold"
                 size="sm"
-                onClick={() => startIngest([])}
-                disabled={ingestDisabled}
+                onClick={() => setAddOpen(true)}
+                disabled={running}
               >
-                {ingestDisabled ? (
-                  <Loader2 className="animate-spin" />
-                ) : (
-                  <Globe />
-                )}
-                Ingest from sitemap
+                {running ? <Loader2 className="animate-spin" /> : <Plus />}
+                Add pages
               </Button>
-              {typedUrls.length > 0 && (
-                <Button
-                  variant="gold"
-                  size="sm"
-                  onClick={() => startIngest(typedUrls)}
-                  disabled={ingestDisabled}
-                >
-                  {ingestDisabled && <Loader2 className="animate-spin" />}
-                  Add &amp; ingest ({typedUrls.length})
-                </Button>
-              )}
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".pdf,.md,.txt,.doc,.docx,.html"
+                accept={UPLOAD_ACCEPT}
                 className="hidden"
                 onChange={onPickFile}
               />
@@ -315,9 +441,15 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
                 ) : (
                   <Upload />
                 )}
-                Upload PDF/file
+                Upload file
               </Button>
             </div>
+            <AddPagesDialog
+              brandId={brandId}
+              open={addOpen}
+              onOpenChange={setAddOpen}
+              disabled={running}
+            />
           </div>
         )}
 
@@ -339,7 +471,7 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
           <div className="rounded-md border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
             No brand pages yet.{" "}
             {canEdit
-              ? "Ingest from your sitemap or add URLs above to build the materials KB."
+              ? "Add pages or upload files above to build the materials KB."
               : "An editor can add pages to build the materials KB."}
           </div>
         ) : null}

@@ -1,8 +1,8 @@
 """Brand-materials endpoints (M6) — ingest the brand's own pages into a KB.
 
-Async by design: the ingest crawls a sitemap and imports each page as a Powabase
-Source (slow), so the POST spawns a background worker and returns 202; the GET
-polls the brand's `materials_progress` + the source list.
+Async by design: the ingest discovers the brand's pages (crawl / sitemap / urls)
+and imports each as a Powabase Source (slow), so the POST spawns a background
+worker and returns 202; the GET polls `materials_progress` + the source list.
 """
 
 from uuid import UUID
@@ -48,8 +48,15 @@ async def ingest_materials(
 ):
     """Kick off a brand-materials build. Poll GET /{id}/materials for progress."""
     assert_brand_access(db, business_id, user)
-    svc.add_urls(db, business_id, payload.urls, "manual")
-    spawn(svc.ingest(pb, db, business_id, extra_urls=tuple(payload.urls)))
+    spawn(
+        svc.ingest(
+            pb, db, business_id,
+            mode=payload.mode,
+            url=payload.url,
+            extra_urls=tuple(payload.urls),
+            max_pages=payload.max_pages or svc.DEFAULT_MAX_PAGES,
+        )
+    )
     return {"status": "started"}
 
 

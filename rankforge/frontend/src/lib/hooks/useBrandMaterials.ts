@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   materialsApi,
   materialsRunning,
+  type MaterialsIngestRequest,
   type MaterialsView,
 } from "@/lib/api";
 
@@ -24,7 +25,8 @@ export function useBrandMaterials(businessId: string) {
 export function useIngestMaterials(businessId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (urls: string[]) => materialsApi.ingest(businessId, urls),
+    mutationFn: (body: MaterialsIngestRequest) =>
+      materialsApi.ingest(businessId, body),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ["materials", businessId] }),
   });

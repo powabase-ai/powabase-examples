@@ -247,6 +247,34 @@ class PowabaseClient:
             "POST", "/api/sources/import-url", json={"mode": "urls", "urls": [url]}
         )
 
+    async def import_urls(
+        self,
+        mode: str,
+        *,
+        url: str | None = None,
+        urls: list[str] | None = None,
+        max_pages: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Discover + import web pages as Sources, the way Powabase BaaS does it.
+
+        `mode`:
+          - "urls"    — import the exact `urls` list.
+          - "crawl"   — crawl from `url` (Firecrawl /map) and import discovered pages.
+          - "sitemap" — parse the sitemap at `url` and import its pages.
+        `max_pages` caps discovery (the platform also clamps to its own ceiling).
+        Returns the created sources `[{id, name, url}]` (extraction dispatched
+        async — poll get_source). Needs a Firecrawl key server-side (503 if absent).
+        """
+        body: dict[str, Any] = {"mode": mode}
+        if url is not None:
+            body["url"] = url
+        if urls is not None:
+            body["urls"] = urls
+        if max_pages is not None:
+            body["max_pages"] = max_pages
+        resp = await self._request("POST", "/api/sources/import-url", json=body)
+        return resp.get("sources", []) if isinstance(resp, dict) else []
+
     async def get_source_markdown(self, source_id: str) -> str:
         """Fetch a source's extracted markdown derivative (raw text, not JSON)."""
         resp = await self._client.get(

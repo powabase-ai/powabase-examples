@@ -1,4 +1,4 @@
-"""Brand materials (M6) — sitemap parsing (unit) + ingestion/route wiring (hermetic).
+"""Brand materials (M6) — discovery/tracking (unit) + ingestion/route wiring.
 
 Mocks at the Database / Powabase boundary; no real network or DB calls.
 """
@@ -6,7 +6,6 @@ Mocks at the Database / Powabase boundary; no real network or DB calls.
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
-import httpx
 from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
@@ -29,72 +28,78 @@ SOURCE = {
 }
 
 
-# --- sitemap_urls (unit) ---
-def test_sitemap_urls_parses_urlset(monkeypatch):
-    xml = """<?xml version="1.0" encoding="UTF-8"?>
-    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-      <url><loc>https://brand.example/blog/post-1</loc></url>
-      <url><loc>https://brand.example/docs/setup</loc></url>
-      <url><loc>https://brand.example/tag/news</loc></url>
-      <url><loc>https://brand.example/logo.png</loc></url>
-      <url><loc>https://brand.example/about</loc></url>
-    </urlset>"""
+# --- discovery + tracking (unit) ---
+async def test_discover_crawl_imports_and_tracks(monkeypatch):
+    """crawl mode → client.import_urls("crawl", url=…) → each source tracked."""
+    db = MagicMock()
+    db.fetch_one.return_value = {"id": RID}  # _track_source insert
+    client = MagicMock()
+    client.import_urls = AsyncMock(
+        return_value=[
+            {"id": "src_a", "url": "https://brand.example/a"},
+            {"id": "src_b", "url": "https://brand.example/b"},
+        ]
+    )
+    n = await svc._discover_and_track(
+        client, db, BID, {"sitemap_url": None},
+        mode="crawl", url="https://brand.example", extra_urls=(), max_pages=30,
+    )
+    assert n == 2
+    client.import_urls.assert_awaited_once_with(
+        "crawl", url="https://brand.example", max_pages=30
+    )
+    assert db.fetch_one.call_count == 2  # one tracked row per imported source
 
-    class FakeResp:
-        text = xml
 
-        def raise_for_status(self):
-            return None
-
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def get(self, url):
-            return FakeResp()
-
-    monkeypatch.setattr(httpx, "Client", FakeClient)
-    urls = svc.sitemap_urls("https://brand.example/sitemap.xml")
-    # noise (tag, .png) dropped
-    assert "https://brand.example/tag/news" not in urls
-    assert "https://brand.example/logo.png" not in urls
-    # content pages kept and ranked first
-    assert "https://brand.example/blog/post-1" in urls
-    assert "https://brand.example/docs/setup" in urls
-    assert urls.index("https://brand.example/blog/post-1") < urls.index(
-        "https://brand.example/about"
+async def test_discover_sitemap_falls_back_to_brand_url():
+    """sitemap mode with no explicit url uses the brand's saved sitemap_url."""
+    db = MagicMock()
+    db.fetch_one.return_value = {"id": RID}
+    client = MagicMock()
+    client.import_urls = AsyncMock(return_value=[])
+    await svc._discover_and_track(
+        client, db, BID, {"sitemap_url": "https://brand.example/sitemap.xml"},
+        mode="sitemap", url=None, extra_urls=(), max_pages=30,
+    )
+    client.import_urls.assert_awaited_once_with(
+        "sitemap", url="https://brand.example/sitemap.xml", max_pages=30
     )
 
 
-def test_sitemap_urls_resilient_on_failure(monkeypatch):
-    class BoomClient:
-        def __init__(self, *a, **k):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def get(self, url):
-            raise httpx.ConnectError("boom")
-
-    monkeypatch.setattr(httpx, "Client", BoomClient)
-    assert svc.sitemap_urls("https://brand.example/sitemap.xml") == []
+async def test_discover_noops_when_nothing_to_discover():
+    """No crawl url and no brand sitemap → no platform call, nothing tracked."""
+    db = MagicMock()
+    client = MagicMock()
+    client.import_urls = AsyncMock()
+    n = await svc._discover_and_track(
+        client, db, BID, {"sitemap_url": None},
+        mode="sitemap", url=None, extra_urls=(), max_pages=30,
+    )
+    assert n == 0
+    client.import_urls.assert_not_awaited()
 
 
-def test_sitemap_urls_empty_when_no_url():
-    assert svc.sitemap_urls("") == []
+# --- _track_source SQL shape (unit) ---
+def test_track_source_inserts_with_source_id():
+    db = MagicMock()
+    db.fetch_one.return_value = {"id": RID}
+    svc._track_source(
+        db, BID, url="  https://a.example/x  ", source_id="src_1", origin="crawl"
+    )
+    query, params = db.fetch_one.call_args[0]
+    assert "insert into public.brand_sources" in query
+    assert "on conflict do nothing" in query
+    # trimmed; carries the source_id + origin
+    assert params == (BID, "https://a.example/x", "crawl", "src_1")
 
 
-# --- list_sources / add_urls SQL shape (unit) ---
+def test_track_source_skips_empty_url():
+    db = MagicMock()
+    svc._track_source(db, BID, url="   ", source_id="src_1", origin="crawl")
+    db.fetch_one.assert_not_called()
+
+
+# --- list_sources SQL shape (unit) ---
 def test_list_sources_sql_shape():
     db = MagicMock()
     db.fetch_all.return_value = [SOURCE]
@@ -104,22 +109,6 @@ def test_list_sources_sql_shape():
     assert "from public.brand_sources" in query
     assert "order by created_at desc" in query
     assert params == (BID,)
-
-
-def test_add_urls_inserts_dedups_and_skips_empty():
-    db = MagicMock()
-    # first url inserts (returns a row), second conflicts (None), blanks skipped
-    db.fetch_one.side_effect = [{"id": RID}, None]
-    n = svc.add_urls(
-        db, BID, ["  https://a.example/x  ", "https://a.example/x", "", "   "], "manual"
-    )
-    assert n == 1
-    assert db.fetch_one.call_count == 2  # only the two non-empty urls hit the DB
-    query, params = db.fetch_one.call_args_list[0][0]
-    assert "insert into public.brand_sources" in query
-    assert "on conflict do nothing" in query
-    # trimmed before insert
-    assert params == (BID, "https://a.example/x", "manual")
 
 
 async def test_remove_source_cascades_kb_then_source_then_row(monkeypatch):
@@ -202,30 +191,32 @@ def test_get_materials_returns_sources_and_progress(monkeypatch):
 
 
 def test_ingest_is_202(monkeypatch):
-    monkeypatch.setattr(svc, "add_urls", lambda d, bid, urls, origin: len(urls))
+    captured = {}
 
-    async def fake_ingest(*a, **k):
-        return None
+    async def fake_ingest(client, db, business_id, **kwargs):
+        captured.update(kwargs)
 
     monkeypatch.setattr(svc, "ingest", fake_ingest)
     resp = _client().post(
         f"/api/business-profiles/{BID}/materials/ingest",
-        json={"urls": ["https://brand.example/pricing"]},
+        json={"mode": "crawl", "url": "https://brand.example", "max_pages": 15},
     )
     assert resp.status_code == 202
     assert resp.json()["status"] == "started"
+    # the route threads the mode/url/max_pages through to the worker
+    assert captured["mode"] == "crawl"
+    assert captured["url"] == "https://brand.example"
+    assert captured["max_pages"] == 15
 
 
 def test_ingest_requires_editor(monkeypatch):
-    monkeypatch.setattr(svc, "add_urls", lambda d, bid, urls, origin: 0)
-
     async def fake_ingest(*a, **k):
         return None
 
     monkeypatch.setattr(svc, "ingest", fake_ingest)
     writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
     resp = _client(user=writer).post(
-        f"/api/business-profiles/{BID}/materials/ingest", json={"urls": []}
+        f"/api/business-profiles/{BID}/materials/ingest", json={"mode": "sitemap"}
     )
     assert resp.status_code == 403
 

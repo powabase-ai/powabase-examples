@@ -210,9 +210,17 @@ export interface BrandMaterialSource {
   url: string;
   title?: string | null;
   status?: string | null;
-  origin: "sitemap" | "manual";
+  origin: "sitemap" | "manual" | "crawl";
   source_id?: string | null;
   created_at?: string | null;
+}
+
+/** How to discover the brand's pages for an ingest. */
+export interface MaterialsIngestRequest {
+  mode: "sitemap" | "crawl" | "urls";
+  url?: string;
+  urls?: string[];
+  max_pages?: number;
 }
 
 export interface MaterialsProgress {
@@ -240,10 +248,10 @@ export const materialsApi = {
     request<MaterialsView>(
       `/api/business-profiles/${businessId}/materials`
     ),
-  ingest: (businessId: string, urls: string[]) =>
+  ingest: (businessId: string, body: MaterialsIngestRequest) =>
     request<{ status: string }>(
       `/api/business-profiles/${businessId}/materials/ingest`,
-      { method: "POST", body: JSON.stringify({ urls }) }
+      { method: "POST", body: JSON.stringify(body) }
     ),
   remove: (businessId: string, rowId: string) =>
     request<void>(

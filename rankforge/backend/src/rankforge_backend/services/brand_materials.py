@@ -1,23 +1,21 @@
 """M6 — brand materials.
 
 Per brand, a SEPARATE Powabase Knowledge Base built from the brand's OWN pages —
-crawled from its sitemap plus manually-added URLs — so generation can later ground
-drafts in the brand's real capabilities and link to its own docs.
+discovered by crawling its site, parsing its sitemap, or from manually-added URLs —
+so generation can later ground drafts in the brand's real capabilities and link to
+its own docs.
 
-This module owns ONLY the ingestion + the data access the routes need; generation
-consumes the KB elsewhere. The flow mirrors research (import_url → poll get_source
-→ add_source_to_kb) and grounding (ensure_brand_kb's compare-and-set), kept thin on
-purpose.
+Page discovery + import is delegated to the platform's `/api/sources/import-url`
+(the same crawl/sitemap/urls modes Powabase BaaS exposes), so a site without a
+sitemap can still be crawled. This module owns ONLY the ingestion orchestration +
+the data access the routes need; generation consumes the KB elsewhere.
 """
 
 import asyncio
 import logging
 from typing import Any
-from urllib.parse import urlparse
 from uuid import UUID
-from xml.etree import ElementTree as ET
 
-import httpx
 from psycopg.types.json import Json
 
 from ..db import Database
@@ -26,6 +24,9 @@ from . import business_profiles as brands
 from . import grounding
 
 log = logging.getLogger("rankforge.brand_materials")
+
+# Default cap on pages discovered per ingest (the platform clamps further).
+DEFAULT_MAX_PAGES = 30
 
 # Same terminal sets as research/grounding so we stop polling once a source/index
 # can't make further progress.
@@ -99,28 +100,28 @@ def list_sources(db: Database, business_id: UUID) -> list[dict[str, Any]]:
     )
 
 
-def add_urls(
-    db: Database, business_id: UUID, urls: list[str], origin: str
-) -> int:
-    """Insert a brand_sources row per URL; dedup on the unique lower(url) index.
-
-    The unique index is on the expression `lower(url)`, so `on conflict do nothing`
-    is used WITHOUT naming columns (a column-list conflict target can't reference an
-    expression index). Normalizes/trims and skips empties. Returns rows inserted.
-    """
-    inserted = 0
-    for raw in urls:
-        url = (raw or "").strip()
-        if not url:
-            continue
-        row = db.fetch_one(
-            "insert into public.brand_sources (business_id, url, origin) "
-            "values (%s, %s, %s) on conflict do nothing returning id",
-            (business_id, url, origin),
+def _track_source(
+    db: Database, business_id: UUID, *, url: str, source_id: str | None, origin: str
+) -> None:
+    """Record one imported page as a brand_sources row (or adopt its source_id onto
+    an existing row). Dedup is on the unique lower(url) index, so `on conflict do
+    nothing` is used WITHOUT a column target (it can't reference an expression
+    index). Skips empty URLs."""
+    url = (url or "").strip()
+    if not url:
+        return
+    row = db.fetch_one(
+        "insert into public.brand_sources (business_id, url, origin, source_id, status) "
+        "values (%s, %s, %s, %s, 'pending') on conflict do nothing returning id",
+        (business_id, url, origin, source_id),
+    )
+    if row is None and source_id:
+        # URL already tracked — backfill the source_id if it wasn't set yet.
+        db.execute(
+            "update public.brand_sources set source_id = coalesce(source_id, %s) "
+            "where business_id = %s and lower(url) = lower(%s)",
+            (source_id, business_id, url),
         )
-        if row is not None:
-            inserted += 1
-    return inserted
 
 
 def _set_progress(
@@ -133,95 +134,59 @@ def _set_progress(
     )
 
 
-# --- sitemap discovery ---
-# Paths that are almost never standalone content worth grounding on.
-_NOISE_SEGMENTS = ("/tag/", "/tags/", "/category/", "/categories/", "/author/")
-# Asset/feed extensions to drop (note: .xml is allowed only for child sitemaps,
-# handled separately before this filter runs).
-_NOISE_EXT = (
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
-    ".pdf", ".zip", ".css", ".js", ".json", ".rss", ".atom",
-)
-# Path hints that a URL is a real content page — preferred when capping.
-_CONTENT_HINTS = ("docs", "doc", "blog", "product", "products", "guide", "guides",
-                  "feature", "features", "use-case", "use-cases", "solution",
-                  "solutions", "help", "support", "learn", "article", "articles")
+# --- page discovery (delegated to the platform) ---
+# What the UI sends; "sitemap" defaults to the brand's configured sitemap_url.
+_DISCOVERY_MODES = ("sitemap", "crawl", "urls")
 
 
-def _is_noise(url: str) -> bool:
-    low = url.lower()
-    path = urlparse(low).path
-    if any(seg in low for seg in _NOISE_SEGMENTS):
-        return True
-    return any(path.endswith(ext) for ext in _NOISE_EXT)
+async def _discover_and_track(
+    client: PowabaseClient,
+    db: Database,
+    business_id: UUID,
+    brand: dict[str, Any] | None,
+    *,
+    mode: str,
+    url: str | None,
+    extra_urls: tuple[str, ...],
+    max_pages: int,
+) -> int:
+    """Discover the brand's pages via the platform's import-url (crawl/sitemap/urls),
+    importing each as a Source, and track them as brand_sources rows. Returns the
+    number of pages the platform imported (0 if there was nothing to discover)."""
+    if mode == "crawl":
+        root = (url or "").strip()
+        if not root:
+            return 0
+        _set_progress(db, business_id, "scraping", "Crawling your site for pages…")
+        sources = await client.import_urls("crawl", url=root, max_pages=max_pages)
+        origin = "crawl"
+    elif mode == "urls":
+        urls = [u.strip() for u in extra_urls if u and u.strip()]
+        if not urls:
+            return 0
+        n = len(urls)
+        _set_progress(
+            db, business_id, "scraping",
+            f"Importing {n} page{'' if n == 1 else 's'}…",
+        )
+        sources = await client.import_urls("urls", urls=urls, max_pages=max_pages)
+        origin = "manual"
+    else:  # sitemap
+        sm = (url or (brand or {}).get("sitemap_url") or "").strip()
+        if not sm:
+            return 0
+        _set_progress(db, business_id, "scraping", "Reading your sitemap…")
+        sources = await client.import_urls("sitemap", url=sm, max_pages=max_pages)
+        origin = "sitemap"
 
-
-def _is_content(url: str) -> bool:
-    segs = {s for s in urlparse(url.lower()).path.split("/") if s}
-    return bool(segs & set(_CONTENT_HINTS))
-
-
-def _parse_locs(xml_text: str) -> list[str]:
-    """Pull every <loc> out of a sitemap or sitemap-index, namespace-agnostic."""
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
-    out: list[str] = []
-    for el in root.iter():
-        tag = el.tag.rsplit("}", 1)[-1]  # strip namespace
-        if tag == "loc" and el.text and el.text.strip():
-            out.append(el.text.strip())
-    return out
-
-
-def sitemap_urls(sitemap_url: str, limit: int = 30) -> list[str]:
-    """Fetch a sitemap (resolving one level of sitemap-index) and return content
-    page URLs, descaling obvious noise and capping to `limit`.
-
-    Resilient by design — any failure returns []; the ingest must still proceed on
-    just the manual + existing URLs.
-    """
-    if not sitemap_url:
-        return []
-    try:
-        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-            resp = client.get(sitemap_url)
-            resp.raise_for_status()
-            locs = _parse_locs(resp.text)
-
-            # Sitemap-index: <loc>s point at child sitemaps. Fetch one level down
-            # (a bounded few) and gather their page <loc>s instead.
-            child_sitemaps = [u for u in locs if u.lower().endswith(".xml")]
-            if child_sitemaps and all(u.lower().endswith(".xml") for u in locs):
-                pages: list[str] = []
-                for child in child_sitemaps[:5]:
-                    try:
-                        cr = client.get(child)
-                        cr.raise_for_status()
-                        pages.extend(_parse_locs(cr.text))
-                    except httpx.HTTPError:
-                        continue
-                locs = pages
-    except httpx.HTTPError:
-        return []
-    except Exception:  # noqa: BLE001 — never let a malformed sitemap break ingest
-        log.exception("sitemap fetch/parse failed for %s", sitemap_url)
-        return []
-
-    seen: set[str] = set()
-    cleaned: list[str] = []
-    for u in locs:
-        u = u.strip()
-        if not u or u in seen or _is_noise(u):
-            continue
-        seen.add(u)
-        cleaned.append(u)
-
-    # Prefer obvious content pages, then backfill with the rest, capped to `limit`.
-    content = [u for u in cleaned if _is_content(u)]
-    rest = [u for u in cleaned if not _is_content(u)]
-    return (content + rest)[:limit]
+    for s in sources:
+        _track_source(
+            db, business_id,
+            url=s.get("url") or s.get("name") or "",
+            source_id=s.get("id"),
+            origin=origin,
+        )
+    return len(sources)
 
 
 # --- the background worker ---
@@ -276,19 +241,26 @@ async def ingest(
     db: Database,
     business_id: UUID,
     *,
+    mode: str = "sitemap",
+    url: str | None = None,
     extra_urls: tuple[str, ...] = (),
+    max_pages: int = DEFAULT_MAX_PAGES,
 ) -> None:
-    """Build/refresh the brand's materials KB from its sitemap + manual URLs."""
+    """Build/refresh the brand's materials KB.
+
+    `mode` picks how pages are discovered (crawl / sitemap / urls); discovery +
+    import run on the platform. Then every tracked page that isn't indexed yet is
+    polled to extraction and added to the KB.
+    """
     try:
         _set_progress(db, business_id, "starting", "Gathering brand pages…")
         kb_id = await ensure_materials_kb(client, db, business_id)
 
         brand = brands.get_profile(db, business_id)
-        sitemap = (brand or {}).get("sitemap_url") if brand else None
-        if sitemap:
-            add_urls(db, business_id, sitemap_urls(sitemap), "sitemap")
-        if extra_urls:
-            add_urls(db, business_id, list(extra_urls), "manual")
+        await _discover_and_track(
+            client, db, business_id, brand,
+            mode=mode, url=url, extra_urls=extra_urls, max_pages=max_pages,
+        )
 
         # Everything not yet successfully indexed: never imported, or import/extract
         # didn't reach 'extracted'.
@@ -300,8 +272,8 @@ async def ingest(
         )
         total = len(pending)
         _set_progress(
-            db, business_id, "scraping",
-            f"Importing {total} brand page{'' if total == 1 else 's'}…",
+            db, business_id, "indexing",
+            f"Indexing {total} brand page{'' if total == 1 else 's'}…",
             total=total, done=0,
         )
 
@@ -315,8 +287,8 @@ async def ingest(
             done += 1  # advisory live progress (racy writes are fine)
             try:
                 await asyncio.to_thread(
-                    _set_progress, db, business_id, "scraping",
-                    f"Imported {done}/{total} brand pages…", total=total, done=done,
+                    _set_progress, db, business_id, "indexing",
+                    f"Indexed {done}/{total} brand pages…", total=total, done=done,
                 )
             except Exception:  # noqa: BLE001
                 pass
