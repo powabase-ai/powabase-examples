@@ -84,6 +84,7 @@ sources are available, cite sparingly rather than linking the same page again an
 - You may be given a "Your brand's own materials" block: excerpts from the brand's own pages, each with its URL. Treat these as the brand's authoritative voice — its real product, capabilities, terminology, and first-party data.
 - Use them for what only the brand can provide: its specific approach, feature names, concrete examples, and its own data/results. Prefer the brand's own example or number over a generic one when the materials supply it.
 - When the topic is something the brand actually does or solves, present the brand as one concrete, credible option — name the specific capability and link to the exact page that goes deeper (an internal link with natural anchor text). Earn the mention by being useful, not by selling.
+- **This is the brand's own blog — when the article weighs the brand against competitors (named in the brief), write from the brand's side.** Be accurate and fair, but lead with the brand's genuine strengths and don't undersell it or hand a competitor an edge the evidence doesn't justify. A reader on the brand's blog should come away understanding where the brand is the stronger choice. Ground every comparative claim in the sources or brand materials — never invent superiority, and where the brand is honestly weaker, say less rather than something false. Real, supported strengths advocate for the brand; puffery the fact-checker will flag does not.
 - Keep it proportional: a mention or two woven into the argument where it genuinely helps — not a section-ending plug, not in every section.
 - Use the brand's own terminology accurately (don't rename its products or features), and never claim a capability the materials don't support.
 - Never write marketing slogans, CTAs, or "sign up today" copy.
@@ -332,6 +333,33 @@ def _outline_text(headings: list[str]) -> str:
     return "\n".join(lines) or "- (no outline provided — structure the article yourself)"
 
 
+def _brand_context_block(brand: dict[str, Any] | None, audience: str | None) -> str:
+    """Tell the writer whose blog this is and who the competitors are, so it writes
+    FROM the brand's side — advocating for it (within reason, only where the facts
+    justify) instead of giving a competitor the edge on the brand's own blog."""
+    name = (brand or {}).get("name")
+    if not name:
+        return f"- Audience / brand: {audience or 'n/a'}"
+    lines = [f"- This is **{name}**'s own blog — write as {name}, for {name}'s audience."]
+    if audience:
+        lines.append(f"- Audience: {audience}")
+    if (brand or {}).get("description"):
+        lines.append(f"- What {name} is: {brand['description']}")
+    comps = [
+        (c.get("name") or c.get("domain"))
+        for c in ((brand or {}).get("competitors") or [])
+        if isinstance(c, dict) and (c.get("name") or c.get("domain"))
+    ]
+    if comps:
+        lines.append(
+            f"- Competitors (do NOT promote these): {', '.join(comps[:10])}. When the "
+            f"article compares them with {name}, stay accurate but lead with {name}'s "
+            f"genuine, source-backed strengths — never undersell {name} or hand a "
+            "competitor an edge the evidence doesn't justify."
+        )
+    return "\n".join(lines)
+
+
 async def _draft_article(
     client: PowabaseClient,
     agent_id: str,
@@ -344,6 +372,7 @@ async def _draft_article(
     url_by_source: dict[str, str],
     materials_kb_id: str | None = None,
     materials_url_by_source: dict[str, str] | None = None,
+    brand: dict[str, Any] | None = None,
 ) -> str:
     """Draft the WHOLE article in one streamed pass, so the model holds the entire
     piece in context and writes a single coherent argument (the per-section approach
@@ -386,7 +415,7 @@ async def _draft_article(
         f"- Topic: {ctx['topic']}\n"
         f"- Primary keyword (use naturally): {ctx.get('primary_keyword') or 'n/a'}\n"
         f"- Secondary keywords: {', '.join(ctx.get('secondary_keywords') or []) or 'n/a'}\n"
-        f"- Audience / brand: {ctx.get('audience') or 'n/a'}\n"
+        f"{_brand_context_block(brand, ctx.get('audience'))}\n"
         f"- Target length: ~{wc} words\n\n"
         "## Outline — write every section, in this order\n"
         f"{_outline_text(headings)}\n\n"
@@ -456,10 +485,14 @@ async def run_generation_task(
             }
 
         # 1b) the brand's OWN materials KB — for on-brand narrative + internal links.
+        #     The profile also carries the brand name/positioning/competitors so the
+        #     writer knows whose blog this is and writes from the brand's side.
         materials_kb_id: str | None = None
         materials_url_by_source: dict[str, str] = {}
+        brand_profile: dict[str, Any] | None = None
         if business_id:
-            brand = brands.get_profile(db, business_id)
+            brand_profile = brands.get_profile(db, business_id)
+            brand = brand_profile
             materials_kb_id = brand.get("materials_kb_id") if brand else None
             if materials_kb_id:
                 materials_url_by_source = {
@@ -484,6 +517,7 @@ async def run_generation_task(
             kb_id=kb_id, source_ids=source_ids, url_by_source=url_by_source,
             materials_kb_id=materials_kb_id,
             materials_url_by_source=materials_url_by_source,
+            brand=brand_profile,
         )
         # Prepend the canonical H1. Strip ANY H1 line the writer emitted anyway
         # (multiline — a stray H1 after a preamble line would otherwise leave the

@@ -46,6 +46,12 @@ list of concrete issues, and return an improved full article that resolves them.
 and citations.
 - Any accurate brand mentions and internal links to the brand's own pages — keep the \
 brand's presence and those links; don't strip them out while editing.
+- The article's stance FOR the brand — it's the brand's own blog. Keep it on the \
+brand's side: where the draft weighs the brand against competitors, preserve (and, \
+where the sources justify, sharpen) the brand's genuine strengths; don't neutralize \
+the advocacy or let a competitor read as the better choice on grounds the evidence \
+doesn't support. Never add superiority the sources don't back — fix grounding by being \
+accurate, not by puffing.
 - Roughly the same length or longer — never truncate the article.
 
 ## Fix
