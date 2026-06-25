@@ -1,42 +1,56 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import {
   Check,
   ExternalLink,
   Link2,
   Loader2,
   Search,
+  Settings,
   Unlink,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useAuth } from "@/lib/auth/AuthProvider";
-import { canApprove } from "@/lib/api";
+import { canApprove, type BusinessProfile } from "@/lib/api";
 import {
   useApplyLink,
+  useArticle,
   useBrokenLinks,
   useCheckLinks,
   useDismissLink,
   useIgnoreBrokenLink,
   useLinkSuggestions,
   useSuggestLinks,
+  useUpdateArticle,
 } from "@/lib/hooks/useArticles";
+import { useBrand } from "@/lib/hooks/useBrands";
 
 /** Editor panel: stage internal links to the brand's other published articles, then
  *  accept (insert + re-score) or dismiss each. Deterministic suggestions come from the
  *  backend; this is just the review surface. */
-export function InternalLinksPanel({ articleId }: { articleId: string }) {
+export function InternalLinksPanel({
+  articleId,
+  brandId,
+}: {
+  articleId: string;
+  brandId: string;
+}) {
   const { profile } = useAuth();
   const canEdit = canApprove(profile?.role);
+  const brand = useBrand(brandId);
   const { data, isLoading } = useLinkSuggestions(articleId);
   const suggest = useSuggestLinks(articleId);
   const apply = useApplyLink(articleId);
   const dismiss = useDismissLink(articleId);
   const [actingId, setActingId] = React.useState<string | null>(null);
 
+  const hasPattern = !!brand.data?.url_pattern;
   const pending = (data ?? []).filter((s) => s.status === "pending");
 
   function runSuggest() {
@@ -70,21 +84,37 @@ export function InternalLinksPanel({ articleId }: { articleId: string }) {
         reward.
       </p>
 
-      {canEdit && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="w-full"
-          onClick={runSuggest}
-          disabled={suggest.isPending}
-        >
-          {suggest.isPending ? (
-            <Loader2 className="animate-spin" />
-          ) : (
-            <Search />
-          )}
-          Find internal links
-        </Button>
+      <CanonicalUrlField articleId={articleId} brand={brand.data} />
+
+      {brand.data && !hasPattern ? (
+        <div className="rounded-md border border-[rgb(var(--ember))]/30 bg-[rgb(var(--ember))]/[0.06] px-3 py-2.5 text-xs">
+          Set your{" "}
+          <Link
+            href={`/brands/${brandId}/settings`}
+            className="inline-flex items-center gap-0.5 font-medium text-[rgb(var(--ember))] hover:underline"
+          >
+            <Settings className="size-3" /> blog URL pattern
+          </Link>{" "}
+          to enable internal links — we need to know where your published articles
+          live before we can point links at them.
+        </div>
+      ) : (
+        canEdit && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full"
+            onClick={runSuggest}
+            disabled={suggest.isPending || !hasPattern}
+          >
+            {suggest.isPending ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Search />
+            )}
+            Find internal links
+          </Button>
+        )
       )}
 
       {isLoading ? (
@@ -148,6 +178,81 @@ export function InternalLinksPanel({ articleId }: { articleId: string }) {
       )}
 
       <BrokenLinksSection articleId={articleId} canEdit={canEdit} />
+    </div>
+  );
+}
+
+/** This article's published URL: an explicit override (wins over the brand pattern),
+ *  with the pattern-resolved URL shown as the default. Editors only. */
+function CanonicalUrlField({
+  articleId,
+  brand,
+}: {
+  articleId: string;
+  brand?: BusinessProfile;
+}) {
+  const { profile } = useAuth();
+  const canEdit = canApprove(profile?.role);
+  const { data: article } = useArticle(articleId);
+  const update = useUpdateArticle(articleId);
+  const [value, setValue] = React.useState("");
+  React.useEffect(
+    () => setValue(article?.canonical_url ?? ""),
+    [article?.canonical_url]
+  );
+
+  const computed =
+    brand?.url_pattern && article?.slug
+      ? brand.url_pattern
+          .replace("{slug}", article.slug)
+          .replace("{id}", article.id)
+      : null;
+
+  if (!canEdit) return null;
+  const dirty = value.trim() !== (article?.canonical_url ?? "");
+
+  return (
+    <div className="space-y-1.5 rounded-md border border-border p-2.5">
+      <label className="text-xs font-medium text-muted-foreground">
+        This article&apos;s published URL
+      </label>
+      <div className="flex gap-2">
+        <Input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={computed ?? "https://blog.acme.com/my-article"}
+          className="h-8 text-xs"
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            update.mutate(
+              { canonical_url: value.trim() },
+              {
+                onSuccess: () => toast.success("Published URL saved"),
+                onError: (e) =>
+                  toast.error(e instanceof Error ? e.message : "Save failed"),
+              }
+            )
+          }
+          disabled={!dirty || update.isPending}
+        >
+          {update.isPending && <Loader2 className="animate-spin" />}
+          Save
+        </Button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        {value.trim() ? (
+          "Override — internal links point here."
+        ) : computed ? (
+          <>
+            From your pattern: <span className="font-data">{computed}</span>
+          </>
+        ) : (
+          "Set a blog URL pattern in settings, or enter an explicit URL."
+        )}
+      </p>
     </div>
   );
 }

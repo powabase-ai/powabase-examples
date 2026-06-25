@@ -18,6 +18,14 @@ export function useBrands() {
   return useQuery<BusinessProfile[]>({ queryKey: KEY, queryFn: brandsApi.list });
 }
 
+export function useBrand(id: string) {
+  return useQuery<BusinessProfile>({
+    queryKey: ["business-profile", id],
+    queryFn: () => brandsApi.get(id),
+    enabled: !!id,
+  });
+}
+
 export function useCreateBrand() {
   const qc = useQueryClient();
   return useMutation({

@@ -17,6 +17,7 @@ export interface BrandFormState {
   target_keywords: string;
   competitors: string;
   sitemap_url: string;
+  url_pattern: string;
 }
 
 const csv = (xs?: string[]) => (xs ?? []).join(", ");
@@ -36,6 +37,7 @@ export const emptyBrandForm = (): BrandFormState => ({
   target_keywords: "",
   competitors: "",
   sitemap_url: "",
+  url_pattern: "",
 });
 
 export const brandToForm = (b: BusinessProfile): BrandFormState => ({
@@ -48,6 +50,7 @@ export const brandToForm = (b: BusinessProfile): BrandFormState => ({
   target_keywords: csv(b.target_keywords),
   competitors: csv(b.competitors?.map((c) => c.domain)),
   sitemap_url: b.sitemap_url ?? "",
+  url_pattern: b.url_pattern ?? "",
 });
 
 export const formToPayload = (f: BrandFormState): BusinessProfileInput => ({
@@ -60,6 +63,7 @@ export const formToPayload = (f: BrandFormState): BusinessProfileInput => ({
   target_keywords: fromCsv(f.target_keywords),
   competitors: fromCsv(f.competitors).map((domain) => ({ domain })),
   sitemap_url: f.sitemap_url.trim() || null,
+  url_pattern: f.url_pattern.trim() || null,
 });
 
 export function BrandFields({
@@ -113,6 +117,33 @@ export function BrandFields({
       <div className="grid gap-1.5">
         <Label htmlFor="sitemap_url">Sitemap URL</Label>
         <Input id="sitemap_url" value={value.sitemap_url} onChange={set("sitemap_url")} placeholder="https://acme.com/sitemap.xml" />
+      </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor="url_pattern">
+          Blog URL pattern{" "}
+          <span className="text-muted-foreground">
+            (where your published articles live)
+          </span>
+        </Label>
+        <Input
+          id="url_pattern"
+          value={value.url_pattern}
+          onChange={set("url_pattern")}
+          placeholder="https://blog.acme.com/{slug}"
+        />
+        <p className="text-xs text-muted-foreground">
+          Tokens: <code>{"{slug}"}</code>, <code>{"{id}"}</code>. Required for
+          internal linking — links point here.
+          {value.url_pattern.includes("{slug}") && (
+            <>
+              {" "}
+              e.g.{" "}
+              <span className="font-data">
+                {value.url_pattern.replace("{slug}", "my-article")}
+              </span>
+            </>
+          )}
+        </p>
       </div>
     </div>
   );

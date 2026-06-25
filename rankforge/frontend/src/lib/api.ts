@@ -48,6 +48,7 @@ export interface BusinessProfile {
   competitors: Competitor[];
   brand_kb_id?: string | null;
   sitemap_url?: string | null;
+  url_pattern?: string | null;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
@@ -64,6 +65,7 @@ export interface BusinessProfileInput {
   competitors?: Competitor[];
   brand_kb_id?: string | null;
   sitemap_url?: string | null;
+  url_pattern?: string | null;
 }
 
 async function request<T>(
@@ -402,6 +404,7 @@ export interface Article extends ArticleSummary {
   readability_score?: Score | null;
   json_ld?: Record<string, unknown> | null;
   grounding_report?: GroundingReport | null;
+  canonical_url?: string | null;
   created_at: string;
 }
 
@@ -746,6 +749,7 @@ export interface ArticleUpdate {
   meta_title?: string;
   meta_description?: string;
   status?: string;
+  canonical_url?: string;
 }
 
 // --- Brief (Stage B) ---
