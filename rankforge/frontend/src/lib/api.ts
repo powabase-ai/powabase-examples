@@ -365,6 +365,7 @@ export interface Score {
 
 export interface GroundingFlag {
   claim: string;
+  quote?: string; // the article's verbatim wording, so the user can find the sentence
   issue: string;
   suggestion: string;
 }

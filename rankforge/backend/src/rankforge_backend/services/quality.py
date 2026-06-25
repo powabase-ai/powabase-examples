@@ -61,20 +61,23 @@ explicit comparisons or rankings.
 - Opinion, advice, predictions, generic background, definitions, and transitions \
 that assert no verifiable fact.
 
-## How to phrase each claim
-- Make it self-contained — resolve pronouns and carry enough context that it can be \
-checked on its own, without the surrounding article.
+## For each claim return two things
+- `claim` — a self-contained restatement: resolve pronouns and carry enough context \
+that it can be checked on its own, without the surrounding article.
+- `quote` — a SHORT excerpt (a phrase or sentence, <= 25 words) copied **verbatim** \
+from the article — the exact words that make the assertion, so it can be located and \
+edited. Copy it character-for-character; do not paraphrase the quote.
 
 ## Output
-Return ONLY this JSON object (at most 14 claims, each one concise sentence):
-{"claims": [str]}\
+Return ONLY this JSON object (at most 14 claims):
+{"claims": [{"claim": str, "quote": str}]}\
 """
 
 # 2) Judge each claim against the evidence retrieved specifically for that claim.
 _JUDGE_PROMPT = """\
-You are given CLAIM / EVIDENCE pairs from an article. Judge each claim strictly \
-against its OWN evidence block only — never against another claim's evidence or your \
-own knowledge.
+You are given CLAIM / QUOTE / EVIDENCE triples from an article. Judge each claim \
+strictly against its OWN evidence block only — never against another claim's evidence \
+or your own knowledge. The QUOTE is the article's own verbatim wording.
 
 ## For each claim
 - Supported — the evidence directly substantiates the specific assertion, including \
@@ -84,6 +87,8 @@ or there is no relevant evidence at all (an empty or off-topic evidence block me
 flag, not pass).
 
 ## When you flag
+- `quote` — copy the claim's QUOTE through VERBATIM (the article's exact words), so \
+the writer and reader can find the sentence to edit.
 - `issue` — say precisely what the evidence does not back (e.g. "evidence gives 12%, \
 claim says 30%"; "no source mentions this figure").
 - `suggestion` — a concrete fix: correct the figure to match the source, attribute \
@@ -95,12 +100,12 @@ cut it.
 it as supported/checked × 100).
 - `claims_checked`: number of claims judged.
 - `supported`: number supported.
-- `flagged`: at most 10 items, each `{claim, issue, suggestion}`.
+- `flagged`: at most 10 items, each `{claim, quote, issue, suggestion}`.
 
 ## Output
 Return ONLY this JSON object:
 {"grounding_score": int, "claims_checked": int, "supported": int, "flagged": \
-[{"claim": str, "issue": str, "suggestion": str}]}\
+[{"claim": str, "quote": str, "issue": str, "suggestion": str}]}\
 """
 
 # Fallback when claim extraction fails or there is no KB: judge against a broad
@@ -121,6 +126,8 @@ excerpts do not support it — or contradict it, or support only a weaker versio
 checkable factual claim.
 
 ## For each flag give
+- `quote` — the article's exact verbatim wording that makes the claim (a phrase or \
+sentence, copied character-for-character), so the sentence can be located and edited.
 - `issue` — what the excerpts fail to back; `suggestion` — a concrete fix (correct \
 to the source, attribute it, soften it, or cut it).
 
@@ -131,7 +138,7 @@ support; `claims_checked`/`supported`: the count you judged and the count suppor
 ## Output
 Return ONLY this JSON object:
 {"grounding_score": int, "claims_checked": int, "supported": int, "flagged": \
-[{"claim": str, "issue": str, "suggestion": str}]}\
+[{"claim": str, "quote": str, "issue": str, "suggestion": str}]}\
 """
 
 _UNAVAILABLE = {
@@ -207,24 +214,30 @@ async def _per_claim_report(
     """Extract claims, retrieve evidence per claim, judge the pairs. None on failure."""
     ex = await client.run_agent(agent_id, f"{_EXTRACT_PROMPT}\n\nARTICLE:\n{md[:14000]}")
     data = extract_json(ex.get("content") or "")
-    claims = [
-        c.strip()
-        for c in (data.get("claims") or [])
-        if isinstance(c, str) and c.strip()
-    ][:14]
+    claims: list[dict[str, str]] = []
+    for c in (data.get("claims") or [])[:14]:
+        if isinstance(c, dict) and (c.get("claim") or "").strip():
+            claims.append(
+                {"claim": c["claim"].strip(), "quote": (c.get("quote") or "").strip()}
+            )
+        elif isinstance(c, str) and c.strip():  # tolerate the old bare-string shape
+            claims.append({"claim": c.strip(), "quote": ""})
     if not claims:
         return None
     blocks: list[str] = []
-    for claim in claims:
-        # Recall over precision here: keep weak matches so a supported claim isn't
-        # flagged just because its evidence ranked below the generation threshold.
+    for item in claims:
+        # Retrieve evidence for the self-contained claim. Recall over precision: keep
+        # weak matches so a supported claim isn't flagged just because its evidence
+        # ranked below the generation threshold.
         ev = await grounding.search(
-            client, kb_id, claim, top_k=6, source_ids=source_ids, filter_weak=False
+            client, kb_id, item["claim"], top_k=6, source_ids=source_ids,
+            filter_weak=False,
         )
         evidence = "\n".join(f"- {(c.get('text') or '')[:400]}" for c in ev) or (
             "(no matching evidence found in the sources)"
         )
-        blocks.append(f"CLAIM: {claim}\nEVIDENCE:\n{evidence}")
+        quote_line = f'QUOTE: "{item["quote"]}"\n' if item["quote"] else ""
+        blocks.append(f"CLAIM: {item['claim']}\n{quote_line}EVIDENCE:\n{evidence}")
     res = await client.run_agent(agent_id, f"{_JUDGE_PROMPT}\n\n" + "\n\n".join(blocks))
     return extract_json(res.get("content") or "")
 

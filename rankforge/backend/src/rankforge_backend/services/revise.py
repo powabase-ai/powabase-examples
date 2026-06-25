@@ -237,9 +237,12 @@ def collect_issues(
                     issues.append(f"[{s['label']}] {fix}")
     if grounding_report:
         for f in (grounding_report.get("flagged") or [])[:6]:
+            # Lead with the article's VERBATIM wording (the `quote`) so the reviser
+            # can find the exact sentence to fix — not a paraphrase it has to hunt for.
+            loc = (f.get("quote") or f.get("claim") or "")[:120]
             issues.append(
-                f"[Grounding] Claim \"{(f.get('claim') or '')[:90]}\": "
-                f"{f.get('issue', '')} — {f.get('suggestion', '')}".strip()
+                f'[Grounding] In "{loc}" — {f.get("issue", "")} '
+                f'— {f.get("suggestion", "")}'.strip()
             )
     return issues
 

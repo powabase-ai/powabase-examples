@@ -143,7 +143,13 @@ function GroundingBody({ report }: { report: GroundingReport }) {
       {report.flagged && report.flagged.length > 0 ? (
         report.flagged.map((f, i) => (
           <div key={i} className="border-t border-border py-2.5 first:border-0">
-            <div className="text-sm font-medium">{f.claim}</div>
+            {f.quote ? (
+              <div className="mb-1 border-l-2 border-[rgb(var(--ember))]/40 pl-2 text-sm italic text-foreground">
+                “{f.quote}”
+              </div>
+            ) : (
+              <div className="text-sm font-medium">{f.claim}</div>
+            )}
             <div className="text-xs text-muted-foreground">{f.issue}</div>
             {f.suggestion && (
               <div className="mt-0.5 text-xs text-[rgb(var(--ember-deep))]">
