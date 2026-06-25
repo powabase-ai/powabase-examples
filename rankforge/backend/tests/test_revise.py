@@ -21,6 +21,15 @@ GR_LOW = {
     "grounding_score": 40,
     "flagged": [{"claim": "c", "issue": "i", "suggestion": "s"}],
 }
+# Axis meets target overall (88 >= 80) but hides one critically weak aspect (20).
+SEO_MET_BUT_CRITICAL = {
+    "total": 88, "target": 80, "met": True,
+    "signals": [
+        {"key": "heading_structure", "label": "Heading hierarchy", "score": 20,
+         "fixes": ["Add more H2 sections."]},
+        {"key": "keyword_density", "label": "Keyword usage", "score": 95, "fixes": []},
+    ],
+}
 
 
 def test_satisfied_when_all_met():
@@ -64,6 +73,40 @@ def test_collect_issues_excludes_meta_bound_signals():
     issues = revise.collect_issues(seo, None, None)
     assert any("Heading hierarchy" in i for i in issues)
     assert not any("Title length" in i for i in issues)
+
+
+# --- critical sub-signal on an otherwise-met axis ---
+def test_satisfied_false_when_met_axis_hides_critical_signal():
+    # SEO meets target (88) but one aspect is critically low (20) → keep refining it.
+    assert not revise.satisfied(SEO_MET_BUT_CRITICAL, GEO_MET, GR_OK)
+
+
+def test_satisfied_true_when_only_critical_signal_is_meta_bound():
+    # A critically low TITLE/meta signal is fix_meta's job, not the body loop's — it
+    # must not wedge the objective loop into a pointless body rewrite it can't satisfy.
+    seo = {
+        "total": 88, "target": 80, "met": True,
+        "signals": [{"key": "title_length", "label": "Title length", "score": 0,
+                     "fixes": ["Target 30–60 characters."]}],
+    }
+    assert revise.satisfied(seo, GEO_MET, GR_OK)
+
+
+def test_collect_issues_surfaces_critical_signal_on_met_axis():
+    issues = revise.collect_issues(SEO_MET_BUT_CRITICAL, GEO_MET, None)
+    assert any("Heading hierarchy" in i for i in issues)
+    # The healthy 95-scoring signal on the same met axis is left alone (no flooding).
+    assert not any("Keyword usage" in i for i in issues)
+
+
+def test_collect_issues_names_critical_signal_even_without_canned_fix():
+    seo = {
+        "total": 88, "target": 80, "met": True,
+        "signals": [{"key": "extractability", "label": "Extractable formatting",
+                     "score": 15, "explanation": "Few lists/tables.", "fixes": []}],
+    }
+    issues = revise.collect_issues(seo, GEO_MET, None)
+    assert any("Extractable formatting" in i and "15/100" in i for i in issues)
 
 
 # --- revision commit gate ---

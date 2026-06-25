@@ -30,7 +30,12 @@ META_MODEL = "claude-sonnet-4-6"
 
 GROUNDING_TARGET = 70
 MAX_REVISIONS = 2
-_SIGNAL_FLOOR = 70  # only surface fixes for signals scoring below this
+_SIGNAL_FLOOR = 70  # on a FAILING axis, surface fixes for signals below this
+# A single sub-signal this low warrants a targeted pass even when its parent axis
+# already meets target overall (e.g. one SEO aspect at 20 while the weighted total is
+# 88). Matches scoring.py's readability "egregious tell" gate, so "critical" means the
+# same thing everywhere.
+_CRITICAL_FLOOR = 40
 
 _SYSTEM = """\
 You are RankForge's **revising editor**. You take a full SEO/GEO blog article plus a \
@@ -216,25 +221,54 @@ def _accept_revision(
 
 
 # --- evaluation helpers (pure) ---
+def _critical_signals(score: dict | None) -> list[dict]:
+    """Sub-signals so low they warrant a fix even on an otherwise-met axis — excluding
+    title/meta-bound ones the body reviser can't touch (fix_meta owns those)."""
+    if not score:
+        return []
+    return [
+        s
+        for s in score.get("signals", [])
+        if s.get("key") not in _META_KEYS and s.get("score", 100) < _CRITICAL_FLOOR
+    ]
+
+
 def collect_issues(
     seo: dict | None,
     geo: dict | None,
     grounding_report: dict | None,
     readability: dict | None = None,
 ) -> list[str]:
-    """Turn failing evaluator signals into concrete revision instructions."""
+    """Turn weak evaluator signals into concrete revision instructions.
+
+    A FAILING axis surfaces every signal below the working floor (70). A MET axis only
+    surfaces a CRITICALLY low signal (<40): the axis is already good overall, so we
+    don't flood the reviser, but a single egregious aspect (one signal at 20) still
+    gets fixed rather than silently ignored."""
     issues: list[str] = []
     for score in (seo, geo, readability):
-        if not score or score.get("met"):
+        if not score:
             continue
+        floor = _CRITICAL_FLOOR if score.get("met") else _SIGNAL_FLOOR
         for s in score.get("signals", []):
             # Skip title/meta-bound signals — the body reviser can't fix those;
             # fix_meta() handles them. Sending them here just wastes a pass.
             if s.get("key") in _META_KEYS:
                 continue
-            if s.get("score", 100) < _SIGNAL_FLOOR:
-                for fix in s.get("fixes", []):
+            sc = s.get("score", 100)
+            if sc >= floor:
+                continue
+            fixes = s.get("fixes", [])
+            if fixes:
+                for fix in fixes:
                     issues.append(f"[{s['label']}] {fix}")
+            elif sc < _CRITICAL_FLOOR:
+                # Critically low but the scorer offered no canned fix — still name the
+                # weak aspect so an important issue isn't silently skipped.
+                issues.append(
+                    f"[{s['label']}] Scored {sc}/100 — "
+                    f"{s.get('explanation', '')} Improve this aspect.".strip()
+                )
     if grounding_report:
         for f in (grounding_report.get("flagged") or [])[:6]:
             # Lead with the article's VERBATIM wording (the `quote`) so the reviser
@@ -256,6 +290,11 @@ def satisfied(
     if not (seo and seo.get("met")):
         return False
     if not (geo and geo.get("met")):
+        return False
+    # A met axis can still hide a critically weak aspect (one signal at 20 while the
+    # weighted total is 88). Pursue it — fixing it lifts the axis total, so the loop's
+    # post-rescore gate keeps the pass; once it clears 40, this stops blocking.
+    if _critical_signals(seo) or _critical_signals(geo):
         return False
     if readability is not None and not readability.get("met"):
         return False
