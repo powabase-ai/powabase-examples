@@ -22,6 +22,7 @@ class BusinessProfileCreate(BaseModel):
     competitors: list[Competitor] = []
     brand_kb_id: str | None = None
     sitemap_url: str | None = None
+    url_pattern: str | None = None
 
 
 class BusinessProfileUpdate(BaseModel):
@@ -35,6 +36,7 @@ class BusinessProfileUpdate(BaseModel):
     competitors: list[Competitor] | None = None
     brand_kb_id: str | None = None
     sitemap_url: str | None = None
+    url_pattern: str | None = None
 
 
 class BusinessProfile(BaseModel):
@@ -49,6 +51,7 @@ class BusinessProfile(BaseModel):
     competitors: list = []
     brand_kb_id: str | None = None
     sitemap_url: str | None = None
+    url_pattern: str | None = None
     materials_progress: dict = {}
     created_by: UUID | None = None
     created_at: datetime

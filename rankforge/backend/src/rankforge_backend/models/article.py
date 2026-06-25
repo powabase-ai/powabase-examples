@@ -16,6 +16,7 @@ class ArticleUpdate(BaseModel):
     meta_title: str | None = None
     meta_description: str | None = None
     status: str | None = None  # draft|in_review|approved|published|archived
+    canonical_url: str | None = None  # override for where this article lives
 
 
 class Article(BaseModel):
@@ -37,6 +38,7 @@ class Article(BaseModel):
     readability_score: dict | None = None
     json_ld: dict | None = None
     grounding_report: dict | None = None
+    canonical_url: str | None = None
     created_at: datetime
     updated_at: datetime
 

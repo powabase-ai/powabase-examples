@@ -134,7 +134,7 @@ _ARTICLE_COLUMNS = (
     "id, business_id, brief_id, research_run_id, title, slug, status, "
     "generation_status, generation_error, progress, content_md, meta_title, "
     "meta_description, seo_score, geo_score, readability_score, json_ld, "
-    "grounding_report, created_at, updated_at"
+    "grounding_report, canonical_url, created_at, updated_at"
 )
 _SUMMARY_COLUMNS = "id, title, status, generation_status, progress, updated_at"
 

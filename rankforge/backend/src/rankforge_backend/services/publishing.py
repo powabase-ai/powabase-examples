@@ -172,7 +172,17 @@ async def publish(
         (article_id,),
     )
 
-    public_url = (
+    # Prefer where the article actually lives — its canonical_url override or the
+    # brand's url_pattern — falling back to RankForge's own SSR page.
+    from . import business_profiles as brands_svc
+    from . import linking
+
+    brand = (
+        brands_svc.get_profile(db, article["business_id"])
+        if article.get("business_id")
+        else None
+    )
+    public_url = linking.canonical_url(brand, article) or (
         f"{public_base_url.rstrip('/')}/p/{article_id}" if public_base_url else None
     )
 

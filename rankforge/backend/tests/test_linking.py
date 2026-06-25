@@ -54,15 +54,44 @@ def test_anchor_candidates_prefers_specific_and_filters_short():
     assert "headless cms" in cands
 
 
+_PATTERN_BRAND = {"url_pattern": "https://blog.example.com/{slug}"}
+
+
+def test_canonical_url_resolution():
+    art = {"id": TID, "slug": "guide"}
+    # override wins
+    assert linking.canonical_url(
+        _PATTERN_BRAND, {**art, "canonical_url": "https://x.com/custom"}
+    ) == "https://x.com/custom"
+    # else the brand pattern renders
+    assert linking.canonical_url(_PATTERN_BRAND, art) == "https://blog.example.com/guide"
+    # no pattern + no override → undeterminable
+    assert linking.canonical_url({}, art) is None
+    # {slug} pattern but the article has no slug → None (no empty path segment)
+    assert linking.canonical_url(_PATTERN_BRAND, {"id": TID, "slug": ""}) is None
+
+
+def test_suggest_links_requires_a_brand_pattern(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(
+        linking.gen_svc, "get_article",
+        lambda d, aid: {"content_md": "We weigh headless cms options."},
+    )
+    monkeypatch.setattr(linking.brands, "get_profile", lambda d, bid: {})  # no pattern
+    assert linking.suggest_links(db, BID, AID) == []
+    db.fetch_all.assert_not_called()  # bailed before scanning targets
+
+
 def test_suggest_links_stages_a_verbatim_match(monkeypatch):
     db = MagicMock()
     monkeypatch.setattr(
         linking.gen_svc, "get_article",
-        lambda d, aid: {"content_md": "We weigh headless cms options.", "business_id": BID},
+        lambda d, aid: {"content_md": "We weigh headless cms options."},
     )
+    monkeypatch.setattr(linking.brands, "get_profile", lambda d, bid: _PATTERN_BRAND)
     db.fetch_all.return_value = [
-        {"id": TID, "title": "Headless CMS Guide", "slug": "g",
-         "keywords": ["headless cms"]}
+        {"id": TID, "title": "Headless CMS Guide", "slug": "guide",
+         "keywords": ["headless cms"], "canonical_url": None}
     ]
     db.fetch_one.return_value = {**SUGGESTION}
     out = linking.suggest_links(db, BID, AID)
@@ -70,17 +99,19 @@ def test_suggest_links_stages_a_verbatim_match(monkeypatch):
     q, p = db.fetch_one.call_args[0]
     assert "insert into public.link_suggestions" in q
     assert p[3] == "headless cms"  # the verbatim anchor span found in the body
-    assert p[4] == f"/p/{TID}"  # target url = the published page
+    assert p[4] == "https://blog.example.com/guide"  # resolved from the brand pattern
 
 
 def test_suggest_links_skips_text_already_linked(monkeypatch):
     db = MagicMock()
     monkeypatch.setattr(
         linking.gen_svc, "get_article",
-        lambda d, aid: {"content_md": "See [headless cms](/p/z) already.", "business_id": BID},
+        lambda d, aid: {"content_md": "See [headless cms](/p/z) already."},
     )
+    monkeypatch.setattr(linking.brands, "get_profile", lambda d, bid: _PATTERN_BRAND)
     db.fetch_all.return_value = [
-        {"id": TID, "title": "X", "slug": "g", "keywords": ["headless cms"]}
+        {"id": TID, "title": "X", "slug": "guide", "keywords": ["headless cms"],
+         "canonical_url": None}
     ]
     assert linking.suggest_links(db, BID, AID) == []
     db.fetch_one.assert_not_called()  # nothing to stage

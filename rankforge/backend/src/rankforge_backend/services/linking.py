@@ -16,6 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from ..db import Database
+from . import business_profiles as brands
 from . import generation as gen_svc
 
 _COLUMNS = (
@@ -30,9 +31,29 @@ _MAX_PER_ARTICLE = 5
 _MIN_ANCHOR_LEN = 4
 
 
-def _public_url(article_id: Any) -> str:
-    """Internal link target — the brand's public SSR page (served at /p/{id})."""
-    return f"/p/{article_id}"
+def _render_pattern(pattern: str, article: dict[str, Any]) -> str | None:
+    """Render a brand URL pattern for one article. Tokens: {slug}, {id}. Returns None
+    if the pattern needs a slug the article doesn't have (so we never emit a URL with
+    an empty path segment)."""
+    slug = (article.get("slug") or "").strip()
+    if "{slug}" in pattern and not slug:
+        return None
+    return (
+        pattern.replace("{slug}", slug).replace("{id}", str(article.get("id") or ""))
+    )
+
+
+def canonical_url(brand: dict[str, Any] | None, article: dict[str, Any]) -> str | None:
+    """Where this article actually lives, or None if undeterminable.
+
+    Resolution: the article's explicit canonical_url override → the brand's url_pattern
+    rendered with the article's tokens → None (we REQUIRE a pattern, so there is no
+    /p/{id} fallback for internal-link targets)."""
+    override = (article.get("canonical_url") or "").strip()
+    if override:
+        return override
+    pattern = (brand or {}).get("url_pattern")
+    return _render_pattern(pattern, article) if pattern else None
 
 
 def _link_targets(
@@ -40,7 +61,7 @@ def _link_targets(
 ) -> list[dict[str, Any]]:
     """The brand's OTHER published articles — the candidate link targets."""
     return db.fetch_all(
-        "select id, title, slug, keywords from public.articles "
+        "select id, title, slug, keywords, canonical_url from public.articles "
         "where business_id = %s and status = 'published' and id <> %s",
         (business_id, exclude_id),
     )
@@ -136,6 +157,12 @@ def suggest_links(
     art = gen_svc.get_article(db, article_id)
     if not art:
         return []
+    # We REQUIRE the brand to declare where its blog lives (a url_pattern) before
+    # suggesting internal links — otherwise a link would point at a URL we can't know.
+    # A per-target canonical_url override can still resolve individual targets.
+    brand = brands.get_profile(db, business_id)
+    if not (brand and brand.get("url_pattern")):
+        return []
     md = art.get("content_md") or ""
     mask = _linkable_mask(md)
     chosen: list[tuple[int, int]] = []  # spans already claimed (avoid overlaps)
@@ -143,6 +170,9 @@ def suggest_links(
     for t in _link_targets(db, business_id, article_id):
         if len(out) >= _MAX_PER_ARTICLE:
             break
+        target_url = canonical_url(brand, t)
+        if not target_url:  # can't resolve this target's URL → don't link it
+            continue
         for anchor in _anchor_candidates(t):
             found = _find_anchor(md, mask, anchor)
             if not found:
@@ -159,7 +189,7 @@ def suggest_links(
                 f"on conflict do nothing returning {_COLUMNS}",
                 (
                     business_id, article_id, t["id"], span_text,
-                    _public_url(t["id"]), t.get("title"),
+                    target_url, t.get("title"),
                     f'Mentions "{span_text}" — links to your article '
                     f'"{t.get("title") or t["id"]}".',
                 ),
