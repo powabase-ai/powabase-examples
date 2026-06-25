@@ -36,6 +36,7 @@ import {
   useOptimizeArticle,
   useRefineArticle,
   useRestoreVersion,
+  useRetryArticle,
   useUpdateArticle,
 } from "@/lib/hooks/useArticles";
 import {
@@ -269,6 +270,7 @@ export default function ArticleView({
   const { data: a, isLoading } = useArticle(articleId);
   const optimize = useOptimizeArticle(articleId);
   const refine = useRefineArticle(articleId);
+  const retry = useRetryArticle(articleId);
   const update = useUpdateArticle(articleId);
   const versions = useArticleVersions(articleId);
   const restore = useRestoreVersion(articleId);
@@ -572,8 +574,32 @@ export default function ArticleView({
 
               {a.generation_status === "failed" && (
                 <Card className="mt-6">
-                  <CardContent className="py-5 text-sm text-destructive">
-                    Generation failed: {a.generation_error}
+                  <CardContent className="flex items-center justify-between gap-4 py-5">
+                    <p className="text-sm text-destructive">
+                      Generation failed: {a.generation_error}
+                    </p>
+                    <Button
+                      variant="gold"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() =>
+                        retry.mutate(undefined, {
+                          onSuccess: () => toast.success("Retrying generation…"),
+                          onError: (e) =>
+                            toast.error(
+                              e instanceof Error ? e.message : "Retry failed"
+                            ),
+                        })
+                      }
+                      disabled={retry.isPending}
+                    >
+                      {retry.isPending ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <RefreshCw />
+                      )}
+                      Retry generation
+                    </Button>
                   </CardContent>
                 </Card>
               )}

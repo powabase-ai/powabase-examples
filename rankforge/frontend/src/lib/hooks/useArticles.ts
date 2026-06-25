@@ -81,6 +81,16 @@ export function useRefineArticle(id: string) {
   });
 }
 
+export function useRetryArticle(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => articlesApi.retry(id),
+    // Server flips status back to 'grounding' and runs async — seed the cache so
+    // the polling progress view takes over immediately.
+    onSuccess: (data) => qc.setQueryData(["article", id], data),
+  });
+}
+
 export function useArticleVersions(id: string) {
   return useQuery({
     queryKey: ["versions", id],

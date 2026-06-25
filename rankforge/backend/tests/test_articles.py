@@ -82,6 +82,34 @@ def test_refine_conflict_when_already_in_progress(monkeypatch):
     assert resp.status_code == 409
 
 
+def test_retry_starts_when_claim_succeeds(monkeypatch):
+    async def fake_task(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: ARTICLE)
+    monkeypatch.setattr(svc, "get_brief", lambda db, bid: {"id": BRIEF_ID})
+    monkeypatch.setattr(svc, "try_begin_generation", lambda db, aid: True)
+    monkeypatch.setattr(svc, "run_generation_task", fake_task)
+    resp = make_client().post(f"/api/articles/{ARTICLE['id']}/retry")
+    assert resp.status_code == 200
+
+
+def test_retry_conflict_when_already_in_progress(monkeypatch):
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: ARTICLE)
+    monkeypatch.setattr(svc, "get_brief", lambda db, bid: {"id": BRIEF_ID})
+    monkeypatch.setattr(svc, "try_begin_generation", lambda db, aid: False)
+    resp = make_client().post(f"/api/articles/{ARTICLE['id']}/retry")
+    assert resp.status_code == 409
+
+
+def test_retry_409_when_no_brief(monkeypatch):
+    """An article whose brief is gone can't be regenerated — 409, not a 500."""
+    no_brief = {**ARTICLE, "brief_id": None}
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: no_brief)
+    resp = make_client().post(f"/api/articles/{ARTICLE['id']}/retry")
+    assert resp.status_code == 409
+
+
 def test_generate_article_201(monkeypatch):
     async def fake_task(*args, **kwargs):
         return None

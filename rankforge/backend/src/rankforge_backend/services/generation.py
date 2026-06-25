@@ -217,6 +217,26 @@ def _update(db: Database, article_id: UUID, **fields: Any) -> None:
     )
 
 
+def try_begin_generation(db: Database, article_id: UUID) -> bool:
+    """Atomically (re)claim an article for generation — used to retry a draft that
+    failed or was interrupted by a restart. Flips to 'grounding' and clears the
+    prior error, but only if no pipeline is already running, so a double-submit
+    can't launch two concurrent generations on the same article."""
+    placeholders = ", ".join(["%s"] * len(_ACTIVE_GEN_STATUSES))
+    row = db.fetch_one(
+        f"update public.articles set generation_status = 'grounding', "
+        f"generation_error = null, progress = %s, updated_at = now() "
+        f"where id = %s and (generation_status is null "
+        f"or generation_status not in ({placeholders})) returning id",
+        (
+            Json({"phase": "grounding"}),
+            article_id,
+            *_ACTIVE_GEN_STATUSES,
+        ),
+    )
+    return row is not None
+
+
 def try_begin_refine(db: Database, article_id: UUID, *, total: int) -> bool:
     """Atomically claim an article for refinement. Returns False if generation or
     another refine is already in flight (so the route returns 409 instead of

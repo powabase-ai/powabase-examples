@@ -82,6 +82,36 @@ async def generate_article(
 
 
 @router.post(
+    "/{article_id}/retry",
+    response_model=Article,
+    dependencies=[Depends(rate_limit("article:generate"))],
+)
+async def retry_article(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Re-run generation for a failed/interrupted draft, reusing its brief.
+    Returns immediately; poll GET /api/articles/{id}."""
+    article = _guard_article(db, article_id, user)
+    brief = (
+        svc.get_brief(db, article["brief_id"]) if article.get("brief_id") else None
+    )
+    if brief is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "no brief to regenerate this article from"
+        )
+    # Atomic claim: refuse if a pipeline is already running (double-submit guard).
+    if not svc.try_begin_generation(db, article_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "generation already in progress"
+        )
+    spawn(svc.run_generation_task(pb, db, article_id=article_id, brief=brief))
+    return svc.get_article(db, article_id)
+
+
+@router.post(
     "/{article_id}/score",
     response_model=Article,
     dependencies=[Depends(rate_limit("article:score"))],

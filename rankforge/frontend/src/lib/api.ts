@@ -409,6 +409,8 @@ export const articlesApi = {
     request<Article>(`/api/articles/${id}/optimize`, { method: "POST" }),
   refine: (id: string) =>
     request<Article>(`/api/articles/${id}/refine`, { method: "POST" }),
+  retry: (id: string) =>
+    request<Article>(`/api/articles/${id}/retry`, { method: "POST" }),
   update: (id: string, data: ArticleUpdate) =>
     request<Article>(`/api/articles/${id}`, {
       method: "PATCH",
