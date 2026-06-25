@@ -14,6 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .db import Database
 from .powabase import PowabaseClient
+from .services import linkcheck as linkcheck_svc
 from .services import relink as relink_svc
 from .services import scouts as scout_svc
 from .tasks import spawn
@@ -89,9 +90,10 @@ class ScoutScheduler:
 
     async def _run_relink(self, business_id) -> None:
         # run_relink is sync (pure DB) — run it off the event loop so a big library
-        # doesn't block the scheduler/API.
+        # doesn't block the scheduler/API. Then check link health (async HTTP).
         try:
             await asyncio.to_thread(relink_svc.run_relink, self._db, business_id)
+            await linkcheck_svc.check_business(self._db, business_id)
         except Exception:  # noqa: BLE001
             log.exception("relink run failed for %s", business_id)
         finally:

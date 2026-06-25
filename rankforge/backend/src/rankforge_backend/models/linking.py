@@ -20,6 +20,20 @@ class LinkSuggestion(BaseModel):
     created_at: datetime | None = None
 
 
+class BrokenLink(BaseModel):
+    id: UUID
+    business_id: UUID
+    article_id: UUID
+    url: str
+    anchor_text: str | None = None
+    kind: str
+    http_status: int | None = None
+    reason: str | None = None
+    status: str
+    checked_at: datetime | None = None
+    created_at: datetime | None = None
+
+
 class RelinkConfig(BaseModel):
     business_id: UUID
     enabled: bool

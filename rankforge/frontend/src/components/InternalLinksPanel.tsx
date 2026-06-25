@@ -1,7 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { Check, Link2, Loader2, Search, X } from "lucide-react";
+import {
+  Check,
+  ExternalLink,
+  Link2,
+  Loader2,
+  Search,
+  Unlink,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -9,7 +17,10 @@ import { useAuth } from "@/lib/auth/AuthProvider";
 import { canApprove } from "@/lib/api";
 import {
   useApplyLink,
+  useBrokenLinks,
+  useCheckLinks,
   useDismissLink,
+  useIgnoreBrokenLink,
   useLinkSuggestions,
   useSuggestLinks,
 } from "@/lib/hooks/useArticles";
@@ -128,6 +139,95 @@ export function InternalLinksPanel({ articleId }: { articleId: string }) {
                   >
                     <X />
                     Dismiss
+                  </Button>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <BrokenLinksSection articleId={articleId} canEdit={canEdit} />
+    </div>
+  );
+}
+
+/** Validate this article's outbound links (internal targets + external URLs) and let
+ *  an editor fix the prose or ignore a finding. */
+function BrokenLinksSection({
+  articleId,
+  canEdit,
+}: {
+  articleId: string;
+  canEdit: boolean;
+}) {
+  const { data } = useBrokenLinks(articleId);
+  const check = useCheckLinks(articleId);
+  const ignore = useIgnoreBrokenLink(articleId);
+  const open = (data ?? []).filter((b) => b.status === "open");
+
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Broken links
+        </h4>
+        {canEdit && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() =>
+              check.mutate(undefined, {
+                onSuccess: (rows) =>
+                  toast.success(
+                    rows.length
+                      ? `${rows.length} broken link${rows.length === 1 ? "" : "s"}`
+                      : "No broken links"
+                  ),
+                onError: (e) =>
+                  toast.error(e instanceof Error ? e.message : "Check failed"),
+              })
+            }
+            disabled={check.isPending}
+          >
+            {check.isPending ? <Loader2 className="animate-spin" /> : <Unlink />}
+            Check
+          </Button>
+        )}
+      </div>
+      {open.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No broken links found.</p>
+      ) : (
+        <ul className="space-y-2">
+          {open.map((b) => (
+            <li
+              key={b.id}
+              className="rounded-md border border-destructive/30 bg-destructive/[0.04] p-2.5 text-sm"
+            >
+              <div className="flex items-start gap-1.5">
+                <ExternalLink className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium">
+                    {b.anchor_text || b.url}
+                  </div>
+                  <div className="truncate text-xs text-muted-foreground">
+                    {b.url}
+                  </div>
+                  <div className="mt-0.5 text-xs text-destructive">
+                    {b.reason || "broken"}
+                  </div>
+                </div>
+              </div>
+              {canEdit && (
+                <div className="mt-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => ignore.mutate(b.id)}
+                    disabled={ignore.isPending}
+                  >
+                    <X />
+                    Ignore
                   </Button>
                 </div>
               )}

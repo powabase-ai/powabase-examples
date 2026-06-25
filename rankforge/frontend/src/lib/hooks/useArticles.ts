@@ -146,3 +146,28 @@ export function useDismissLink(id: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["links", id] }),
   });
 }
+
+// --- broken links (M6 / Phase 12.3) ---
+export function useBrokenLinks(id: string) {
+  return useQuery({
+    queryKey: ["link-health", id],
+    queryFn: () => articlesApi.linkHealth(id),
+    enabled: !!id,
+  });
+}
+
+export function useCheckLinks(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => articlesApi.checkLinks(id),
+    onSuccess: (data) => qc.setQueryData(["link-health", id], data),
+  });
+}
+
+export function useIgnoreBrokenLink(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (findingId: string) => articlesApi.ignoreBrokenLink(id, findingId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["link-health", id] }),
+  });
+}

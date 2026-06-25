@@ -14,13 +14,14 @@ from ..models.article import (
     ArticleVersion,
 )
 from ..models.comment import Comment, CommentCreate, CommentUpdate
-from ..models.linking import LinkSuggestion
+from ..models.linking import BrokenLink, LinkSuggestion
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
 from ..ratelimit import rate_limit
 from ..services import comments as comments_svc
 from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
+from ..services import linkcheck as linkcheck_svc
 from ..services import linking as linking_svc
 from ..services import quality as quality_svc
 from ..services import revise as revise_svc
@@ -335,6 +336,48 @@ def dismiss_link_suggestion(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "link suggestion not found"
         )
+    return row
+
+
+# --- link health / broken links (M6 / Phase 12.3) ---
+@router.get("/{article_id}/links/health", response_model=list[BrokenLink])
+def list_broken_links(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Open broken-link findings for this article."""
+    _guard_article(db, article_id, user)
+    return linkcheck_svc.list_findings(db, article_id)
+
+
+@router.post("/{article_id}/links/check", response_model=list[BrokenLink])
+async def check_links(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Validate this article's outbound links now (internal targets + external URLs)
+    and return the broken ones."""
+    article = _guard_article(db, article_id, user)
+    _require_editor(user)
+    return await linkcheck_svc.check_article(db, article["business_id"], article_id)
+
+
+@router.post(
+    "/{article_id}/links/health/{finding_id}/ignore", response_model=BrokenLink
+)
+def ignore_broken_link(
+    article_id: UUID,
+    finding_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    article = _guard_article(db, article_id, user)
+    _require_editor(user)
+    row = linkcheck_svc.ignore_finding(db, article["business_id"], finding_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "finding not found")
     return row
 
 

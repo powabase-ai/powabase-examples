@@ -492,7 +492,32 @@ export const articlesApi = {
       `/api/articles/${id}/links/${suggestionId}/dismiss`,
       { method: "POST" }
     ),
+  linkHealth: (id: string) =>
+    request<BrokenLink[]>(`/api/articles/${id}/links/health`),
+  checkLinks: (id: string) =>
+    request<BrokenLink[]>(`/api/articles/${id}/links/check`, { method: "POST" }),
+  ignoreBrokenLink: (id: string, findingId: string) =>
+    request<BrokenLink>(
+      `/api/articles/${id}/links/health/${findingId}/ignore`,
+      { method: "POST" }
+    ),
 };
+
+/** A broken outbound link found in a published article (internal target gone /
+ *  external 4xx-5xx / unreachable), surfaced for an editor to fix or ignore. */
+export interface BrokenLink {
+  id: string;
+  business_id: string;
+  article_id: string;
+  url: string;
+  anchor_text?: string | null;
+  kind: "internal" | "external";
+  http_status?: number | null;
+  reason?: string | null;
+  status: "open" | "ignored" | "resolved";
+  checked_at?: string | null;
+  created_at?: string | null;
+}
 
 /** A staged internal-link suggestion: an unlinked mention in this article that
  *  could link to another of the brand's published articles. */
