@@ -272,6 +272,32 @@ def combined_score(
     return total
 
 
+# A previously-met axis may dip this far below its target while we fix a FAILING one
+# (it was met with margin); a bigger drop means the fix did real collateral damage.
+_MET_TOLERANCE = 4
+
+
+def _objective_total(
+    seo: dict | None, geo: dict | None, grounding_report: dict | None
+) -> float:
+    """SEO + GEO + grounding — the axes the objective loop drives. (Grounding is only
+    known AFTER the fact-check, which is why the loop decides post-rescore.)"""
+    t = (seo or {}).get("total", 0) + (geo or {}).get("total", 0)
+    g = (grounding_report or {}).get("grounding_score")
+    return t + (g if isinstance(g, (int, float)) else 0)
+
+
+def _met_regressed_badly(pairs: list[tuple[dict | None, dict | None]]) -> bool:
+    """True if a previously-met axis fell more than _MET_TOLERANCE below target."""
+    for old, new in pairs:
+        if (
+            old and old.get("met") and new
+            and new.get("total", 0) < new.get("target", 0) - _MET_TOLERANCE
+        ):
+            return True
+    return False
+
+
 # --- context (diverse-domain excerpts) ---
 async def _diverse_excerpts(
     client: PowabaseClient,
@@ -603,12 +629,18 @@ async def _objective_loop(
     url_by_source: dict[str, str],
 ) -> None:
     """Iterate the article against the OBJECTIVE evaluators — SEO, GEO, Grounding —
-    until they meet target or stop improving. Readability/human-ness is NOT handled
-    here; that's the editorial loop. Capped so it always terminates."""
+    until they meet target or a pass stops helping. Readability/human-ness is NOT
+    handled here; that's the editorial loop. Capped so it always terminates.
+
+    The accept decision is made AFTER re-scoring, on the combined objective: grounding
+    can only be measured by the fact-check that runs post-rewrite, so a deterministic
+    SEO/GEO pre-check would veto every grounding fix that costs a point of a thin-margin
+    axis. We keep a pass only if it raised SEO+GEO+grounding overall without wrecking a
+    met axis; otherwise we revert (restoring the cached scores — no extra fact-check)."""
     from . import geo_optimize, quality, scoring  # local: avoid import cycle
 
+    _SNAP = ("seo_score", "geo_score", "grounding_report", "readability_score", "json_ld")
     agent_id: str | None = None
-    prev_combined = -1
     for i in range(MAX_REVISIONS):
         article = gen_svc.get_article(db, article_id)
         seo = article.get("seo_score")
@@ -616,10 +648,6 @@ async def _objective_loop(
         gr = article.get("grounding_report")
         if satisfied(seo, geo, gr):  # readability omitted — objective axes only
             break
-        score_now = combined_score(seo, geo, gr)
-        if score_now <= prev_combined:  # last pass didn't help — stop
-            break
-        prev_combined = score_now
         issues = collect_issues(seo, geo, gr)
         if not issues:
             break
@@ -635,10 +663,8 @@ async def _objective_loop(
             new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
-            title = article.get("meta_title") or article.get("title") or ""
-            meta = article.get("meta_description")
-            if not _accept_revision(cur_md, new_md, title, meta, brief):
-                break
+            before = _objective_total(seo, geo, gr)
+            snap = {k: article.get(k) for k in _SNAP}
             gen_svc._update(db, article_id, content_md=new_md)
             _step(db, article_id, i, "fact-checking", MAX_REVISIONS)
             await quality.reflect(client, db, article_id)
@@ -646,6 +672,16 @@ async def _objective_loop(
             await geo_optimize.optimize_and_store(client, db, article_id)
             _step(db, article_id, i, "scoring", MAX_REVISIONS)
             await scoring.score_and_store(client, db, article_id)
+            a2 = gen_svc.get_article(db, article_id) or {}
+            n_seo, n_geo, n_gr = (
+                a2.get("seo_score"), a2.get("geo_score"), a2.get("grounding_report")
+            )
+            improved = _objective_total(n_seo, n_geo, n_gr) > before
+            if not improved or _met_regressed_badly([(seo, n_seo), (geo, n_geo)]):
+                # The pass didn't raise the objective (or wrecked a met axis) — revert
+                # content + the cached scores (no re-fact-check needed) and stop.
+                gen_svc._update(db, article_id, content_md=cur_md, **snap)
+                break
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
             break
 
