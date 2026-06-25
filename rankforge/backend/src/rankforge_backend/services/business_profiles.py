@@ -11,7 +11,8 @@ from ..models.business import BusinessProfileCreate, BusinessProfileUpdate
 _COLUMNS = (
     "id, org_id, name, domain, description, niche, audience, seed_topics, "
     "target_keywords, competitors, brand_kb_id, sitemap_url, url_pattern, "
-    "materials_kb_id, materials_progress, created_by, created_at, updated_at"
+    "materials_kb_id, materials_progress, cluster_kb_id, created_by, "
+    "created_at, updated_at"
 )
 
 # jsonb columns need the Json wrapper for psycopg adaptation.

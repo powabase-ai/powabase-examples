@@ -40,10 +40,13 @@ class PowabaseClient:
         if not base_url or not service_role_key:
             raise ValueError("base_url and service_role_key are required")
         self._base_url = base_url.rstrip("/")
+        # Auth on every call (both, or 401). Deliberately NO default Content-Type:
+        # httpx sets `application/json` for json= calls and `multipart/form-data;
+        # boundary=…` for files= (upload). A client-default application/json would
+        # override the multipart boundary and break uploads ("No file provided").
         self._headers = {
             "apikey": service_role_key,
             "Authorization": f"Bearer {service_role_key}",
-            "Content-Type": "application/json",
         }
         self._client = httpx.AsyncClient(
             base_url=self._base_url, headers=self._headers, timeout=timeout

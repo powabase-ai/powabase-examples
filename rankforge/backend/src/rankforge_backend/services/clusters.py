@@ -1,0 +1,361 @@
+"""Content clusters — topical-authority architecture.
+
+Every opportunity/article belongs to exactly one cluster: it JOINS the best-matching
+existing cluster as a supplementary member, or FOUNDS a new cluster as its permanent
+authority PILLAR. A dedicated LLM agent (rankforge-cluster-architect) makes the call,
+using a per-brand "cluster index" KB (full_doc → one embedding per cluster) to retrieve
+candidate clusters by semantic similarity. The pillar, once set, is never auto-replaced.
+
+This module owns: the cluster-index KB, the architect agent, the assignment engine,
+and cluster reads/writes. Cluster-aware LINKING and pillar-aware GENERATION consume it.
+"""
+
+import asyncio
+import logging
+from typing import Any
+from uuid import UUID
+
+from ..db import Database
+from ..powabase import PowabaseClient
+from ..util import extract_json
+from . import business_profiles as brands
+from .agents import ensure_agent
+
+log = logging.getLogger("rankforge.clusters")
+
+_COLUMNS = (
+    "id, business_id, label, theme, pillar_article_id, pillar_locked, "
+    "index_doc_id, created_at, updated_at"
+)
+_EXTRACTION_TERMINAL = {"extracted", "attention_required", "failed", "cancelled"}
+_INDEX_TERMINAL = {"indexed", "failed", "cancelled"}
+
+# full_document: each cluster's pillar summary is ONE short doc → one embedding, so
+# search returns nearest CLUSTERS (not chunk fragments). The docs are tiny, so the
+# usual long-doc/token downsides of whole-doc indexing don't apply here.
+CLUSTER_INDEXING = {"strategy": "full_document"}
+# Below this many clusters we skip retrieval and just hand them all to the agent.
+_RETRIEVE_THRESHOLD = 6
+
+
+# --- cluster-index KB (get-or-create; mirrors grounding.ensure_brand_kb) ---
+async def ensure_cluster_kb(
+    client: PowabaseClient, db: Database, business_id: UUID
+) -> str:
+    brand = brands.get_profile(db, business_id)
+    if brand is None:
+        raise ValueError("business profile not found")
+    if brand.get("cluster_kb_id"):
+        return brand["cluster_kb_id"]
+    kb = await client.create_kb(
+        f"{brand['name']} — clusters",
+        description="One doc per content cluster, for topical-similarity retrieval.",
+        indexing_config=CLUSTER_INDEXING,
+    )
+    kb_id = kb.get("id") or kb.get("knowledge_base", {}).get("id")
+    won = db.fetch_one(
+        "update public.business_profiles set cluster_kb_id = %s "
+        "where id = %s and cluster_kb_id is null returning cluster_kb_id",
+        (kb_id, business_id),
+    )
+    if won is not None:
+        return kb_id
+    try:
+        await client.delete_kb(kb_id)
+    except Exception:  # noqa: BLE001
+        pass
+    return brands.get_profile(db, business_id)["cluster_kb_id"]
+
+
+async def _index_doc(
+    client: PowabaseClient, kb_id: str, *, label: str, theme: str, pillar_title: str
+) -> str | None:
+    """Upload a cluster's one-doc representation and index it. Returns the source id."""
+    text = (
+        f"# {label}\n\nTheme: {theme or label}\n\n"
+        f"Pillar article: {pillar_title or label}\n"
+    )
+    try:
+        up = await client.upload_source(
+            f"cluster-{(label or 'cluster')[:40]}.md",
+            text.encode("utf-8"),
+            "text/markdown",
+        )
+        sid = up.get("id") or (up.get("source") or {}).get("id")
+        if not sid:
+            return None
+        for _ in range(20):  # tiny doc — extraction is near-instant, poll briefly
+            src = await client.get_source(sid)
+            if src.get("extraction_status") in _EXTRACTION_TERMINAL:
+                break
+            await asyncio.sleep(1)
+        await client.add_source_to_kb(kb_id, sid)
+        # add_source_to_kb triggers indexing ASYNC — wait for it to settle so the
+        # freshly-founded cluster is immediately retrievable by the next assignment.
+        for _ in range(30):
+            listing = await client.list_kb_sources(kb_id)
+            items = listing.get("items", []) if isinstance(listing, dict) else []
+            mine = [i.get("index_status") for i in items if i.get("source_id") == sid]
+            if mine and all(st in _INDEX_TERMINAL for st in mine):
+                break
+            await asyncio.sleep(1)
+        return sid
+    except Exception:  # noqa: BLE001 — retrieval degrades to pass-all without the doc
+        log.exception("cluster index-doc upload failed for kb %s", kb_id)
+        return None
+
+
+# --- reads ---
+def list_clusters(db: Database, business_id: UUID) -> list[dict[str, Any]]:
+    return db.fetch_all(
+        f"select {_COLUMNS} from public.content_clusters "
+        "where business_id = %s order by created_at",
+        (business_id,),
+    )
+
+
+def get_cluster(db: Database, cluster_id: UUID) -> dict[str, Any] | None:
+    return db.fetch_one(
+        f"select {_COLUMNS} from public.content_clusters where id = %s", (cluster_id,)
+    )
+
+
+def list_members(db: Database, cluster_id: UUID) -> list[dict[str, Any]]:
+    """Articles in a cluster (pillar first, then members), for the cluster view."""
+    return db.fetch_all(
+        "select id, title, slug, status, cluster_role, canonical_url "
+        "from public.articles where cluster_id = %s "
+        "order by (cluster_role = 'pillar') desc, created_at",
+        (cluster_id,),
+    )
+
+
+def _pillar_title(db: Database, cluster: dict[str, Any]) -> str:
+    pid = cluster.get("pillar_article_id")
+    if pid:
+        row = db.fetch_one("select title from public.articles where id = %s", (pid,))
+        if row and row.get("title"):
+            return row["title"]
+    return cluster.get("label") or ""
+
+
+# --- writes ---
+def attach_article(
+    db: Database, article_id: UUID, cluster_id: UUID, role: str
+) -> None:
+    """Link an article to its cluster. If it's the pillar and the cluster has no pillar
+    article yet, claim the slot (permanent — only filled while still empty)."""
+    db.execute(
+        "update public.articles set cluster_id = %s, cluster_role = %s where id = %s",
+        (cluster_id, role, article_id),
+    )
+    if role == "pillar":
+        db.execute(
+            "update public.content_clusters set pillar_article_id = %s, "
+            "updated_at = now() where id = %s and pillar_article_id is null",
+            (article_id, cluster_id),
+        )
+
+
+def set_pillar(
+    db: Database, business_id: UUID, cluster_id: UUID, article_id: UUID
+) -> dict[str, Any] | None:
+    """Manual override: make `article_id` the cluster's pillar (and lock it). Demotes
+    the previous pillar to a member. The only way a pillar ever changes."""
+    cluster = db.fetch_one(
+        "select id from public.content_clusters where id = %s and business_id = %s",
+        (cluster_id, business_id),
+    )
+    if cluster is None:
+        return None
+    db.execute(
+        "update public.articles set cluster_role = 'member' "
+        "where cluster_id = %s and cluster_role = 'pillar'",
+        (cluster_id,),
+    )
+    db.execute(
+        "update public.articles set cluster_id = %s, cluster_role = 'pillar' "
+        "where id = %s",
+        (cluster_id, article_id),
+    )
+    return db.fetch_one(
+        "update public.content_clusters set pillar_article_id = %s, "
+        f"pillar_locked = true, updated_at = now() where id = %s returning {_COLUMNS}",
+        (article_id, cluster_id),
+    )
+
+
+# --- the architect agent ---
+CLUSTER_AGENT_NAME = "rankforge-cluster-architect"
+CLUSTER_MODEL = "claude-opus-4-7"
+
+_SYSTEM = """\
+You are RankForge's **content-cluster architect**. A brand's blog is organized into \
+topic clusters for topical authority: each cluster has ONE authoritative **pillar** \
+article (the broad, central piece the brand promotes) and several **member** articles \
+(each focused on a subtopic, all linking up to the pillar).
+
+Given a NEW topic and the brand's existing clusters, decide ONE of:
+- **join** — the topic is a facet, subtopic, comparison, or how-to OF an existing \
+cluster's theme → it becomes a member of that cluster.
+- **found** — the topic is a genuinely distinct theme that deserves its own authority \
+pillar → it founds a new cluster (and becomes that cluster's pillar).
+
+## How to decide
+- **Bias toward joining.** Found a new cluster ONLY when no existing cluster's theme \
+genuinely covers the topic — a distinct area the brand should build separate authority \
+around, not a near-duplicate of an existing cluster.
+- Judge by topical relationship, not raw keyword overlap: a narrower piece within a \
+broader theme JOINS it; it does not found a competing cluster.
+- When you **found**, give the cluster a short human label (a few words) and a \
+one-paragraph **theme** describing its scope — which subtopics belong in it — so future \
+topics can be matched to it.
+
+## Output discipline
+- Return exactly one JSON object — no prose, no commentary, no code fences.
+"""
+
+_SCHEMA = (
+    '{"decision": "join" | "found", "cluster_id": <id from the list, or null>, '
+    '"label": <new cluster label, or null>, "theme": <new cluster scope, or null>, '
+    '"rationale": <one sentence>}'
+)
+
+
+async def ensure_cluster_agent(client: PowabaseClient) -> str:
+    return await ensure_agent(
+        client,
+        name=CLUSTER_AGENT_NAME,
+        model=CLUSTER_MODEL,
+        system_prompt=_SYSTEM,
+        settings={"reasoning_effort": "medium"},
+    )
+
+
+def _candidates_block(db: Database, candidates: list[dict[str, Any]]) -> str:
+    if not candidates:
+        return "(none yet — this would be the brand's first cluster)"
+    lines = []
+    for c in candidates:
+        lines.append(
+            f'- [{c["id"]}] "{c.get("label")}" — pillar: '
+            f'"{_pillar_title(db, c)}" — theme: {c.get("theme") or "(n/a)"}'
+        )
+    return "\n".join(lines)
+
+
+async def _run_agent(
+    client: PowabaseClient,
+    db: Database,
+    brand: dict[str, Any] | None,
+    *,
+    title: str,
+    keyword: str | None,
+    angle: str | None,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    brand = brand or {}
+    msg = (
+        "## Brand\n"
+        f"- Name: {brand.get('name')}\n"
+        f"- Niche: {brand.get('niche') or 'n/a'}\n"
+        f"- Audience: {brand.get('audience') or 'n/a'}\n"
+        f"- Seed topics: {', '.join(brand.get('seed_topics') or []) or 'n/a'}\n\n"
+        "## New topic\n"
+        f"- Title: {title}\n"
+        f"- Primary keyword: {keyword or 'n/a'}\n"
+        f"- Angle: {angle or 'n/a'}\n\n"
+        "## Existing clusters (candidates — join one of these by its id, or found a new one)\n"
+        f"{_candidates_block(db, candidates)}\n\n"
+        "## Task\n"
+        "- Decide join or found per the rules. If joining, `cluster_id` MUST be one of "
+        "the ids above.\n\n"
+        f"## Output\nReturn ONLY this JSON object:\n{_SCHEMA}"
+    )
+    agent_id = await ensure_cluster_agent(client)
+    res = await client.run_agent(agent_id, msg)
+    data = extract_json(res.get("content") or "")
+    return data if isinstance(data, dict) else {}
+
+
+# --- the assignment engine ---
+async def _retrieve_candidates(
+    client: PowabaseClient,
+    db: Database,
+    business_id: UUID,
+    kb_id: str,
+    query: str,
+    *,
+    limit: int = _RETRIEVE_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """Nearest existing clusters for `query`. With few clusters, pass them all (no
+    retrieval); otherwise search the cluster-index KB and map hits back to clusters."""
+    clusters = list_clusters(db, business_id)
+    if len(clusters) <= limit:
+        return clusters
+    by_doc = {c["index_doc_id"]: c for c in clusters if c.get("index_doc_id")}
+    try:
+        hits = await client.search_kb(kb_id, query, top_k=limit)
+    except Exception:  # noqa: BLE001 — fall back to the most recent clusters
+        return clusters[-limit:]
+    out: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for h in hits:
+        c = by_doc.get(h.get("source_id"))
+        if c and c["id"] not in seen:
+            seen.add(c["id"])
+            out.append(c)
+    return out or clusters[-limit:]
+
+
+async def assign(
+    client: PowabaseClient,
+    db: Database,
+    business_id: UUID,
+    *,
+    title: str,
+    keyword: str | None = None,
+    angle: str | None = None,
+    extra_candidates: list[dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    """Assign a topic (opportunity or article) to a cluster. Returns (cluster_id, role).
+
+    Retrieves nearby clusters, lets the architect agent decide join-vs-found, and on
+    'found' creates the cluster + its index doc. `extra_candidates` lets a caller pass
+    clusters just founded in the same batch (not yet searchable) to avoid duplicates.
+    """
+    brand = brands.get_profile(db, business_id)
+    kb_id = await ensure_cluster_kb(client, db, business_id)
+    query = " ".join(p for p in (title, keyword, angle) if p)
+    candidates = await _retrieve_candidates(client, db, business_id, kb_id, query)
+    if extra_candidates:
+        ids = {c["id"] for c in candidates}
+        candidates = candidates + [c for c in extra_candidates if c["id"] not in ids]
+
+    decision = await _run_agent(
+        client, db, brand, title=title, keyword=keyword, angle=angle,
+        candidates=candidates,
+    )
+    cand_by_id = {str(c["id"]): c for c in candidates}
+    if decision.get("decision") == "join":
+        cid = str(decision.get("cluster_id") or "")
+        if cid in cand_by_id:
+            return cid, "member"
+        if candidates:  # wanted to join but named a bad id → join the nearest
+            return str(candidates[0]["id"]), "member"
+        # else: nothing to join → fall through and found
+
+    label = (decision.get("label") or title or "Cluster")[:120]
+    theme = decision.get("theme") or ""
+    cluster = db.fetch_one(
+        "insert into public.content_clusters (business_id, label, theme) "
+        f"values (%s, %s, %s) returning {_COLUMNS}",
+        (business_id, label, theme),
+    )
+    doc_id = await _index_doc(client, kb_id, label=label, theme=theme, pillar_title=title)
+    if doc_id:
+        db.execute(
+            "update public.content_clusters set index_doc_id = %s where id = %s",
+            (doc_id, cluster["id"]),
+        )
+    return str(cluster["id"]), "pillar"
