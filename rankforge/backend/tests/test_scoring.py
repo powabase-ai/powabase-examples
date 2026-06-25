@@ -106,3 +106,21 @@ def test_readability_uses_llm_human_voice_when_present():
     by = {x["key"]: x for x in s["signals"]}
     assert by["human_voice"]["score"] == 90
     assert by["human_voice"]["method"] == "llm"
+
+
+def test_readability_gate_fails_on_em_dash_spam():
+    """An egregious hard tell (em-dash spam) must flip an otherwise-passing article
+    to not-met, so refine's collect_issues (which skips met axes) surfaces it."""
+    base = (
+        "The API returns 200 in about 40 ms. We checked 1,000 requests on a "
+        "t3.micro. Sarah flagged a regression in March. The fix shipped in v2.3 "
+        "and nothing regressed since, which surprised the on-call engineer."
+    )
+    llm = {"human_voice": 95, "flow": 95}
+    assert scoring.score_readability(base, llm)["met"]  # clean prose passes
+    emdash = base.replace(". ", " — ", 5)  # inject 5 em-dashes into the same prose
+    s = scoring.score_readability(emdash, llm)
+    by = {x["key"]: x["score"] for x in s["signals"]}
+    assert by["em_dashes"] < 40
+    assert not s["met"]  # gated to not-met despite a high weighted average
+    assert s["total"] == scoring.READABILITY_TARGET - 1

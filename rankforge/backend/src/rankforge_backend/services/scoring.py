@@ -383,7 +383,18 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
         if llm else _NEUTRAL,
         llm.get("flow_fixes", []) if llm else [], method="llm"))
 
-    return _aggregate(sig, READABILITY_TARGET)
+    result = _aggregate(sig, READABILITY_TARGET)
+    # Gate: a hard deterministic AI tell (em-dash spam, banned vocab, formulaic
+    # constructions) reads as machine-made no matter how high the weighted average.
+    # If any is egregious, the article can't be "met" — otherwise collect_issues
+    # skips the whole (passing) readability axis and the reviser never hears about
+    # it. Cap just below target so the gap-to-target stays small.
+    _GATE_KEYS = {"em_dashes", "ai_vocabulary", "tell_phrases"}
+    worst = min((s["score"] for s in sig if s["key"] in _GATE_KEYS), default=100)
+    if worst < 40 and result["total"] >= READABILITY_TARGET:
+        result["total"] = READABILITY_TARGET - 1
+        result["met"] = False
+    return result
 
 
 JUDGE_AGENT_NAME = "rankforge-geo-judge"

@@ -9,7 +9,7 @@ from uuid import UUID
 
 from ..db import Database
 from ..powabase import PowabaseClient
-from ..util import extract_json
+from ..util import extract_json, strip_em_dashes
 from . import brief as brief_svc
 from . import business_profiles as brands
 from . import generation as gen_svc
@@ -129,6 +129,15 @@ async def optimize_and_store(
     template = templates_svc.get_template(db, brief.get("article_type"))
     schema_type = template["schema_org_type"] if template else "BlogPosting"
     content_md = article.get("content_md") or ""
+
+    # Deterministically de-AI the prose where a rule beats the LLM: strip em-dashes.
+    # Runs on every optimize — i.e. the "Re-optimize & score" button AND each refine
+    # pass — so the reviser leaving them in can't keep them in the final article.
+    cleaned = strip_em_dashes(content_md)
+    if cleaned != content_md:
+        gen_svc._update(db, article_id, content_md=cleaned)
+        content_md = cleaned
+        article["content_md"] = cleaned
 
     graph: list[dict[str, Any]] = [build_article_jsonld(article, brief, author)]
     if schema_type == "ItemList":
