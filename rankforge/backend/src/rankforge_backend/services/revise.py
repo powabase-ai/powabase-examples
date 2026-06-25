@@ -536,7 +536,14 @@ async def _editorial_loop(
         )
         verdict = (review.get("verdict") or "").lower()
         human = review.get("reads_human")
-        if verdict == "ship" or (isinstance(human, int) and human >= _HUMAN_BAR):
+        if verdict == "ship":
+            break
+        # Respect an explicit "revise"; only fall back to the score as a backstop
+        # when the verdict is missing/ambiguous (don't let a high score override a
+        # clear request to revise).
+        if verdict != "revise" and (
+            not isinstance(human, int) or human >= _HUMAN_BAR
+        ):
             break
         notes = [n for n in (review.get("notes") or []) if isinstance(n, dict)]
         if not notes:
@@ -561,6 +568,23 @@ async def _editorial_loop(
                 break
             gen_svc._update(db, article_id, content_md=new_md)
             await quality.reflect(client, db, article_id)
+            # Grounding guard: a voice rewrite must not weaken factual grounding. If
+            # the fact-check shows grounding fell below target AND below where it was,
+            # revert — a more-human paragraph isn't worth a weaker/unsupported claim.
+            prior_gr = (article.get("grounding_report") or {}).get("grounding_score")
+            refreshed = gen_svc.get_article(db, article_id)
+            new_gr = ((refreshed or {}).get("grounding_report") or {}).get(
+                "grounding_score"
+            )
+            if (
+                prior_gr is not None
+                and new_gr is not None
+                and new_gr < prior_gr
+                and new_gr < GROUNDING_TARGET
+            ):
+                gen_svc._update(db, article_id, content_md=cur_md)  # revert
+                await quality.reflect(client, db, article_id)  # restore grounding
+                break
             await geo_optimize.optimize_and_store(client, db, article_id)
             await scoring.score_and_store(client, db, article_id)
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft

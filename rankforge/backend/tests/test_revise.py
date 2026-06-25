@@ -152,3 +152,27 @@ async def test_editorial_loop_skips_rewrite_when_no_notes(monkeypatch):
         MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {}
     )
     rev.assert_not_awaited()
+
+
+async def test_editorial_loop_respects_revise_over_high_score(monkeypatch):
+    """An explicit 'revise' must trigger a rewrite even if reads_human is high — a
+    high score must not override a clear request to revise."""
+    art = {"content_md": "Body here.", "readability_score": None, "title": "T",
+           "meta_title": None, "meta_description": None}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda db, aid: art)
+    monkeypatch.setattr(revise, "ensure_editor_agent", AsyncMock(return_value="ed"))
+    monkeypatch.setattr(revise, "ensure_reviser_agent", AsyncMock(return_value="rv"))
+    monkeypatch.setattr(
+        revise, "_editor_review",
+        AsyncMock(return_value={
+            "verdict": "revise", "reads_human": 95,
+            "notes": [{"quote": "x", "problem": "p", "fix": "f"}],
+        }),
+    )
+    monkeypatch.setattr(revise, "_diverse_excerpts", AsyncMock(return_value="(none)"))
+    rev = AsyncMock(return_value="")  # empty → loop breaks after, but it WAS attempted
+    monkeypatch.setattr(revise, "_revise_for_voice", rev)
+    await revise._editorial_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {}
+    )
+    rev.assert_awaited()
