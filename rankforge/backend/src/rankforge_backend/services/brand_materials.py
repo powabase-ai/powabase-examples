@@ -12,8 +12,10 @@ the data access the routes need; generation consumes the KB elsewhere.
 """
 
 import asyncio
+import ipaddress
 import logging
 import re
+import socket
 from typing import Any
 from urllib.parse import urljoin, urlparse
 from uuid import UUID
@@ -177,13 +179,46 @@ def _registrable(host: str) -> str:
     return ".".join(parts[-2:]) if len(parts) >= 2 else (host or "")
 
 
+def _is_public_host(host: str) -> bool:
+    """SSRF guard: True only if `host` resolves exclusively to public IPs.
+
+    discover_pages fetches a user-supplied URL server-side, so without this an
+    editor could point it at loopback / private / link-local addresses (e.g. the
+    cloud metadata endpoint 169.254.169.254) and use the server as a proxy. Rejects
+    obvious internal names and any host that resolves to a non-public address.
+    """
+    host = (host or "").split(":")[0].strip().lower()
+    if not host or host == "localhost" or host.endswith((".local", ".internal")):
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_multicast
+            or addr.is_unspecified
+        ):
+            return False
+    return True
+
+
 def discover_pages(root_url: str, max_pages: int = DEFAULT_MAX_PAGES) -> list[str]:
     """Shallow, READ-ONLY page discovery for the crawl preview — collect same-site
     links (including subdomains) from the root page and its sitemap, so the user can
     see which subdomains/pages were found and confirm BEFORE anything is imported.
 
     Best-effort: returns [] on failure. Nothing here touches Powabase or the DB; the
-    actual import still runs on the platform once the user confirms a URL set.
+    actual import still runs on the platform once the user confirms a URL set. Only
+    fetches public, same-registrable-domain hosts (SSRF guard).
     """
     raw = (root_url or "").strip()
     if not raw:
@@ -192,6 +227,8 @@ def discover_pages(root_url: str, max_pages: int = DEFAULT_MAX_PAGES) -> list[st
         raw = "https://" + raw
     base = urlparse(raw)
     site = _registrable(base.netloc)
+    if not _is_public_host(base.netloc):
+        return []
     found: dict[str, None] = {}
 
     def _add(u: str) -> None:
@@ -205,38 +242,51 @@ def discover_pages(root_url: str, max_pages: int = DEFAULT_MAX_PAGES) -> list[st
             return
         found.setdefault(u.rstrip("/") or u, None)
 
+    def _fetch(c: httpx.Client, url: str) -> httpx.Response | None:
+        """GET a URL, following redirects manually so EVERY hop's host is
+        re-validated as public (httpx auto-redirects would bypass the SSRF check)."""
+        for _ in range(4):  # initial + up to 3 redirects
+            if not _is_public_host(urlparse(url).netloc):
+                return None
+            try:
+                resp = c.get(url)
+            except httpx.HTTPError:
+                return None
+            loc = resp.headers.get("location")
+            if resp.is_redirect and loc:
+                url = urljoin(url, loc)
+                continue
+            return resp
+        return None
+
     _add(raw)
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as c:
-            try:
-                r = c.get(raw)
-                r.raise_for_status()
+        # No auto-redirects: a redirect could bounce to an internal host, bypassing
+        # the per-URL public-host check above.
+        with httpx.Client(timeout=15.0, follow_redirects=False) as c:
+            r = _fetch(c, raw)
+            if r is not None and r.status_code < 400:
                 for href in _HREF_RE.findall(r.text):
                     _add(urljoin(raw, href))
-            except httpx.HTTPError:
-                pass
             # sitemap (one level of sitemap-index), bounded
             if len(found) < max_pages:
-                try:
-                    sm = c.get(f"{base.scheme}://{base.netloc}/sitemap.xml")
-                    if sm.status_code < 400:
-                        locs = _LOC_RE.findall(sm.text)
-                        children = [u for u in locs if u.lower().endswith(".xml")]
-                        for u in locs:
-                            if not u.lower().endswith(".xml"):
-                                _add(u)
-                        for child in children[:5]:
-                            if len(found) >= max_pages:
-                                break
-                            try:
-                                cr = c.get(child)
-                                if cr.status_code < 400:
-                                    for loc in _LOC_RE.findall(cr.text):
-                                        _add(loc)
-                            except httpx.HTTPError:
-                                continue
-                except httpx.HTTPError:
-                    pass
+                sm = _fetch(c, f"{base.scheme}://{base.netloc}/sitemap.xml")
+                if sm is not None and sm.status_code < 400:
+                    locs = _LOC_RE.findall(sm.text)
+                    children = [u for u in locs if u.lower().endswith(".xml")]
+                    for u in locs:
+                        if not u.lower().endswith(".xml"):
+                            _add(u)
+                    for child in children[:5]:
+                        if len(found) >= max_pages:
+                            break
+                        # only same-site children, re-checked for public host
+                        if _registrable(urlparse(child).netloc) != site:
+                            continue
+                        cr = _fetch(c, child)
+                        if cr is not None and cr.status_code < 400:
+                            for loc in _LOC_RE.findall(cr.text):
+                                _add(loc)
     except Exception:  # noqa: BLE001 — discovery must never raise into the route
         log.exception("discover_pages failed for %s", raw)
 

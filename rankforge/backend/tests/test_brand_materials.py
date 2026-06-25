@@ -81,21 +81,22 @@ async def test_discover_noops_when_nothing_to_discover():
 
 # --- discover_pages (crawl preview, unit) ---
 def test_discover_pages_keeps_same_site_and_subdomains(monkeypatch):
+    monkeypatch.setattr(svc, "_is_public_host", lambda host: True)
     root = "https://brand.example"
     html = (
         '<a href="/about">a</a>'
         '<a href="https://docs.brand.example/guide">d</a>'
         '<a href="https://other.com/x">o</a>'
         '<a href="https://brand.example/pricing">p</a>'
+        '<a href="/_next/static/app.js">asset</a>'
     )
 
     class Resp:
         def __init__(self, text, code=200):
             self.text = text
             self.status_code = code
-
-        def raise_for_status(self):
-            return None
+            self.is_redirect = False
+            self.headers: dict[str, str] = {}
 
     class FakeClient:
         def __init__(self, *a, **k):
@@ -116,6 +117,23 @@ def test_discover_pages_keeps_same_site_and_subdomains(monkeypatch):
     assert "https://docs.brand.example/guide" in out  # subdomain kept
     assert "https://brand.example/pricing" in out
     assert all("other.com" not in u for u in out)  # cross-site dropped
+    assert all("_next" not in u for u in out)  # assets dropped
+
+
+def test_is_public_host_blocks_internal():
+    assert not svc._is_public_host("localhost")
+    assert not svc._is_public_host("127.0.0.1")
+    assert not svc._is_public_host("10.0.0.1")
+    assert not svc._is_public_host("192.168.0.5")
+    assert not svc._is_public_host("169.254.169.254")  # cloud metadata
+    assert not svc._is_public_host("intranet.local")
+    assert svc._is_public_host("8.8.8.8")  # public IP literal
+
+
+def test_discover_pages_rejects_private_host():
+    # SSRF guard short-circuits before any network fetch — no httpx mock needed.
+    assert svc.discover_pages("http://127.0.0.1/admin", 10) == []
+    assert svc.discover_pages("http://169.254.169.254/latest/meta-data", 10) == []
 
 
 def test_discover_route_groups_by_host(monkeypatch):

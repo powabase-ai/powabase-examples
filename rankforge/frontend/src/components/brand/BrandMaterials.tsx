@@ -234,6 +234,11 @@ function AddPagesDialog({
   const [found, setFound] = React.useState<MaterialsDiscovery | null>(null);
   const [keepHosts, setKeepHosts] = React.useState<Set<string>>(new Set());
 
+  // Drop any stale crawl preview when the dialog closes, so reopening starts clean.
+  React.useEffect(() => {
+    if (!open) setFound(null);
+  }, [open]);
+
   function pickMode(m: IngestMode) {
     setMode(m);
     setFound(null); // leaving/entering crawl resets any preview
