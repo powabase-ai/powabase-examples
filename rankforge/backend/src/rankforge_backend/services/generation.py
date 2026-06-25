@@ -39,28 +39,31 @@ WRITER_AGENT_NAME = "rankforge-writer"
 WRITER_MODEL = "claude-opus-4-7"
 
 _SYSTEM_PROMPT = """\
-You are RankForge's **senior content writer**. You write one part of a long-form \
-SEO/GEO blog article at a time, in clean Markdown, for the brand's audience. \
+You are RankForge's **senior content writer**. You write a complete long-form \
+SEO/GEO blog article in one pass, in clean Markdown, for the brand's audience. \
 Excellent work reads like a knowledgeable human wrote it for that audience: it \
-answers the reader's question fast, backs specifics with real sources, and never \
-betrays its machine origin.
+answers the reader's question fast, builds a single argument from start to finish, \
+backs specifics with real sources, and never betrays its machine origin.
 
 ## What you're given, and how to use it
 - The article topic, primary and secondary keywords, and the brand/audience — write \
 to that reader, work the primary keyword in naturally where it fits (never stuff \
 it), and weave the relevant secondary keywords in only where they read smoothly.
-- The exact part to write (intro, a specific section with its subheadings, or the \
-conclusion) — write that part only, at the heading level requested, to the length \
-asked for.
+- The outline (an ordered H2/H3 heading plan) and a target length — write the whole \
+article to it: a short intro, every section in order with its subheadings, and a \
+conclusion.
 - Grounding excerpts with their source domains — your evidence for every specific \
 claim (see below).
-- Write only the requested part, but make it cohere with a larger article: don't \
-re-introduce the topic mid-article or repeat the intro's framing in every section.
-- You may be given a "Cohere with what's already written" block — the openings and \
-the tail of the parts before this one. Continue naturally from that tail, open THIS \
-part with a DIFFERENT shape, and vary its length and rhythm. Mechanical sameness \
-across sections (every one the same length, every opener the same shape) is the \
-clearest sign a machine wrote it.
+
+## Write it as ONE coherent article, not stitched-together sections
+- Find the throughline — the single argument the article makes — and have every \
+section advance it. Set it up early; pay it off at the end.
+- Write real transitions: each section picks up where the last left off and sets up \
+the next, so the reader is carried from start to finish.
+- Say each thing once. Don't re-introduce the topic mid-article, re-explain a concept \
+two sections apart, or let the conclusion restate the intro — it should resolve it.
+- Vary section length and rhythm on purpose; uniform, same-shaped sections read \
+machine-made.
 
 ## Grounding & citations
 - Base every factual or statistical claim on the provided source excerpts; never \
@@ -119,8 +122,10 @@ Editors reject copy that reads as machine-written. Steer clear of all of these:
 - Generic, safe, specificity-free prose is the clearest AI tell. Choose the precise detail over the smooth generality every time.
 
 ## Output
-- Output only the Markdown for the requested part, starting at its heading.
-- Add no preamble, sign-off, or content outside the requested part.
+- Output the full article body in Markdown: the intro, every section (`##` with its \
+`###` subheadings), then a conclusion, in outline order.
+- Do NOT output the H1 title — it's added for you. Add no preamble, sign-off, or \
+meta-commentary.
 """
 
 _ARTICLE_COLUMNS = (
@@ -136,8 +141,9 @@ async def ensure_writer_agent(client: PowabaseClient) -> str:
         client,
         name=WRITER_AGENT_NAME,
         model=WRITER_MODEL,
-        system_prompt=_SYSTEM_PROMPT,
-        settings={"temperature": 0.4},
+        # max_tokens raised: one pass now emits the WHOLE article (~2–3k words), not a
+        # single ~400-word section, so the default output cap would truncate it.
+        settings={"temperature": 0.4, "max_tokens": 8000},
     )
 
 
@@ -262,72 +268,123 @@ def try_begin_refine(db: Database, article_id: UUID, *, total: int) -> bool:
     return row is not None
 
 
-def _first_words(md: str, n: int = 14) -> str:
-    """The opening prose phrase of a drafted part (skipping the markdown heading) —
-    fed to the next part so it can avoid reusing the same opening shape across
-    sections. Headings come from the fixed outline, so we vary the prose, not them."""
-    for line in md.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
+async def _gather_grounding(
+    client: PowabaseClient,
+    kb_id: str | None,
+    queries: list[str | None],
+    *,
+    source_ids: list[str] | None = None,
+    top_k: int = 12,
+    per_source: int = 3,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    """Retrieve grounding across the WHOLE article's scope by running several queries
+    (primary keyword, topic, secondary keywords, section headings), deduped by chunk
+    and capped per source for domain variety — so the single-pass writer has evidence
+    for every section, not just one query's worth."""
+    if not kb_id:
+        return []
+    seen: set[str] = set()
+    per: dict[Any, int] = {}
+    out: list[dict[str, Any]] = []
+    for q in queries:
+        if not q:
             continue
-        return " ".join(s.split()[:n])
-    return ""
+        for c in await grounding.search(
+            client, kb_id, q, top_k=top_k, source_ids=source_ids
+        ):
+            cid, sid = c.get("chunk_id"), c.get("source_id")
+            if cid and cid in seen:
+                continue
+            if per.get(sid, 0) >= per_source:
+                continue
+            if cid:
+                seen.add(cid)
+            per[sid] = per.get(sid, 0) + 1
+            out.append(c)
+            if len(out) >= limit:
+                return out
+    return out
 
 
-async def _draft_part(
+def _outline_text(headings: list[str]) -> str:
+    lines: list[str] = []
+    for h in headings:
+        text = h.split(":", 1)[1].strip() if ":" in h else h.strip()
+        if h.lower().lstrip().startswith("h3"):
+            lines.append(f"  - {text}  (### subsection)")
+        else:
+            lines.append(f"- {text}  (## section)")
+    return "\n".join(lines) or "- (no outline provided — structure the article yourself)"
+
+
+async def _draft_article(
     client: PowabaseClient,
     agent_id: str,
-    kb_id: str | None,
+    brief: dict[str, Any],
     ctx: dict[str, Any],
-    instruction: str,
-    search_query: str,
     *,
+    title: str,
+    kb_id: str | None,
     source_ids: list[str] | None,
     url_by_source: dict[str, str],
     materials_kb_id: str | None = None,
     materials_url_by_source: dict[str, str] | None = None,
-    prior: str = "",
 ) -> str:
-    # Scope research retrieval to THIS article's research sources within the brand KB.
-    chunks = (
-        await grounding.search(client, kb_id, search_query, source_ids=source_ids)
-        if kb_id
-        else []
+    """Draft the WHOLE article in one streamed pass, so the model holds the entire
+    piece in context and writes a single coherent argument (the per-section approach
+    produced disjoint, stitched-together drafts)."""
+    headings = brief.get("headings") or []
+    h2s = [
+        h.split(":", 1)[1].strip()
+        for h in headings
+        if h.lower().lstrip().startswith("h2") and ":" in h
+    ]
+    queries: list[str | None] = [
+        ctx.get("primary_keyword"),
+        ctx["topic"],
+        *(ctx.get("secondary_keywords") or []),
+        *h2s,
+    ]
+    # Scope research to this article's own sources; pull brand materials brand-wide.
+    research = await _gather_grounding(
+        client, kb_id, queries, source_ids=source_ids
     )
-    # Brand-wide retrieval from the brand's OWN materials (un-scoped) — gives the
-    # writer accurate brand capabilities to describe and brand pages to link to.
-    brand_chunks = (
-        await grounding.search(client, materials_kb_id, search_query)
-        if materials_kb_id
-        else []
-    )
+    brand = await _gather_grounding(client, materials_kb_id, queries, limit=24)
+
     brand_block = ""
-    if brand_chunks:
+    if brand:
         brand_block = (
             "\n\n## Your brand's own materials (describe accurately, link as internal links)\n"
-            "- Where this part genuinely calls for it, work in the brand's real "
-            "capabilities from these excerpts and link to the relevant page with "
-            "natural anchor text. Editorial, not an ad — only where it adds value.\n"
-            f"{_grounding_block(brand_chunks, materials_url_by_source or {})}"
+            "- Where the article genuinely calls for it, work in the brand's real "
+            "capabilities and link to the relevant page with natural anchor text. "
+            "Editorial, not an ad — only where it adds value.\n"
+            f"{_grounding_block(brand, materials_url_by_source or {})}"
         )
+    wc = brief.get("target_word_count") or 1800
     msg = (
-        "## Context\n"
-        f"- Article topic: {ctx['topic']}\n"
-        f"- Primary keyword: {ctx.get('primary_keyword') or 'n/a'}\n"
+        "## The article to write\n"
+        f"- Title (already the H1): {title}\n"
+        f"- Topic: {ctx['topic']}\n"
+        f"- Primary keyword (use naturally): {ctx.get('primary_keyword') or 'n/a'}\n"
         f"- Secondary keywords: {', '.join(ctx.get('secondary_keywords') or []) or 'n/a'}\n"
-        f"- Audience / brand: {ctx.get('audience') or 'n/a'}\n\n"
-        "## Write this part\n"
-        f"- {instruction}\n\n"
-        f"{prior}"
+        f"- Audience / brand: {ctx.get('audience') or 'n/a'}\n"
+        f"- Target length: ~{wc} words\n\n"
+        "## Outline — write every section, in this order\n"
+        f"{_outline_text(headings)}\n\n"
         "## Grounding excerpts\n"
         "- Cite an excerpt inline with natural anchor text (a descriptive phrase, "
         "never the page title or a bare URL), and vary the source domain.\n"
-        f"{_grounding_block(chunks, url_by_source)}"
+        f"{_grounding_block(research, url_by_source)}"
         f"{brand_block}\n\n"
         "## Output\n"
-        "- Output only the Markdown for this part."
+        "- Output the full article body in Markdown (intro, every section, "
+        "conclusion). Do not include the H1 title."
     )
-    res = await client.run_agent(agent_id, msg)
+    # Stream: the whole article is too large for the buffered /run endpoint.
+    res = await client.run_agent_collect(agent_id, msg)
+    if res.get("error"):
+        raise RuntimeError(f"draft failed: {res['error']}")
     return (res.get("content") or "").strip()
 
 
@@ -389,106 +446,29 @@ async def run_generation_task(
                     and s.get("url")
                 }
 
-        # 2) outline (from the brief's heading plan)
-        _update(db, article_id, generation_status="outlining")
-        sections = parse_sections(brief.get("headings") or [])
-        if not sections:
-            sections = [{"h2": topic, "subs": []}]
-
+        # 2) draft the WHOLE article in one coherent pass (the per-section approach
+        #    produced stitched-together, disjoint drafts)
         agent_id = await ensure_writer_agent(client)
-        total = len(sections) + 2  # intro + sections + conclusion
-        _update(
-            db,
-            article_id,
-            generation_status="drafting",
-            progress={"phase": "drafting", "total": total, "done": 0},
-        )
-
-        # Running context fed to each part so the writer varies openings/length and
-        # coheres with what came before — the per-section writer is otherwise blind
-        # to its siblings, which is what makes drafts mechanically even (a top AI tell).
-        written: list[str] = []
-        openings: list[str] = []
-
-        def _prior() -> str:
-            if not openings:
-                return ""
-            opens = "\n".join(f'- "{o}…"' for o in openings)
-            tail = "\n\n".join(written)[-700:]
-            return (
-                "## Cohere with what's already written — do NOT repeat it\n"
-                "- Earlier parts opened like this; open THIS part with a different "
-                "shape (don't restate the topic or the heading, don't reuse these):\n"
-                f"{opens}\n"
-                f"- The draft so far ends with: …{tail}\n"
-                "- Vary length and rhythm from the previous parts — not every section "
-                "the same size or shape.\n\n"
-            )
-
-        def _record(part: str) -> None:
-            written.append(part)
-            openings.append(_first_words(part))
-
-        # 3) intro
         title = brief.get("suggested_title") or topic
-        intro = await _draft_part(
-            client, agent_id, kb_id, ctx,
-            f"Write a compelling 2–3 sentence introduction for an article titled "
-            f'"{title}". Open with a tight, extractable answer to the core question. '
-            "Do not include a heading.",
-            topic,
-            source_ids=source_ids, url_by_source=url_by_source,
+        _update(
+            db, article_id,
+            generation_status="drafting",
+            progress={"phase": "drafting", "total": 1, "done": 0},
+        )
+        body = await _draft_article(
+            client, agent_id, brief, ctx, title=title,
+            kb_id=kb_id, source_ids=source_ids, url_by_source=url_by_source,
             materials_kb_id=materials_kb_id,
             materials_url_by_source=materials_url_by_source,
         )
-        parts = [f"# {title}", intro]
-        _record(intro)
-        _update(db, article_id, progress={"phase": "drafting", "total": total, "done": 1})
-
-        # 4) sections
-        for i, sec in enumerate(sections):
-            subs = (
-                "Cover these subsections as ### subheadings:\n"
-                + "\n".join(f"- {s}" for s in sec["subs"])
-                if sec["subs"]
-                else ""
-            )
-            body = await _draft_part(
-                client, agent_id, kb_id, ctx,
-                f"Write this section in Markdown, starting with `## {sec['h2']}`. "
-                f"{subs}\nAim for ~250–400 words.",
-                sec["h2"],
-                source_ids=source_ids, url_by_source=url_by_source,
-                materials_kb_id=materials_kb_id,
-                materials_url_by_source=materials_url_by_source,
-                prior=_prior(),
-            )
-            parts.append(body)
-            _record(body)
-            _update(
-                db, article_id,
-                progress={"phase": "drafting", "total": total, "done": i + 2},
-            )
-
-        # 5) conclusion
-        conclusion = await _draft_part(
-            client, agent_id, kb_id, ctx,
-            "Write a concise conclusion section starting with `## Conclusion` that "
-            "summarizes the key takeaways and ends with a clear next step.",
-            topic,
-            source_ids=source_ids, url_by_source=url_by_source,
-            materials_kb_id=materials_kb_id,
-            materials_url_by_source=materials_url_by_source,
-            prior=_prior(),
-        )
-        parts.append(conclusion)
-
-        content_md = "\n\n".join(p for p in parts if p)
+        # Prepend the canonical H1; strip a stray H1 the writer may have added anyway.
+        body = re.sub(r"^\s*#\s+[^\n]*\n+", "", body, count=1)
+        content_md = f"# {title}\n\n{body}".strip()
         _update(
             db, article_id,
             content_md=content_md,
             generation_status="optimizing",
-            progress={"phase": "scoring", "total": total, "done": total},
+            progress={"phase": "scoring", "total": 1, "done": 1},
         )
 
         # 6) reflect/fact-check, GEO optimize (JSON-LD), then SEO + GEO scoring
@@ -507,7 +487,7 @@ async def run_generation_task(
         _update(
             db, article_id,
             generation_status="done",
-            progress={"phase": "done", "total": total, "done": total,
+            progress={"phase": "done", "total": 1, "done": 1,
                       "word_count": len(final_md.split())},
         )
     except Exception:  # noqa: BLE001

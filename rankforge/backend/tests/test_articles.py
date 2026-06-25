@@ -46,10 +46,11 @@ def test_parse_sections_handles_unprefixed():
     assert [s["h2"] for s in secs] == ["Intro", "Details"]
 
 
-def test_first_words_skips_heading():
-    md = "## A Section Heading\n\nThe real opening line continues here for a while."
-    assert svc._first_words(md, 4) == "The real opening line"
-    assert svc._first_words("") == ""
+def test_outline_text_marks_sections_and_subsections():
+    out = svc._outline_text(["H2: Overview", "H3: Details", "H2: Pricing"])
+    assert "Overview  (## section)" in out
+    assert "Details  (### subsection)" in out
+    assert "Pricing  (## section)" in out
 
 
 def _brand_db() -> MagicMock:

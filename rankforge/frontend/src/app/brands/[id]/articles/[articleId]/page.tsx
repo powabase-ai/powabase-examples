@@ -53,7 +53,7 @@ const GATED_STATUSES = new Set(["approved", "published"]);
 const PHASE_LABEL: Record<string, string> = {
   grounding: "Grounding in research sources…",
   outlining: "Outlining…",
-  drafting: "Drafting sections…",
+  drafting: "Drafting the full article…",
   optimizing: "Optimizing & scoring…",
   refining: "Refining for SEO/GEO, then editing for a human voice…",
   queued: "Queued…",
@@ -216,8 +216,6 @@ function GenerationProgress({ a }: { a: Article }) {
   // Clamp — overallFraction reads runtime JSON that could be malformed.
   const pct = Math.round(Math.min(1, Math.max(0, overallFraction(a))) * 100);
   let detail = "";
-  if (a.generation_status === "drafting" && p.total)
-    detail = `section ${p.done ?? 0}/${p.total}`;
   if (a.generation_status === "refining")
     detail = `pass ${p.iteration ?? 1}/${p.total ?? 2}${
       p.step ? ` · ${p.step}` : ""
