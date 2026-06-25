@@ -6,11 +6,13 @@ Mocks at the Database / Powabase boundary; no real network or DB calls.
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
+import pytest
 from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
 from rankforge_backend.models.profile import CurrentUser
+from rankforge_backend.powabase import PowabaseError
 from rankforge_backend.routes.deps import get_db, get_powabase
 from rankforge_backend.services import brand_materials as svc
 
@@ -433,6 +435,64 @@ def test_get_content_404_when_none(monkeypatch):
     assert resp.status_code == 404
 
 
+def test_get_content_502_on_upstream_error(monkeypatch):
+    """A source-service failure surfaces as 502 (not a misleading 404)."""
+    async def fake_content(c, d, bid, rid):
+        raise PowabaseError(502, {"message": "bad upstream"})
+
+    monkeypatch.setattr(svc, "source_content", fake_content)
+    resp = _client().get(f"/api/business-profiles/{BID}/materials/{RID}/content")
+    assert resp.status_code == 502
+
+
+# --- refresh / bulk-delete routes (hermetic) ---
+def test_refresh_is_202_and_threads_row_ids(monkeypatch):
+    captured = {}
+
+    async def fake_refresh(c, d, bid, row_ids):
+        captured["row_ids"] = row_ids
+
+    monkeypatch.setattr(svc, "refresh_sources", fake_refresh)
+    resp = _client().post(
+        f"/api/business-profiles/{BID}/materials/refresh", json={"row_ids": [RID]}
+    )
+    assert resp.status_code == 202
+    assert [str(x) for x in captured["row_ids"]] == [RID]
+
+
+def test_refresh_requires_editor(monkeypatch):
+    async def fake_refresh(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc, "refresh_sources", fake_refresh)
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).post(
+        f"/api/business-profiles/{BID}/materials/refresh", json={"row_ids": [RID]}
+    )
+    assert resp.status_code == 403
+
+
+def test_bulk_delete_is_202_and_threads_row_ids(monkeypatch):
+    captured = {}
+
+    async def fake_remove(c, d, bid, row_ids):
+        captured["row_ids"] = row_ids
+
+    monkeypatch.setattr(svc, "remove_sources", fake_remove)
+    resp = _client().post(
+        f"/api/business-profiles/{BID}/materials/bulk-delete", json={"row_ids": [RID]}
+    )
+    assert resp.status_code == 202
+    assert [str(x) for x in captured["row_ids"]] == [RID]
+
+
+def test_bulk_action_rejects_empty_selection():
+    resp = _client().post(
+        f"/api/business-profiles/{BID}/materials/refresh", json={"row_ids": []}
+    )
+    assert resp.status_code == 422  # row_ids min_length=1
+
+
 # --- source_content service (hermetic) ---
 async def test_source_content_returns_none_without_source_id():
     db = MagicMock()
@@ -449,3 +509,80 @@ async def test_source_content_fetches_markdown():
     out = await svc.source_content(client, db, BID, RID)
     assert out == "# md"
     client.get_source_markdown.assert_awaited_once_with("src_1")
+
+
+async def test_source_content_propagates_upstream_error():
+    """An upstream failure (e.g. a 502 from the source service) must NOT be masked as
+    'no content' — it propagates so the route can report it honestly."""
+    db = MagicMock()
+    db.fetch_one.return_value = {"source_id": "src_1"}
+    client = MagicMock()
+    client.get_source_markdown = AsyncMock(
+        side_effect=PowabaseError(502, {"message": "bad upstream"})
+    )
+    with pytest.raises(PowabaseError):
+        await svc.source_content(client, db, BID, RID)
+
+
+# --- refresh / bulk-delete (unit) ---
+async def test_refresh_one_reimports_a_url_row(monkeypatch):
+    """A URL-backed row is de-indexed + its stale Source deleted, then re-imported
+    fresh (source_id cleared) so a changed page is actually re-scraped."""
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+    seen = {}
+
+    async def fake_import_one(c, d, kb, row, already):
+        seen["row"] = row
+        seen["already"] = already
+
+    monkeypatch.setattr(svc, "_import_one", fake_import_one)
+    row = {"id": RID, "source_id": "src_old",
+           "url": "https://brand.example/x", "title": "T"}
+    assert await svc._refresh_one(client, db, "kb_1", row, {"src_old": "idx_old"})
+    client.remove_source_from_kb.assert_awaited_once_with("kb_1", "idx_old")
+    client.delete_source.assert_awaited_once_with("src_old")
+    assert seen["row"]["source_id"] is None  # re-imports fresh, not the stale source
+    assert seen["already"] == set()  # so it re-adds to the KB
+
+
+async def test_refresh_one_skips_file_upload_row():
+    """An uploaded file (no http URL) can't be re-scraped — skip it, touch nothing."""
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+    row = {"id": RID, "source_id": "src_f", "url": "brand-deck.pdf", "title": "deck"}
+    assert await svc._refresh_one(client, MagicMock(), "kb_1", row, {}) is False
+    client.delete_source.assert_not_awaited()
+
+
+async def test_refresh_sources_noop_when_only_files_selected(monkeypatch):
+    db = MagicMock()
+    db.fetch_all.return_value = [
+        {"id": RID, "source_id": "s", "url": "deck.pdf",
+         "title": "d", "status": "extracted", "origin": "manual"},
+    ]
+    progress: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        svc, "_set_progress",
+        lambda d, b, phase, msg, **k: progress.append((phase, msg)),
+    )
+    monkeypatch.setattr(svc, "ensure_materials_kb", AsyncMock(return_value="kb_1"))
+    await svc.refresh_sources(MagicMock(), db, BID, [UUID(RID)])
+    assert progress[-1][0] == "done"
+    assert "Nothing to refresh" in progress[-1][1]
+
+
+async def test_remove_sources_counts_and_finishes(monkeypatch):
+    db = MagicMock()
+    progress: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        svc, "_set_progress",
+        lambda d, b, phase, msg, **k: progress.append((phase, msg)),
+    )
+    monkeypatch.setattr(svc, "remove_source", AsyncMock(return_value=True))
+    await svc.remove_sources(MagicMock(), db, BID, [UUID(RID), UUID(BID)])
+    assert progress[-1][0] == "done"
+    assert "Removed 2 pages" in progress[-1][1]

@@ -8,6 +8,7 @@ import {
   Eye,
   Loader2,
   Plus,
+  RefreshCw,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -27,9 +28,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   useBrandMaterials,
+  useBulkDeleteMaterials,
   useDiscoverMaterials,
   useIngestMaterials,
   useMaterialContent,
+  useRefreshMaterials,
   useRemoveMaterial,
   useUploadMaterialFile,
 } from "@/lib/hooks/useBrandMaterials";
@@ -82,16 +85,32 @@ function MaterialRow({
   brandId,
   source,
   canEdit,
+  selected,
+  onToggleSelect,
+  disabled,
 }: {
   brandId: string;
   source: BrandMaterialSource;
   canEdit: boolean;
+  selected: boolean;
+  onToggleSelect: (id: string, checked: boolean) => void;
+  disabled: boolean;
 }) {
   const remove = useRemoveMaterial(brandId);
   const [inspecting, setInspecting] = React.useState(false);
 
   return (
     <li className="flex items-center gap-3 border-b border-border px-3 py-2.5 last:border-b-0">
+      {canEdit && (
+        <input
+          type="checkbox"
+          aria-label="Select page"
+          checked={selected}
+          disabled={disabled}
+          onChange={(e) => onToggleSelect(source.id, e.target.checked)}
+          className="size-3.5 shrink-0 cursor-pointer accent-[rgb(var(--ember))] disabled:cursor-not-allowed"
+        />
+      )}
       <div className="min-w-0 flex-1">
         <a
           href={source.url}
@@ -502,12 +521,72 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
   const canEdit = canApprove(profile?.role);
   const { data, isLoading } = useBrandMaterials(brandId);
   const upload = useUploadMaterialFile(brandId);
+  const refresh = useRefreshMaterials(brandId);
+  const bulkDelete = useBulkDeleteMaterials(brandId);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const [addOpen, setAddOpen] = React.useState(false);
+  // Checkbox selection for bulk refresh / delete (ids of selected source rows).
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
 
   const running = materialsRunning(data?.progress);
   const sources = data?.sources ?? [];
+
+  // Drop any selected ids that no longer exist (e.g. after a delete completes), so a
+  // stale selection can't linger or target a removed row.
+  React.useEffect(() => {
+    const ids = new Set(sources.map((s) => s.id));
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => ids.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [sources]);
+
+  function toggleSelect(id: string, checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  const allSelected = sources.length > 0 && selected.size === sources.length;
+  function toggleAll(checked: boolean) {
+    setSelected(checked ? new Set(sources.map((s) => s.id)) : new Set());
+  }
+
+  function runRefresh() {
+    const ids = [...selected];
+    if (!ids.length) return;
+    refresh.mutate(ids, {
+      onSuccess: () => {
+        toast.success(`Refreshing ${ids.length} page${ids.length === 1 ? "" : "s"}…`);
+        setSelected(new Set());
+      },
+      onError: (e) =>
+        toast.error(e instanceof Error ? e.message : "Could not start refresh"),
+    });
+  }
+
+  function runBulkDelete() {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (
+      !window.confirm(
+        `Delete ${ids.length} selected page${ids.length === 1 ? "" : "s"} from the KB?`
+      )
+    )
+      return;
+    bulkDelete.mutate(ids, {
+      onSuccess: () => {
+        toast.success(`Removing ${ids.length} page${ids.length === 1 ? "" : "s"}…`);
+        setSelected(new Set());
+      },
+      onError: (e) =>
+        toast.error(e instanceof Error ? e.message : "Could not delete pages"),
+    });
+  }
 
   function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -607,6 +686,55 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
           </div>
         )}
 
+        {/* Bulk-selection toolbar */}
+        {canEdit && sources.length > 0 && (
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <label className="inline-flex cursor-pointer items-center gap-2 text-muted-foreground">
+              <input
+                type="checkbox"
+                aria-label="Select all pages"
+                checked={allSelected}
+                disabled={running}
+                onChange={(e) => toggleAll(e.target.checked)}
+                className="size-3.5 cursor-pointer accent-[rgb(var(--ember))]"
+              />
+              {selected.size > 0 ? `${selected.size} selected` : "Select all"}
+            </label>
+            {selected.size > 0 && (
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={runRefresh}
+                  disabled={running || refresh.isPending}
+                  title="Re-scrape selected pages to pick up changed content"
+                >
+                  {refresh.isPending ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <RefreshCw />
+                  )}
+                  Refresh
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={runBulkDelete}
+                  disabled={running || bulkDelete.isPending}
+                  className="text-destructive hover:text-destructive"
+                >
+                  {bulkDelete.isPending ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <Trash2 />
+                  )}
+                  Delete
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Source list / empty state */}
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
@@ -618,6 +746,9 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
                 brandId={brandId}
                 source={s}
                 canEdit={canEdit}
+                selected={selected.has(s.id)}
+                onToggleSelect={toggleSelect}
+                disabled={running}
               />
             ))}
           </ul>

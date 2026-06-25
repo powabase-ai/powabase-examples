@@ -274,6 +274,16 @@ export const materialsApi = {
       `/api/business-profiles/${businessId}/materials/${rowId}`,
       { method: "DELETE" }
     ),
+  refresh: (businessId: string, rowIds: string[]) =>
+    request<{ status: string }>(
+      `/api/business-profiles/${businessId}/materials/refresh`,
+      { method: "POST", body: JSON.stringify({ row_ids: rowIds }) }
+    ),
+  bulkDelete: (businessId: string, rowIds: string[]) =>
+    request<{ status: string }>(
+      `/api/business-profiles/${businessId}/materials/bulk-delete`,
+      { method: "POST", body: JSON.stringify({ row_ids: rowIds }) }
+    ),
   content: (businessId: string, rowId: string) =>
     request<{ content: string }>(
       `/api/business-profiles/${businessId}/materials/${rowId}/content`

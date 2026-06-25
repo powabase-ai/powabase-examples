@@ -58,6 +58,26 @@ export function useRemoveMaterial(businessId: string) {
   });
 }
 
+/** Re-scrape selected URL-backed pages (uploaded files are skipped server-side). */
+export function useRefreshMaterials(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rowIds: string[]) => materialsApi.refresh(businessId, rowIds),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["materials", businessId] }),
+  });
+}
+
+/** Mass-delete selected pages (cascade: KB de-index → Source delete → row). */
+export function useBulkDeleteMaterials(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rowIds: string[]) => materialsApi.bulkDelete(businessId, rowIds),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["materials", businessId] }),
+  });
+}
+
 /** Fetch one source's extracted markdown on demand (for the inspect modal).
  *  Only runs when a row is being inspected (rowId non-null) and is cached so
  *  re-opening the same source doesn't refetch. */

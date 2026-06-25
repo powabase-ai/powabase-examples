@@ -42,6 +42,12 @@ class MaterialsDiscover(BaseModel):
     max_pages: int | None = Field(default=None, ge=1, le=200)
 
 
+class MaterialsSelection(BaseModel):
+    """Selected brand-source rows for a bulk action (refresh / delete)."""
+
+    row_ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
 class DiscoveredHost(BaseModel):
     host: str
     urls: list[str]

@@ -25,10 +25,11 @@ from ..models.materials import (
     MaterialsDiscover,
     MaterialsDiscovery,
     MaterialsIngest,
+    MaterialsSelection,
     MaterialsView,
 )
 from ..models.profile import CurrentUser
-from ..powabase import PowabaseClient
+from ..powabase import PowabaseClient, PowabaseError
 from ..ratelimit import rate_limit
 from ..services import brand_materials as svc
 from ..services import business_profiles as brands
@@ -139,6 +140,45 @@ async def upload_material(
     return {"status": "started"}
 
 
+@router.post(
+    "/{business_id}/materials/refresh",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit("materials:ingest"))],
+)
+async def refresh_materials(
+    business_id: UUID,
+    payload: MaterialsSelection,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Re-scrape the selected URL-backed brand pages (content may have changed).
+    Returns 202; poll GET /{id}/materials for progress. Uploaded files are skipped."""
+    assert_brand_access(db, business_id, user)
+    svc.mark_starting(db, business_id, "Refreshing selected pages…")
+    spawn(svc.refresh_sources(pb, db, business_id, list(payload.row_ids)))
+    return {"status": "started"}
+
+
+@router.post(
+    "/{business_id}/materials/bulk-delete",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def bulk_delete_materials(
+    business_id: UUID,
+    payload: MaterialsSelection,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Cascade-delete the selected brand sources (mass deletion). Returns 202; poll
+    GET /{id}/materials for progress."""
+    assert_brand_access(db, business_id, user)
+    svc.mark_starting(db, business_id, "Removing selected pages…")
+    spawn(svc.remove_sources(pb, db, business_id, list(payload.row_ids)))
+    return {"status": "started"}
+
+
 @router.get("/{business_id}/materials/{row_id}/content")
 async def get_material_content(
     business_id: UUID,
@@ -149,10 +189,21 @@ async def get_material_content(
 ):
     """Return a brand source's extracted markdown (for the inspect modal)."""
     assert_brand_access(db, business_id, user)
-    md = await svc.source_content(pb, db, business_id, row_id)
+    try:
+        md = await svc.source_content(pb, db, business_id, row_id)
+    except PowabaseError as e:
+        # The source service couldn't return content (e.g. a 502 for a broken/stale
+        # source). Report it honestly instead of as a misleading 404 — and point the
+        # user at the fix (refresh re-scrapes the page).
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"The source service couldn't return this page's content "
+            f"(upstream HTTP {e.status_code}). It may be transient — try again, or "
+            f"refresh the page to re-scrape it.",
+        ) from e
     if md is None:
         raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "no extracted content for this source"
+            status.HTTP_404_NOT_FOUND, "no content extracted for this source yet"
         )
     return {"content": md}
 

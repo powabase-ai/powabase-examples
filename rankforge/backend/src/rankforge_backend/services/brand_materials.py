@@ -743,7 +743,13 @@ async def remove_source(
 async def source_content(
     client: PowabaseClient, db: Database, business_id: UUID, row_id: UUID
 ) -> str | None:
-    """Return a brand source's extracted markdown, or None if unavailable."""
+    """Return a brand source's extracted markdown.
+
+    Returns None only when the row has no linked Source yet (nothing to show — a 404).
+    A platform/upstream failure (e.g. the source service returning 502 for a broken or
+    stale source) propagates as PowabaseError so the route can report it honestly
+    instead of masking it as 'not found' — the user can then refresh/re-scrape it.
+    """
     row = db.fetch_one(
         "select source_id from public.brand_sources "
         "where id = %s and business_id = %s",
@@ -752,7 +758,175 @@ async def source_content(
     source_id = (row or {}).get("source_id")
     if not source_id:
         return None
+    return await client.get_source_markdown(source_id)
+
+
+# --- bulk actions over selected rows (refresh / delete) ---
+def _is_refreshable_url(url: str | None) -> bool:
+    """Only http(s) pages can be re-scraped. File uploads (origin='manual', url=the
+    file name) have no live URL — they must be re-uploaded, not refreshed."""
+    u = (url or "").strip().lower()
+    return u.startswith("http://") or u.startswith("https://")
+
+
+async def _refresh_one(
+    client: PowabaseClient,
+    db: Database,
+    kb_id: str,
+    row: dict[str, Any],
+    indexed_ids: dict[str, str],
+) -> bool:
+    """Force a fresh re-scrape of one URL-backed brand page.
+
+    The platform dedups Sources by URL, so simply re-importing returns the SAME stale
+    content. To actually pick up a changed page we de-index + delete the old Source
+    first (clearing the dedup), then re-import the URL and re-index. Returns False for
+    a non-URL row (an uploaded file — nothing to re-scrape).
+    """
+    url = row.get("url") or ""
+    if not _is_refreshable_url(url):
+        return False
+    old_sid = row.get("source_id")
+    if old_sid:
+        indexed_id = indexed_ids.get(old_sid) or old_sid
+        try:
+            await client.remove_source_from_kb(kb_id, indexed_id)
+        except Exception:  # noqa: BLE001 — de-index failure must not block the refresh
+            log.exception("refresh de-index failed for %s", old_sid)
+        try:
+            await client.delete_source(old_sid)
+        except Exception:  # noqa: BLE001 — stale Source delete is best-effort
+            log.exception("refresh delete_source failed for %s", old_sid)
+    await db.aexecute(
+        "update public.brand_sources set source_id = null, status = 'pending' "
+        "where id = %s",
+        (row["id"],),
+    )
+    # Re-import fresh (no existing Source for this URL now → a real re-scrape), poll
+    # extraction, re-index. Empty already_indexed so _import_one re-adds it to the KB.
+    await _import_one(client, db, kb_id, {**row, "source_id": None}, set())
+    return True
+
+
+async def refresh_sources(
+    client: PowabaseClient, db: Database, business_id: UUID, row_ids: list[UUID]
+) -> None:
+    """Background worker: re-scrape the selected URL-backed brand pages so changed
+    content is picked up. Uploaded files are skipped (no URL to re-fetch). Narrates
+    progress on the brand row; never raises out of the detached task.
+    """
     try:
-        return await client.get_source_markdown(source_id)
-    except PowabaseError:
-        return None
+        _set_progress(db, business_id, "starting", "Refreshing selected pages…")
+        kb_id = await ensure_materials_kb(client, db, business_id)
+        rows = db.fetch_all(
+            f"select {_SOURCE_COLUMNS} from public.brand_sources "
+            "where business_id = %s and id = any(%s)",
+            (business_id, list(row_ids)),
+        )
+        refreshable = [r for r in rows if _is_refreshable_url(r.get("url"))]
+        skipped = len(rows) - len(refreshable)
+        total = len(refreshable)
+        if not total:
+            _set_progress(
+                db, business_id, "done",
+                "Nothing to refresh — the selected items are uploaded files "
+                "(re-upload them to update).",
+            )
+            return
+
+        # Resolve indexed-source ids once (one KB listing) for de-indexing.
+        indexed_ids: dict[str, str] = {}
+        try:
+            listing = await client.list_kb_sources(kb_id)
+            for it in listing.get("items", []) if isinstance(listing, dict) else []:
+                sid = it.get("source_id")
+                if sid:
+                    indexed_ids[sid] = it.get("id") or sid
+        except Exception:  # noqa: BLE001 — fall back to raw ids per source
+            log.exception("refresh: list_kb_sources failed")
+
+        _set_progress(
+            db, business_id, "scraping",
+            f"Re-scraping {total} page{'' if total == 1 else 's'}…",
+            total=total, done=0,
+        )
+        sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+        done = 0
+
+        async def _bounded(r: dict[str, Any]) -> None:
+            nonlocal done
+            async with sem:
+                try:
+                    await _refresh_one(client, db, kb_id, r, indexed_ids)
+                except Exception:  # noqa: BLE001 — one page's failure shouldn't fail all
+                    log.exception("refresh failed for %s", r.get("id"))
+            done += 1
+            try:
+                await asyncio.to_thread(
+                    _set_progress, db, business_id, "indexing",
+                    f"Refreshed {done}/{total}…", total=total, done=done,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        await asyncio.gather(*[_bounded(r) for r in refreshable])
+
+        # Wait for indexing to settle (bounded), then rebuild BM25 over new chunks.
+        for _ in range(45):
+            listing = await client.list_kb_sources(kb_id)
+            items = listing.get("items", []) if isinstance(listing, dict) else []
+            statuses = [i.get("index_status") for i in items]
+            if statuses and all(s in _INDEX_TERMINAL for s in statuses):
+                break
+            await asyncio.sleep(2)
+        await grounding.rebuild_bm25(client, kb_id)
+
+        msg = f"Refreshed {total} page{'' if total == 1 else 's'}."
+        if skipped:
+            msg += f" Skipped {skipped} uploaded file{'' if skipped == 1 else 's'}."
+        _set_progress(db, business_id, "done", msg)
+    except Exception as e:  # noqa: BLE001 — surface a safe failure on the brand row
+        log.exception("brand-materials refresh failed for business %s", business_id)
+        _set_progress(db, business_id, "failed", f"Couldn't refresh pages: {_reason(e)}")
+
+
+async def remove_sources(
+    client: PowabaseClient, db: Database, business_id: UUID, row_ids: list[UUID]
+) -> None:
+    """Background worker: cascade-delete the selected brand sources (mass deletion).
+    Narrates progress on the brand row; never raises out of the detached task."""
+    try:
+        n = len(row_ids)
+        _set_progress(
+            db, business_id, "deleting",
+            f"Removing {n} page{'' if n == 1 else 's'}…", total=n, done=0,
+        )
+        sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+        removed = 0
+        done = 0
+
+        async def _bounded(rid: UUID) -> None:
+            nonlocal removed, done
+            async with sem:
+                try:
+                    if await remove_source(client, db, business_id, rid):
+                        removed += 1
+                except Exception:  # noqa: BLE001 — one failure shouldn't block the rest
+                    log.exception("bulk remove failed for %s", rid)
+            done += 1
+            try:
+                await asyncio.to_thread(
+                    _set_progress, db, business_id, "deleting",
+                    f"Removed {done}/{n}…", total=n, done=done,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        await asyncio.gather(*[_bounded(r) for r in row_ids])
+        _set_progress(
+            db, business_id, "done",
+            f"Removed {removed} page{'' if removed == 1 else 's'}.",
+        )
+    except Exception as e:  # noqa: BLE001 — surface a safe failure on the brand row
+        log.exception("brand-materials bulk delete failed for business %s", business_id)
+        _set_progress(db, business_id, "failed", f"Couldn't remove pages: {_reason(e)}")
