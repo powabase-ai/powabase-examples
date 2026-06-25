@@ -170,6 +170,49 @@ def test_discover_route_groups_by_host(monkeypatch):
     assert len(hosts["brand.example"]) == 2
 
 
+# --- _ensure_indexing (one-time chunk-config migration) ---
+async def test_ensure_indexing_noop_when_already_tuned():
+    client = MagicMock()
+    client.get_kb = AsyncMock(
+        return_value={
+            "indexing_config": {
+                "chunk_size": svc.MATERIALS_CHUNK_SIZE,
+                "overlap": svc.MATERIALS_OVERLAP,
+                "strategy": "chunk_embed",
+            }
+        }
+    )
+    client.update_kb = AsyncMock()
+    client.reindex_kb = AsyncMock()
+    await svc._ensure_indexing(client, "kb1")
+    client.update_kb.assert_not_awaited()
+    client.reindex_kb.assert_not_awaited()
+
+
+async def test_ensure_indexing_patches_full_config_and_reindexes_on_drift():
+    client = MagicMock()
+    client.get_kb = AsyncMock(
+        return_value={
+            "indexing_config": {
+                "chunk_size": 2000,
+                "overlap": 50,
+                "strategy": "chunk_embed",
+                "embedding_model": "text-embedding-3-small",
+            }
+        }
+    )
+    client.update_kb = AsyncMock()
+    client.reindex_kb = AsyncMock()
+    await svc._ensure_indexing(client, "kb1")
+    cfg = client.update_kb.await_args.kwargs["indexing_config"]
+    # new chunk_size/overlap, with strategy + embedding_model preserved (PATCH replaces)
+    assert cfg["chunk_size"] == svc.MATERIALS_CHUNK_SIZE
+    assert cfg["overlap"] == svc.MATERIALS_OVERLAP
+    assert cfg["strategy"] == "chunk_embed"
+    assert cfg["embedding_model"] == "text-embedding-3-small"
+    client.reindex_kb.assert_awaited_once_with("kb1")
+
+
 # --- _track_source SQL shape (unit) ---
 def test_track_source_inserts_with_source_id():
     db = MagicMock()

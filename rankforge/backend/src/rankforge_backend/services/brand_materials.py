@@ -44,6 +44,40 @@ SCRAPE_CONCURRENCY = 5
 
 _SOURCE_COLUMNS = "id, source_id, url, title, status, origin, created_at"
 
+# Brand pages are short, self-contained docs — we want each kept whole (not chopped
+# mid-section) so the writer describes the brand accurately and links to the right
+# page. Bigger chunks + more overlap than the platform default (2000/50) means most
+# pages land in a single coherent chunk while keeping cheap, no-LLM chunk_embed
+# indexing + granular citation + BM25. Merged over the chunk_embed defaults on
+# create (so strategy stays chunk_embed). See ensure_materials_kb / _ensure_indexing.
+MATERIALS_CHUNK_SIZE = 3500
+MATERIALS_OVERLAP = 200
+MATERIALS_INDEXING = {"chunk_size": MATERIALS_CHUNK_SIZE, "overlap": MATERIALS_OVERLAP}
+
+
+async def _ensure_indexing(client: PowabaseClient, kb_id: str) -> None:
+    """Bring an EXISTING materials KB onto the larger chunk config, one-time.
+
+    If the KB's current chunk_size already matches, do nothing. Otherwise PATCH the
+    full indexing_config (read-modify-write — PATCH replaces, doesn't merge) and
+    reindex so the new chunking takes effect. Self-heals KBs created before this
+    config; best-effort (a failure just leaves the old chunking in place)."""
+    try:
+        kb = await client.get_kb(kb_id)
+    except Exception:  # noqa: BLE001
+        return
+    cfg = (kb or {}).get("indexing_config") or {}
+    if cfg.get("chunk_size") == MATERIALS_CHUNK_SIZE:
+        return  # already on the desired config
+    new_cfg = {**cfg, "chunk_size": MATERIALS_CHUNK_SIZE, "overlap": MATERIALS_OVERLAP}
+    new_cfg.setdefault("strategy", "chunk_embed")
+    try:
+        await client.update_kb(kb_id, indexing_config=new_cfg)
+        await client.reindex_kb(kb_id)
+        log.info("materials KB %s reindexed at chunk_size=%s", kb_id, MATERIALS_CHUNK_SIZE)
+    except Exception:  # noqa: BLE001 — keep ingesting even if the reindex didn't take
+        log.exception("materials KB %s reindex failed", kb_id)
+
 
 # --- KB get-or-create (compare-and-set, mirrors grounding.ensure_brand_kb) ---
 async def ensure_materials_kb(
@@ -58,15 +92,17 @@ async def ensure_materials_kb(
     if brand is None:
         raise ValueError("business profile not found")
     if brand.get("materials_kb_id"):
+        kb_id = brand["materials_kb_id"]
+        # one-time: migrate an existing KB onto the larger brand-page chunking
+        await _ensure_indexing(client, kb_id)
         # keep retrieval config (reranker/top_k) current — query-time, no reindex
         try:
             await client.update_kb(
-                brand["materials_kb_id"],
-                retrieval_config=grounding.RETRIEVAL_CONFIG,
+                kb_id, retrieval_config=grounding.RETRIEVAL_CONFIG
             )
         except Exception:  # noqa: BLE001
             pass
-        return brand["materials_kb_id"]
+        return kb_id
 
     kb = await client.create_kb(
         f"{brand['name']} — materials",
@@ -75,6 +111,7 @@ async def ensure_materials_kb(
             "internal links."
         ),
         retrieval_config=grounding.RETRIEVAL_CONFIG,
+        indexing_config=MATERIALS_INDEXING,
     )
     kb_id = kb.get("id") or kb.get("knowledge_base", {}).get("id")
 

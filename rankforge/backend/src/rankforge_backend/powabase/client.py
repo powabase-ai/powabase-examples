@@ -290,13 +290,31 @@ class PowabaseClient:
         *,
         description: str | None = None,
         retrieval_config: dict[str, Any] | None = None,
+        indexing_config: dict[str, Any] | None = None,
     ) -> Any:
+        """Create a KB. A partial `indexing_config` is MERGED over the strategy
+        defaults server-side (so passing just {chunk_size, overlap} keeps
+        strategy=chunk_embed). `retrieval_config` is query-time (reranker/top_k)."""
         body: dict[str, Any] = {"name": name}
         if description:
             body["description"] = description
         if retrieval_config:
             body["retrieval_config"] = retrieval_config
+        if indexing_config:
+            body["indexing_config"] = indexing_config
         return await self._request("POST", "/api/knowledge-bases", json=body)
+
+    async def get_kb(self, kb_id: str) -> Any:
+        """Fetch a KB (incl. its current `indexing_config`/`retrieval_config`)."""
+        return await self._request("GET", f"/api/knowledge-bases/{kb_id}")
+
+    async def reindex_kb(self, kb_id: str) -> Any:
+        """Reindex ALL sources in the KB (empty body). Destroys+recreates chunks
+        with the KB's CURRENT indexing_config — call after changing chunk_size etc.
+        The KB stays searchable but may be incomplete until indexing settles."""
+        return await self._request(
+            "POST", f"/api/knowledge-bases/{kb_id}/reindex", json={}
+        )
 
     async def add_source_to_kb(self, kb_id: str, source_id: str) -> Any:
         """Triggers indexing (idempotent re-index). 400s unless `extracted`."""
@@ -355,14 +373,19 @@ class PowabaseClient:
         kb_id: str,
         *,
         retrieval_config: dict[str, Any] | None = None,
+        indexing_config: dict[str, Any] | None = None,
         name: str | None = None,
         description: str | None = None,
     ) -> Any:
         """PATCH a KB. retrieval_config (reranker/method/top_k/query_enrichment) is
-        query-time and takes effect on the next search with no reindex."""
+        query-time and takes effect on the next search with no reindex.
+        indexing_config (chunk_size/overlap/strategy) is REPLACED wholesale (not
+        merged) and takes effect only after a reindex_kb() — pass the FULL config."""
         body: dict[str, Any] = {}
         if retrieval_config is not None:
             body["retrieval_config"] = retrieval_config
+        if indexing_config is not None:
+            body["indexing_config"] = indexing_config
         if name is not None:
             body["name"] = name
         if description is not None:
