@@ -134,7 +134,7 @@ _ARTICLE_COLUMNS = (
     "id, business_id, brief_id, research_run_id, title, slug, status, "
     "generation_status, generation_error, progress, content_md, meta_title, "
     "meta_description, seo_score, geo_score, readability_score, json_ld, "
-    "grounding_report, canonical_url, created_at, updated_at"
+    "grounding_report, canonical_url, cluster_id, cluster_role, created_at, updated_at"
 )
 _SUMMARY_COLUMNS = "id, title, status, generation_status, progress, updated_at"
 
@@ -454,6 +454,24 @@ async def run_generation_task(
         "audience": brief.get("audience"),
     }
     try:
+        # 0) cluster placement — assign this article to a content cluster unless it
+        #    already inherited one from an opportunity (manual articles land here).
+        if business_id:
+            from . import clusters  # local import avoids a service import cycle
+
+            art = get_article(db, article_id)
+            if art and not art.get("cluster_id"):
+                try:
+                    cid, role = await clusters.assign(
+                        client, db, business_id,
+                        title=art.get("title") or topic,
+                        keyword=brief.get("primary_keyword"),
+                        angle=topic,
+                    )
+                    clusters.attach_article(db, article_id, cid, role)
+                except Exception:  # noqa: BLE001 — clustering shouldn't block drafting
+                    log.exception("cluster assignment failed for article %s", article_id)
+
         # 1) grounding
         kb_id: str | None = None
         if business_id and research_run_id:

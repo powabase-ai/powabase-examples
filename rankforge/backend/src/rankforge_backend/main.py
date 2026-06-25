@@ -21,6 +21,7 @@ from .routes import (
     articles,
     brief,
     business_profiles,
+    clusters,
     health,
     materials,
     org,
@@ -121,6 +122,7 @@ def create_app() -> FastAPI:
     app.include_router(articles.router)
     app.include_router(templates.router)
     app.include_router(scouts.router)
+    app.include_router(clusters.router)
     app.include_router(relink.router)
     app.include_router(publish.router)
     app.include_router(publish.public_router)

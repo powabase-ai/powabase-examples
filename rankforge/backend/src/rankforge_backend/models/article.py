@@ -39,6 +39,8 @@ class Article(BaseModel):
     json_ld: dict | None = None
     grounding_report: dict | None = None
     canonical_url: str | None = None
+    cluster_id: UUID | None = None
+    cluster_role: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -1,13 +1,26 @@
-"""Content-cluster engine — assignment orchestration + reads/writes (hermetic)."""
+"""Content-cluster engine — assignment orchestration + reads/writes + routes."""
 
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
+from conftest import ADMIN_ORG, with_auth
+from fastapi.testclient import TestClient
+
+from rankforge_backend.main import create_app
+from rankforge_backend.models.profile import CurrentUser
+from rankforge_backend.routes.deps import get_db, get_powabase
 from rankforge_backend.services import clusters
 
 BID = "11111111-1111-1111-1111-111111111111"
 CID = "22222222-2222-2222-2222-222222222222"
 NEWID = "33333333-3333-3333-3333-333333333333"
 AID = "44444444-4444-4444-4444-444444444444"
+CLUSTER_ROW = {
+    "id": CID, "business_id": BID, "label": "Auth", "theme": "authentication",
+    "pillar_article_id": None, "pillar_locked": False, "pillar_title": "Auth Guide",
+    "member_count": 2,
+}
+CLUSTER_DETAIL = {**CLUSTER_ROW, "members": []}
 
 
 # --- assignment engine ---
@@ -119,3 +132,72 @@ def test_set_pillar_none_when_cluster_missing():
     db = MagicMock()
     db.fetch_one.return_value = None
     assert clusters.set_pillar(db, BID, CID, AID) is None
+
+
+def test_list_clusters_view_includes_pillar_and_count():
+    db = MagicMock()
+    db.fetch_all.return_value = [CLUSTER_ROW]
+    out = clusters.list_clusters_view(db, BID)
+    q = db.fetch_all.call_args.args[0]
+    assert "member_count" in q and "pillar_title" in q
+    assert out == [CLUSTER_ROW]
+
+
+async def test_backfill_assigns_unclustered_articles(monkeypatch):
+    db = MagicMock()
+    db.fetch_all.return_value = [{"id": AID, "title": "T", "keywords": ["kw"]}]
+    monkeypatch.setattr(clusters, "assign", AsyncMock(return_value=(CID, "member")))
+    attach = MagicMock()
+    monkeypatch.setattr(clusters, "attach_article", attach)
+    n = await clusters.backfill(MagicMock(), db, BID)
+    assert n == 1
+    attach.assert_called_once_with(db, AID, CID, "member")
+
+
+# --- routes (hermetic) ---
+def _brand_db() -> MagicMock:
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": UUID(ADMIN_ORG)}
+    return db
+
+
+def _client(db=None, user: CurrentUser | None = None) -> TestClient:
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: db if db is not None else _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    return TestClient(with_auth(app, user) if user else with_auth(app))
+
+
+def test_list_clusters_route(monkeypatch):
+    monkeypatch.setattr(clusters, "list_clusters_view", lambda d, bid: [CLUSTER_ROW])
+    resp = _client().get(f"/api/business-profiles/{BID}/clusters")
+    assert resp.status_code == 200
+    assert resp.json()[0]["label"] == "Auth"
+    assert resp.json()[0]["member_count"] == 2
+
+
+def test_get_cluster_route(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    monkeypatch.setattr(clusters, "get_cluster_detail", lambda d, cid: CLUSTER_DETAIL)
+    resp = _client().get(f"/api/clusters/{CID}")
+    assert resp.status_code == 200
+    assert resp.json()["label"] == "Auth"
+
+
+def test_set_pillar_requires_editor(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).post(
+        f"/api/clusters/{CID}/pillar", json={"article_id": AID}
+    )
+    assert resp.status_code == 403
+
+
+def test_backfill_route_is_202(monkeypatch):
+    monkeypatch.setattr(clusters, "backfill", AsyncMock())
+    resp = _client().post(f"/api/business-profiles/{BID}/clusters/backfill")
+    assert resp.status_code == 202

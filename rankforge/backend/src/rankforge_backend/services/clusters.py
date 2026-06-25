@@ -120,6 +120,28 @@ def get_cluster(db: Database, cluster_id: UUID) -> dict[str, Any] | None:
     )
 
 
+def list_clusters_view(db: Database, business_id: UUID) -> list[dict[str, Any]]:
+    """Clusters enriched with pillar title + member count (one query) for the UI."""
+    return db.fetch_all(
+        f"select {_COLUMNS}, "
+        "(select count(*) from public.articles a "
+        "   where a.cluster_id = content_clusters.id) as member_count, "
+        "(select title from public.articles p "
+        "   where p.id = content_clusters.pillar_article_id) as pillar_title "
+        "from public.content_clusters where business_id = %s order by created_at",
+        (business_id,),
+    )
+
+
+def get_cluster_detail(db: Database, cluster_id: UUID) -> dict[str, Any] | None:
+    c = get_cluster(db, cluster_id)
+    if c is None:
+        return None
+    c["pillar_title"] = _pillar_title(db, c)
+    c["members"] = list_members(db, cluster_id)
+    return c
+
+
 def list_members(db: Database, cluster_id: UUID) -> list[dict[str, Any]]:
     """Articles in a cluster (pillar first, then members), for the cluster view."""
     return db.fetch_all(
@@ -359,3 +381,30 @@ async def assign(
             (doc_id, cluster["id"]),
         )
     return str(cluster["id"]), "pillar"
+
+
+async def backfill(client: PowabaseClient, db: Database, business_id: UUID) -> int:
+    """Assign any not-yet-clustered PUBLISHED articles to clusters (one-time seed +
+    ongoing maintenance). Returns how many were assigned."""
+    rows = db.fetch_all(
+        "select id, title, keywords from public.articles "
+        "where business_id = %s and status = 'published' and cluster_id is null "
+        "order by created_at",
+        (business_id,),
+    )
+    founded: list[dict[str, Any]] = []
+    n = 0
+    for r in rows:
+        try:
+            kw = next((k for k in (r.get("keywords") or []) if k), None)
+            cid, role = await assign(
+                client, db, business_id, title=r["title"], keyword=kw,
+                extra_candidates=founded,
+            )
+            attach_article(db, r["id"], cid, role)
+            n += 1
+            if role == "pillar" and (c := get_cluster(db, cid)):
+                founded.append(c)
+        except Exception:  # noqa: BLE001 — one article shouldn't fail the backfill
+            log.exception("backfill cluster failed for article %s", r["id"])
+    return n

@@ -23,7 +23,7 @@ from ..powabase import PowabaseClient
 from ..util import extract_json
 from . import brief as brief_svc
 from . import business_profiles as brands
-from . import generation
+from . import clusters, generation
 from . import research as research_svc
 from .agents import ensure_agent
 
@@ -90,8 +90,8 @@ _RUN_COLUMNS = (
 )
 _OPP_COLUMNS = (
     "id, business_id, scout_run_id, title, angle, why_now, keyword, source_type, "
-    "source_url, evidence, score, scores, status, article_id, progress, "
-    "created_at, updated_at"
+    "source_url, evidence, score, scores, status, article_id, cluster_id, "
+    "cluster_role, progress, created_at, updated_at"
 )
 
 async def ensure_scout_agent(client: PowabaseClient) -> str:
@@ -459,6 +459,33 @@ async def run_scout(
             f"{'y' if len(stored) == 1 else 'ies'} surfaced.",
         )
 
+        # Place each opportunity into a content cluster (join an existing one or found
+        # a new one) so the inbox shows topical structure and drafts inherit it. Pass
+        # clusters founded earlier in THIS run as candidates to avoid intra-run dups.
+        if stored:
+            _set_progress(
+                db, run_id, "clustering",
+                "Organizing opportunities into topic clusters…",
+            )
+        founded: list[dict[str, Any]] = []
+        for opp in stored:
+            try:
+                cid, role = await clusters.assign(
+                    client, db, business_id,
+                    title=opp["title"], keyword=opp.get("keyword"),
+                    angle=opp.get("angle"), extra_candidates=founded,
+                )
+                db.execute(
+                    "update public.opportunities set cluster_id = %s, "
+                    "cluster_role = %s where id = %s",
+                    (cid, role, opp["id"]),
+                )
+                opp["cluster_id"], opp["cluster_role"] = cid, role
+                if role == "pillar" and (c := clusters.get_cluster(db, cid)):
+                    founded.append(c)
+            except Exception:  # noqa: BLE001 — clustering must not fail the scout run
+                log.exception("cluster assignment failed for opp %s", opp["id"])
+
         # Auto-draft the best, on-threshold opportunities (L3).
         drafted = 0
         if cfg.get("autonomy") == "auto_draft":
@@ -565,6 +592,12 @@ async def auto_draft(
             },
         )
         article = generation.create_article(db, brief)
+        # The article inherits the opportunity's cluster + role (pillar/member) — this
+        # is also what claims the cluster's permanent pillar slot when role='pillar'.
+        if opp.get("cluster_id"):
+            clusters.attach_article(
+                db, article["id"], opp["cluster_id"], opp.get("cluster_role") or "member"
+            )
         # Link the article now (still "drafting") so the user can open it and watch
         # the detailed generation progress while it writes.
         set_opportunity_status(db, opp_id, "drafting", article_id=article["id"])
