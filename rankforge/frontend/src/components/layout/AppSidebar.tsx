@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Layers,
+  Library,
   LogOut,
   PenLine,
   Radar,
@@ -29,10 +30,11 @@ export function AppSidebar({ brandId }: { brandId: string }) {
   const { profile, signOut } = useAuth();
 
   const nav: NavItem[] = [
+    { title: "Scouts", href: `/brands/${brandId}/scouts`, icon: Radar },
     { title: "Research", href: `/brands/${brandId}`, icon: Search, exact: true },
     { title: "Sources", href: `/brands/${brandId}/sources`, icon: Layers },
     { title: "Articles", href: `/brands/${brandId}/articles`, icon: PenLine },
-    { title: "Scouts", href: `/brands/${brandId}/scouts`, icon: Radar },
+    { title: "Materials", href: `/brands/${brandId}/materials`, icon: Library },
     { title: "Team", href: `/brands/${brandId}/team`, icon: Users },
     { title: "Settings", href: `/brands/${brandId}/settings`, icon: Settings },
   ];
