@@ -14,12 +14,14 @@ from ..models.article import (
     ArticleVersion,
 )
 from ..models.comment import Comment, CommentCreate, CommentUpdate
+from ..models.linking import LinkSuggestion
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
 from ..ratelimit import rate_limit
 from ..services import comments as comments_svc
 from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
+from ..services import linking as linking_svc
 from ..services import quality as quality_svc
 from ..services import revise as revise_svc
 from ..services import scoring as scoring_svc
@@ -258,6 +260,81 @@ def restore_version(
     row = svc.restore_version(db, article_id, version_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "version not found")
+    return row
+
+
+# --- internal links (M6 / Phase 12.1) ---
+def _require_editor(user: CurrentUser) -> None:
+    if user.role not in ("editor", "admin"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "only editors or admins can change links"
+        )
+
+
+@router.get("/{article_id}/links", response_model=list[LinkSuggestion])
+def list_link_suggestions(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Pending internal-link suggestions for this article."""
+    _guard_article(db, article_id, user)
+    return linking_svc.list_suggestions(db, article_id)
+
+
+@router.post("/{article_id}/links/suggest", response_model=list[LinkSuggestion])
+def suggest_link_suggestions(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Scan this article for unlinked mentions of the brand's other published
+    articles and stage them as suggestions. Idempotent."""
+    article = _guard_article(db, article_id, user)
+    _require_editor(user)
+    linking_svc.suggest_links(db, article["business_id"], article_id)
+    return linking_svc.list_suggestions(db, article_id)
+
+
+@router.post(
+    "/{article_id}/links/{suggestion_id}/apply", response_model=LinkSuggestion
+)
+async def apply_link_suggestion(
+    article_id: UUID,
+    suggestion_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Insert the link into the body, re-score, and mark the suggestion accepted."""
+    article = _guard_article(db, article_id, user)
+    _require_editor(user)
+    row = await linking_svc.apply_suggestion(
+        pb, db, article["business_id"], suggestion_id
+    )
+    if row is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "link suggestion not found or not pending"
+        )
+    return row
+
+
+@router.post(
+    "/{article_id}/links/{suggestion_id}/dismiss", response_model=LinkSuggestion
+)
+def dismiss_link_suggestion(
+    article_id: UUID,
+    suggestion_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    article = _guard_article(db, article_id, user)
+    _require_editor(user)
+    row = linking_svc.dismiss_suggestion(db, article["business_id"], suggestion_id)
+    if row is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "link suggestion not found"
+        )
     return row
 
 
