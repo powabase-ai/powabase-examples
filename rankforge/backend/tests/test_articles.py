@@ -53,6 +53,21 @@ def test_outline_text_marks_sections_and_subsections():
     assert "Pricing  (## section)" in out
 
 
+async def test_ensure_writer_agent_passes_system_prompt_and_budget(monkeypatch):
+    """Regression: the writer agent must carry its system prompt (and a raised
+    max_tokens for whole-article output) — dropping either breaks all generation."""
+    captured = {}
+
+    async def fake_ensure_agent(client, **kwargs):
+        captured.update(kwargs)
+        return "writer-id"
+
+    monkeypatch.setattr(svc, "ensure_agent", fake_ensure_agent)
+    assert await svc.ensure_writer_agent(MagicMock()) == "writer-id"
+    assert captured.get("system_prompt")  # the bug that slipped through
+    assert captured["settings"]["max_tokens"] == 8000
+
+
 def _brand_db() -> MagicMock:
     """A db mock whose fetch_one satisfies assert_brand_access (org match)."""
     db = MagicMock()
