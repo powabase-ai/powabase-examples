@@ -109,3 +109,40 @@ export function useRestoreVersion(id: string) {
     },
   });
 }
+
+// --- internal links (M6 / Phase 12.1) ---
+export function useLinkSuggestions(id: string) {
+  return useQuery({
+    queryKey: ["links", id],
+    queryFn: () => articlesApi.links(id),
+    enabled: !!id,
+  });
+}
+
+export function useSuggestLinks(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => articlesApi.suggestLinks(id),
+    onSuccess: (data) => qc.setQueryData(["links", id], data),
+  });
+}
+
+export function useApplyLink(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (suggestionId: string) => articlesApi.applyLink(id, suggestionId),
+    onSuccess: () => {
+      // Applying edits the body + re-scores → refetch the article and the list.
+      qc.invalidateQueries({ queryKey: ["article", id] });
+      qc.invalidateQueries({ queryKey: ["links", id] });
+    },
+  });
+}
+
+export function useDismissLink(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (suggestionId: string) => articlesApi.dismissLink(id, suggestionId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["links", id] }),
+  });
+}

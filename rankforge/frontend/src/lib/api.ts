@@ -477,7 +477,37 @@ export const articlesApi = {
     request<void>(`/api/articles/${id}/comments/${commentId}`, {
       method: "DELETE",
     }),
+  links: (id: string) =>
+    request<LinkSuggestion[]>(`/api/articles/${id}/links`),
+  suggestLinks: (id: string) =>
+    request<LinkSuggestion[]>(`/api/articles/${id}/links/suggest`, {
+      method: "POST",
+    }),
+  applyLink: (id: string, suggestionId: string) =>
+    request<LinkSuggestion>(`/api/articles/${id}/links/${suggestionId}/apply`, {
+      method: "POST",
+    }),
+  dismissLink: (id: string, suggestionId: string) =>
+    request<LinkSuggestion>(
+      `/api/articles/${id}/links/${suggestionId}/dismiss`,
+      { method: "POST" }
+    ),
 };
+
+/** A staged internal-link suggestion: an unlinked mention in this article that
+ *  could link to another of the brand's published articles. */
+export interface LinkSuggestion {
+  id: string;
+  business_id: string;
+  article_id: string;
+  target_article_id: string;
+  anchor_text: string;
+  target_url: string;
+  target_title?: string | null;
+  reason?: string | null;
+  status: "pending" | "accepted" | "dismissed";
+  created_at?: string | null;
+}
 
 // --- Auth / membership ---
 export type Role = "writer" | "editor" | "admin";

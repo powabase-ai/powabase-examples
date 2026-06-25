@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/dialog";
 import { ArticleEditor } from "@/components/ArticleEditor";
 import { CommentsPanel } from "@/components/CommentsPanel";
+import { InternalLinksPanel } from "@/components/InternalLinksPanel";
 import { Markdown } from "@/components/Markdown";
 import { PublishDialog } from "@/components/PublishDialog";
 import { useAuth } from "@/lib/auth/AuthProvider";
@@ -289,7 +290,7 @@ export default function ArticleView({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [tab, setTab] = useState<
-    "SEO" | "GEO" | "Readability" | "Grounding" | "Comments"
+    "SEO" | "GEO" | "Readability" | "Grounding" | "Links" | "Comments"
   >("SEO");
   const [showHistory, setShowHistory] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
@@ -376,7 +377,7 @@ export default function ArticleView({
       <ResizablePanel defaultSize={26} minSize={16} maxSize={45}>
         <aside className="flex h-full w-full flex-col bg-card">
         <div className="flex border-b border-border">
-          {(["SEO", "GEO", "Readability", "Grounding", "Comments"] as const).map((t) => {
+          {(["SEO", "GEO", "Readability", "Grounding", "Links", "Comments"] as const).map((t) => {
             const sc =
               t === "SEO"
                 ? a?.seo_score
@@ -425,6 +426,10 @@ export default function ArticleView({
         {tab === "Comments" ? (
           <div className="min-h-0 flex-1 p-4">
             <CommentsPanel articleId={articleId} />
+          </div>
+        ) : tab === "Links" ? (
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <InternalLinksPanel articleId={articleId} />
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
