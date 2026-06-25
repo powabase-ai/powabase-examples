@@ -149,22 +149,40 @@ def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dic
         "Primary keyword appears early." if early else "Primary keyword not in the first 100 words.",
         [] if early else ["Mention the primary keyword in the intro."]))
 
+    # Keyword density is a weak, legacy signal (Google uses no target density, and
+    # chasing one invites stuffing) — so it carries LOW weight. But it's still a useful
+    # floor check: a primary keyword that barely appears (or is stuffed) is a real, easy
+    # fix. The band is tight enough that genuine under-use scores low (the old 1.5 slack
+    # scored even 0% at ~73), while 0.4–2.5% is the natural-usage plateau.
     # Non-word lookarounds (not \b) so punctuation keywords like "c++"/".net" match.
     pk_hits = (
         len(re.findall(rf"(?<![a-z0-9]){re.escape(pk)}(?![a-z0-9])", lower)) if pk else 0
     )
     density = (pk_hits / wc * 100) if (pk and wc) else 0
+    if pk and density < 0.4:
+        kd_fix = [f'Use the primary keyword "{pk}" a few more times where it fits '
+                  f"naturally (only ~{density:.2f}% now) — don't force it."]
+    elif pk and density > 2.5:
+        kd_fix = [f'The primary keyword "{pk}" is overused (~{density:.2f}%); cut a few '
+                  "mentions to avoid keyword stuffing."]
+    else:
+        kd_fix = []
     sig.append(_signal(
-        "keyword_density", "Keyword density", _band(density, 0.4, 2.5, 1.5), 0.10,
-        f"Primary keyword density ~{density:.2f}%.",
-        ["Aim for 0.4–2.5% density."] if not 0.4 <= density <= 2.5 else []))
+        "keyword_density", "Keyword density", _band(density, 0.4, 2.5, 0.5), 0.05,
+        f"Primary keyword density ~{density:.2f}%.", kd_fix))
 
+    # Topical coverage — does the article actually cover the planned subtopics? A real
+    # SEO/GEO signal (answer engines reward comprehensive coverage), so it outweighs raw
+    # density. Name the MISSING keywords in the fix so the reviser can act on it instead
+    # of guessing which ones to add.
     present = sum(1 for s in secondary if s and s in lower)
     cov = (present / len(secondary) * 100) if secondary else 100
+    missing = [s for s in (brief.get("secondary_keywords") or []) if s and s.lower() not in lower]
     sig.append(_signal(
-        "secondary_coverage", "Secondary keyword coverage", cov, 0.12,
+        "secondary_coverage", "Secondary keyword coverage", cov, 0.14,
         f"{present}/{len(secondary)} secondary keywords used.",
-        ["Cover more of the brief's secondary keywords."] if cov < 70 else []))
+        [f"Work these missing secondary keywords in where they fit naturally: "
+         f"{', '.join(missing[:8])}."] if cov < 70 and missing else []))
 
     h1 = h_levels.count(1)
     h2 = h_levels.count(2)
@@ -194,13 +212,13 @@ def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dic
     target_wc = brief.get("target_word_count") or wc
     ratio = wc / target_wc if target_wc else 1
     sig.append(_signal(
-        "word_count", "Length vs target", _band(ratio, 0.85, 1.3, 0.5), 0.10,
+        "word_count", "Length vs target", _band(ratio, 0.85, 1.3, 0.5), 0.12,
         f"{wc} words vs ~{target_wc} target.",
         ["Expand toward the target length."] if ratio < 0.85 else []))
 
     ext = len(links)
     sig.append(_signal(
-        "external_links", "Outbound citations", _band(ext, 3, 60, 6), 0.08,
+        "external_links", "Outbound citations", _band(ext, 3, 60, 6), 0.09,
         f"{ext} outbound link(s).",
         ["Cite a few authoritative sources."] if ext < 3 else []))
 

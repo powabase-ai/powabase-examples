@@ -32,6 +32,32 @@ def test_seo_shape_and_keyword_title():
     assert 0 <= s["total"] <= 100
 
 
+def test_seo_signal_weights_sum_to_one():
+    # The aggregate target only means what it says if the weights sum to 1 — guard
+    # against a rebalance silently shifting the denominator.
+    s = scoring.score_seo(MD, "The Best Headless CMS Guide", META, BRIEF)
+    assert round(sum(sig["weight"] for sig in s["signals"]), 6) == 1.0
+
+
+def test_low_keyword_density_scores_low_and_names_the_keyword():
+    # A primary keyword that appears ~once in a long article is genuinely under-used;
+    # the recalibrated band must score that low (the old 1.5 slack scored it ~77).
+    body = "# Title\nheadless cms " + "filler word here ok " * 250
+    s = scoring.score_seo(body, "Title", "x" * 140, {"primary_keyword": "headless cms"})
+    kd = next(x for x in s["signals"] if x["key"] == "keyword_density")
+    assert kd["score"] < 50
+    assert kd["fixes"] and "headless cms" in kd["fixes"][0]  # actionable, not generic
+
+
+def test_secondary_coverage_fix_lists_the_missing_keywords():
+    brief = {"primary_keyword": "x", "secondary_keywords": ["alpha term", "beta term"]}
+    body = "# Title\nThis mentions alpha term once. " + "filler " * 50
+    s = scoring.score_seo(body, "Title", "x" * 140, brief)
+    sc = next(x for x in s["signals"] if x["key"] == "secondary_coverage")
+    assert sc["fixes"] and "beta term" in sc["fixes"][0]  # the missing one is named
+    assert "alpha term" not in sc["fixes"][0]  # already covered → not asked for again
+
+
 def test_geo_deterministic_signals():
     g = scoring.score_geo(MD, BRIEF, None)
     by = {x["key"]: x for x in g["signals"]}
