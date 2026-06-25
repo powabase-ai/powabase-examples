@@ -229,19 +229,27 @@ function AddPagesDialog({
   const [mode, setMode] = React.useState<IngestMode>("sitemap");
   const [url, setUrl] = React.useState("");
   const [urlsText, setUrlsText] = React.useState("");
-  const [maxPages, setMaxPages] = React.useState(30);
+  // String-backed so the field can be cleared/edited freely; clamped at use.
+  const [maxPagesStr, setMaxPagesStr] = React.useState("30");
+  const maxPages = Math.max(1, Math.min(200, parseInt(maxPagesStr, 10) || 30));
   // Crawl preview: discovered pages (grouped by subdomain) + which hosts to keep.
   const [found, setFound] = React.useState<MaterialsDiscovery | null>(null);
   const [keepHosts, setKeepHosts] = React.useState<Set<string>>(new Set());
 
-  // Drop any stale crawl preview when the dialog closes, so reopening starts clean.
+  // Reset inputs + preview when the dialog closes, so reopening starts clean.
   React.useEffect(() => {
-    if (!open) setFound(null);
+    if (!open) {
+      setFound(null);
+      setUrl("");
+      setUrlsText("");
+    }
   }, [open]);
 
   function pickMode(m: IngestMode) {
     setMode(m);
     setFound(null); // leaving/entering crawl resets any preview
+    setUrl(""); // url is shared across tabs — don't bleed a sitemap URL into crawl
+    setUrlsText("");
   }
 
   function startIngest(body: MaterialsIngestRequest, label: string) {
@@ -421,10 +429,8 @@ function AddPagesDialog({
               type="number"
               min={1}
               max={200}
-              value={maxPages}
-              onChange={(e) =>
-                setMaxPages(Math.max(1, Math.min(200, Number(e.target.value) || 1)))
-              }
+              value={maxPagesStr}
+              onChange={(e) => setMaxPagesStr(e.target.value)}
               className="w-24"
             />
           </label>

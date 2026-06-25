@@ -153,6 +153,14 @@ def _set_progress(
     )
 
 
+def mark_starting(db: Database, business_id: UUID, message: str) -> None:
+    """Record a 'starting' phase SYNCHRONOUSLY (committed) before the route returns
+    202. The spawned worker's own first _set_progress races the client's immediate
+    poll — if the poll wins, it sees idle progress and never starts polling. Writing
+    here first guarantees the next GET observes a running phase."""
+    _set_progress(db, business_id, "starting", message)
+
+
 # --- crawl preview (read-only discovery, no import) ---
 _HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
 _LOC_RE = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.IGNORECASE)
@@ -165,6 +173,9 @@ _ASSET_EXT = (
     ".zip", ".gz", ".mp4", ".webm", ".mp3", ".pdf",
 )
 _ASSET_SEGMENTS = ("/_next/", "/static/", "/assets/", "/_nuxt/", "/cdn-cgi/")
+# Cap bytes read per discovery fetch so a huge (or malicious) page/sitemap body
+# can't exhaust memory — time is bounded by the httpx timeout, size by this.
+_MAX_DISCOVER_BYTES = 4_000_000
 
 
 def _is_asset(path: str) -> bool:
@@ -180,14 +191,21 @@ def _registrable(host: str) -> str:
 
 
 def _is_public_host(host: str) -> bool:
-    """SSRF guard: True only if `host` resolves exclusively to public IPs.
+    """SSRF guard: True only if `host` resolves exclusively to GLOBALLY-routable IPs.
 
     discover_pages fetches a user-supplied URL server-side, so without this an
-    editor could point it at loopback / private / link-local addresses (e.g. the
-    cloud metadata endpoint 169.254.169.254) and use the server as a proxy. Rejects
-    obvious internal names and any host that resolves to a non-public address.
+    editor could point it at loopback / private / link-local / CGNAT addresses
+    (e.g. the cloud metadata endpoint 169.254.169.254) and use the server as a
+    proxy. `is_global` is False for every reserved/private/loopback/link-local/
+    CGNAT(100.64/10)/IPv4-mapped-private range, which is exactly what we want to
+    reject — broader and simpler than enumerating the special ranges by hand.
     """
-    host = (host or "").split(":")[0].strip().lower()
+    host = (host or "").strip()
+    if host.startswith("["):  # IPv6 literal, e.g. [::1]:443 → ::1
+        host = host[1:].split("]", 1)[0]
+    else:
+        host = host.split(":", 1)[0]  # strip :port
+    host = host.lower()
     if not host or host == "localhost" or host.endswith((".local", ".internal")):
         return False
     try:
@@ -199,14 +217,7 @@ def _is_public_host(host: str) -> bool:
             addr = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-            or addr.is_multicast
-            or addr.is_unspecified
-        ):
+        if not addr.is_global:  # rejects if ANY resolved address is non-public
             return False
     return True
 
@@ -242,37 +253,59 @@ def discover_pages(root_url: str, max_pages: int = DEFAULT_MAX_PAGES) -> list[st
             return
         found.setdefault(u.rstrip("/") or u, None)
 
-    def _fetch(c: httpx.Client, url: str) -> httpx.Response | None:
-        """GET a URL, following redirects manually so EVERY hop's host is
-        re-validated as public (httpx auto-redirects would bypass the SSRF check)."""
+    def _fetch(c: httpx.Client, url: str) -> str | None:
+        """Return the text of a successful, public, html/xml page — following
+        redirects manually so EVERY hop is re-validated (httpx auto-redirects would
+        bypass the SSRF check) and reading at most _MAX_DISCOVER_BYTES. None on any
+        non-http(s) scheme, non-public host, redirect-with-no-location, >=400, a
+        non-text content-type, or transport error."""
         for _ in range(4):  # initial + up to 3 redirects
-            if not _is_public_host(urlparse(url).netloc):
+            p = urlparse(url)
+            if p.scheme not in ("http", "https") or not _is_public_host(p.netloc):
                 return None
             try:
-                resp = c.get(url)
+                with c.stream("GET", url) as resp:
+                    if resp.is_redirect:
+                        loc = resp.headers.get("location")
+                        if not loc:
+                            return None
+                        url = urljoin(url, loc)
+                        continue
+                    if resp.status_code >= 400:
+                        return None
+                    ctype = resp.headers.get("content-type", "").lower()
+                    if ctype and not any(
+                        t in ctype for t in ("html", "xml", "text")
+                    ):
+                        return None  # not a page/sitemap — don't buffer it
+                    chunks: list[bytes] = []
+                    size = 0
+                    for chunk in resp.iter_bytes():
+                        chunks.append(chunk)
+                        size += len(chunk)
+                        if size >= _MAX_DISCOVER_BYTES:
+                            break
+                    return b"".join(chunks).decode(
+                        resp.encoding or "utf-8", "replace"
+                    )
             except httpx.HTTPError:
                 return None
-            loc = resp.headers.get("location")
-            if resp.is_redirect and loc:
-                url = urljoin(url, loc)
-                continue
-            return resp
         return None
 
     _add(raw)
     try:
-        # No auto-redirects: a redirect could bounce to an internal host, bypassing
-        # the per-URL public-host check above.
+        # follow_redirects=False: _fetch follows them manually, re-validating each
+        # hop's host (an auto-redirect could bounce to an internal host).
         with httpx.Client(timeout=15.0, follow_redirects=False) as c:
-            r = _fetch(c, raw)
-            if r is not None and r.status_code < 400:
-                for href in _HREF_RE.findall(r.text):
+            root_text = _fetch(c, raw)
+            if root_text:
+                for href in _HREF_RE.findall(root_text):
                     _add(urljoin(raw, href))
             # sitemap (one level of sitemap-index), bounded
             if len(found) < max_pages:
-                sm = _fetch(c, f"{base.scheme}://{base.netloc}/sitemap.xml")
-                if sm is not None and sm.status_code < 400:
-                    locs = _LOC_RE.findall(sm.text)
+                sm_text = _fetch(c, f"{base.scheme}://{base.netloc}/sitemap.xml")
+                if sm_text:
+                    locs = _LOC_RE.findall(sm_text)
                     children = [u for u in locs if u.lower().endswith(".xml")]
                     for u in locs:
                         if not u.lower().endswith(".xml"):
@@ -280,12 +313,12 @@ def discover_pages(root_url: str, max_pages: int = DEFAULT_MAX_PAGES) -> list[st
                     for child in children[:5]:
                         if len(found) >= max_pages:
                             break
-                        # only same-site children, re-checked for public host
+                        # only same-site children (host re-checked inside _fetch)
                         if _registrable(urlparse(child).netloc) != site:
                             continue
-                        cr = _fetch(c, child)
-                        if cr is not None and cr.status_code < 400:
-                            for loc in _LOC_RE.findall(cr.text):
+                        child_text = _fetch(c, child)
+                        if child_text:
+                            for loc in _LOC_RE.findall(child_text):
                                 _add(loc)
     except Exception:  # noqa: BLE001 — discovery must never raise into the route
         log.exception("discover_pages failed for %s", raw)

@@ -56,6 +56,9 @@ async def ingest_materials(
 ):
     """Kick off a brand-materials build. Poll GET /{id}/materials for progress."""
     assert_brand_access(db, business_id, user)
+    # Mark 'starting' (committed) before returning, so the client's immediate poll
+    # sees a running phase and engages polling — the spawned task can't lose that race.
+    svc.mark_starting(db, business_id, "Gathering brand pages…")
     spawn(
         svc.ingest(
             pb, db, business_id,
@@ -121,6 +124,8 @@ async def upload_material(
             status.HTTP_413_CONTENT_TOO_LARGE,
             "file too large (max 20 MB)",
         )
+    # Mark 'starting' (committed) before returning so an immediate poll engages.
+    svc.mark_starting(db, business_id, f"Uploading {file.filename or 'file'}…")
     spawn(
         svc.ingest_file(
             pb,

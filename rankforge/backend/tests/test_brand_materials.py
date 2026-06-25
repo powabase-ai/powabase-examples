@@ -91,12 +91,22 @@ def test_discover_pages_keeps_same_site_and_subdomains(monkeypatch):
         '<a href="/_next/static/app.js">asset</a>'
     )
 
-    class Resp:
-        def __init__(self, text, code=200):
-            self.text = text
+    class FakeStream:
+        def __init__(self, text, code=200, ctype="text/html"):
+            self._text = text
             self.status_code = code
             self.is_redirect = False
-            self.headers: dict[str, str] = {}
+            self.headers = {"content-type": ctype}
+            self.encoding = "utf-8"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def iter_bytes(self):
+            yield self._text.encode()
 
     class FakeClient:
         def __init__(self, *a, **k):
@@ -108,8 +118,8 @@ def test_discover_pages_keeps_same_site_and_subdomains(monkeypatch):
         def __exit__(self, *a):
             return False
 
-        def get(self, url):
-            return Resp(html) if url == root else Resp("", 404)  # sitemap 404
+        def stream(self, method, url):
+            return FakeStream(html) if url == root else FakeStream("", 404)
 
     monkeypatch.setattr(svc.httpx, "Client", FakeClient)
     out = svc.discover_pages(root, 50)
@@ -126,6 +136,8 @@ def test_is_public_host_blocks_internal():
     assert not svc._is_public_host("10.0.0.1")
     assert not svc._is_public_host("192.168.0.5")
     assert not svc._is_public_host("169.254.169.254")  # cloud metadata
+    assert not svc._is_public_host("100.64.0.1")  # CGNAT (100.64/10)
+    assert not svc._is_public_host("[::1]:443")  # IPv6 loopback literal
     assert not svc._is_public_host("intranet.local")
     assert svc._is_public_host("8.8.8.8")  # public IP literal
 
