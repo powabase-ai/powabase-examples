@@ -256,7 +256,7 @@ async def reflect(
 
     # No KB → grounding isn't measurable. Report it as unavailable (score None)
     # rather than asking the judge to "check" against no evidence, which would
-    # otherwise feed a meaningless number into satisfied()/combined_score.
+    # otherwise feed a meaningless number into satisfied()/_objective_total.
     if not kb_id:
         gen_svc._update(db, article_id, grounding_report=_UNAVAILABLE)
         return _UNAVAILABLE

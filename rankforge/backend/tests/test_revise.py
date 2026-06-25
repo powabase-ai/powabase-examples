@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
-from rankforge_backend.services import revise
+from rankforge_backend.services import geo_optimize, quality, revise, scoring
 
 SEO_MET = {"total": 82, "target": 80, "met": True, "signals": []}
 SEO_FAIL = {
@@ -66,11 +66,6 @@ def test_collect_issues_excludes_meta_bound_signals():
     assert not any("Title length" in i for i in issues)
 
 
-def test_combined_score_sums_three_axes():
-    assert revise.combined_score(SEO_MET, GEO_MET, GR_OK) == 82 + 88 + 80
-    assert revise.combined_score(None, None, None) == 0
-
-
 # --- revision commit gate ---
 def _s(total, target):
     return {"total": total, "target": target}
@@ -97,6 +92,108 @@ def test_decide_allows_gap_neutral_edit():
     # Unchanged SEO/GEO — let it through; the outer combined-score check (grounding)
     # decides whether the pass actually helped.
     assert revise._decide([_s(73, 80), _s(88, 85)], [_s(73, 80), _s(88, 85)])
+
+
+# --- objective loop: post-rescore commit decision (Stage 1) ---
+def test_objective_total_sums_and_tolerates_missing_grounding():
+    assert revise._objective_total(_s(80, 80), _s(85, 85), {"grounding_score": 70}) == 235
+    # Grounding unavailable (None) or absent contributes 0 — must never crash.
+    assert revise._objective_total(_s(80, 80), _s(85, 85), {"grounding_score": None}) == 165
+    assert revise._objective_total(_s(80, 80), _s(85, 85), None) == 165
+
+
+def test_met_regressed_badly():
+    met = {"total": 88, "target": 85, "met": True}
+    within_tol = {"total": 82, "target": 85}  # 3 below target — within tolerance
+    wrecked = {"total": 80, "target": 85}      # 5 below target — collateral damage
+    assert not revise._met_regressed_badly([(met, within_tol)])
+    assert revise._met_regressed_badly([(met, wrecked)])
+    # An axis that wasn't met to begin with can't "regress badly".
+    unmet = {"total": 60, "target": 85, "met": False}
+    assert not revise._met_regressed_badly([(unmet, wrecked)])
+
+
+def _objective_env(monkeypatch, before, after, new_md="X" * 500):
+    """Wire _objective_loop's collaborators against a mutable article state.
+    reflect/score mutate the state to `after` so the loop's AFTER-rescore decision
+    (the whole point of Stage 1) runs on realistic data."""
+    state = {"art": {"content_md": "body", **before}}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda db, aid: dict(state["art"]))
+    monkeypatch.setattr(
+        revise.gen_svc, "_update", lambda db, aid, **f: state["art"].update(f)
+    )
+    monkeypatch.setattr(revise, "ensure_reviser_agent", AsyncMock(return_value="rv"))
+    monkeypatch.setattr(revise, "_diverse_excerpts", AsyncMock(return_value="(none)"))
+    monkeypatch.setattr(revise, "_revise_once", AsyncMock(return_value=new_md))
+
+    async def _reflect(client, db, aid):
+        state["art"]["grounding_report"] = after["grounding_report"]
+
+    async def _score(client, db, aid):
+        state["art"]["seo_score"] = after["seo_score"]
+        state["art"]["geo_score"] = after["geo_score"]
+
+    monkeypatch.setattr(quality, "reflect", _reflect)
+    monkeypatch.setattr(geo_optimize, "optimize_and_store", AsyncMock())
+    monkeypatch.setattr(scoring, "score_and_store", _score)
+    return state
+
+
+_GR_LOW_FLAGGED = {
+    "grounding_score": 58,
+    "flagged": [{"quote": "q", "issue": "i", "suggestion": "s"}],
+}
+
+
+async def test_objective_loop_keeps_a_grounding_gain(monkeypatch):
+    """The user's bug: SEO/GEO are met (GEO only by a thin margin) but Grounding is
+    low. The pass that lifts Grounding 58→73 must be KEPT, not vetoed."""
+    before = {
+        "seo_score": SEO_MET, "geo_score": {"total": 86, "target": 85, "met": True},
+        "grounding_report": _GR_LOW_FLAGGED,
+    }
+    after = {
+        "seo_score": SEO_MET, "geo_score": {"total": 86, "target": 85, "met": True},
+        "grounding_report": {"grounding_score": 73, "flagged": []},
+    }
+    state = _objective_env(monkeypatch, before, after)
+    await revise._objective_loop(MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {})
+    assert state["art"]["content_md"] == "X" * 500  # rewrite kept
+    assert state["art"]["grounding_report"]["grounding_score"] == 73
+
+
+async def test_objective_loop_reverts_when_no_objective_gain(monkeypatch):
+    """A pass that re-scores no better than before must revert content AND restore the
+    cached scores (no half-applied state)."""
+    before = {
+        "seo_score": SEO_MET, "geo_score": GEO_MET,
+        "grounding_report": _GR_LOW_FLAGGED,
+    }
+    after = {  # rescore shows nothing moved
+        "seo_score": SEO_MET, "geo_score": GEO_MET,
+        "grounding_report": _GR_LOW_FLAGGED,
+    }
+    state = _objective_env(monkeypatch, before, after)
+    await revise._objective_loop(MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {})
+    assert state["art"]["content_md"] == "body"  # reverted
+    assert state["art"]["grounding_report"]["grounding_score"] == 58
+
+
+async def test_objective_loop_reverts_when_met_axis_wrecked(monkeypatch):
+    """Even a big Grounding gain is reverted if it wrecks an already-met axis past the
+    tolerance — a higher combined total must not paper over real collateral damage."""
+    before = {
+        "seo_score": SEO_MET, "geo_score": {"total": 86, "target": 85, "met": True},
+        "grounding_report": _GR_LOW_FLAGGED,
+    }
+    after = {  # grounding jumps to 85 but GEO collapses to 79 (target 85)
+        "seo_score": SEO_MET, "geo_score": {"total": 79, "target": 85, "met": False},
+        "grounding_report": {"grounding_score": 85, "flagged": []},
+    }
+    state = _objective_env(monkeypatch, before, after)
+    await revise._objective_loop(MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {})
+    assert state["art"]["content_md"] == "body"  # reverted despite higher total
+    assert state["art"]["geo_score"]["total"] == 86
 
 
 # --- editorial loop (LLM-editor-judged human-ness) ---

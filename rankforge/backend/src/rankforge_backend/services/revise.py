@@ -263,18 +263,6 @@ def satisfied(
     return gs is None or gs >= GROUNDING_TARGET
 
 
-def combined_score(
-    seo: dict | None,
-    geo: dict | None,
-    grounding_report: dict | None,
-    readability: dict | None = None,
-) -> int:
-    total = (seo or {}).get("total", 0) + (geo or {}).get("total", 0)
-    total += (grounding_report or {}).get("grounding_score") or 0
-    total += (readability or {}).get("total", 0)
-    return total
-
-
 # A previously-met axis may dip this far below its target while we fix a FAILING one
 # (it was met with margin); a bigger drop means the fix did real collateral damage.
 _MET_TOLERANCE = 4
