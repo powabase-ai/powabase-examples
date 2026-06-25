@@ -188,21 +188,25 @@ def _decide(cur: list[dict], new: list[dict]) -> bool:
 def _det_scores(
     md: str, title: str, meta: str | None, brief: dict
 ) -> list[dict]:
-    """Cheap deterministic SEO + GEO + Readability scores (no LLM) for the commit
-    gate. Readability's deterministic AI-tell signals let the gate reject a revision
-    that makes the prose read more machine-generated."""
+    """Cheap deterministic SEO + GEO scores (no LLM) for the commit gate.
+
+    Readability is intentionally NOT here: human-ness is owned by the editorial
+    loop's LLM editor, not a deterministic tell-count. The commit gate only protects
+    the OBJECTIVE axes — so an SEO/GEO-preserving rewrite (whether for SEO fixes or
+    for voice) is judged on those, and a good de-AI rewrite can't be vetoed by a
+    tell-counter."""
     from . import scoring
 
     return [
         scoring.score_seo(md, title, meta, brief),
         scoring.score_geo(md, brief, None, has_structured_data=True),
-        scoring.score_readability(md, None),
     ]
 
 
 def _accept_revision(
     cur_md: str, new_md: str, title: str, meta: str | None, brief: dict
 ) -> bool:
+    """True if `new_md` doesn't regress the objective SEO/GEO axes vs `cur_md`."""
     return _decide(
         _det_scores(cur_md, title, meta, brief),
         _det_scores(new_md, title, meta, brief),
@@ -353,7 +357,7 @@ async def _revise_once(
     return (res.get("content") or "").strip()
 
 
-def _step(db: Database, article_id: UUID, i: int, step: str) -> None:
+def _step(db: Database, article_id: UUID, i: int, step: str, total: int) -> None:
     """Publish a refine sub-step for the UI's progress bar."""
     gen_svc._update(
         db, article_id,
@@ -361,17 +365,275 @@ def _step(db: Database, article_id: UUID, i: int, step: str) -> None:
         progress={
             "phase": "refining",
             "iteration": i + 1,
-            "total": MAX_REVISIONS,
+            "total": total,
             "step": step,
         },
     )
 
 
+# --- editorial / de-AI loop (human-ness, judged by an LLM editor) ---
+EDITOR_AGENT_NAME = "rankforge-editor"
+EDITOR_MODEL = "claude-opus-4-7"
+MAX_EDITORIAL_PASSES = 2
+# reads_human at/above this = ship without another rewrite (the editor's call,
+# this is just a backstop if the model returns a score but a vague verdict).
+_HUMAN_BAR = 85
+
+_EDITOR_SYSTEM = """\
+You are RankForge's **senior developmental editor**. You read a finished draft and \
+judge ONE thing: does it read like a sharp, knowledgeable human wrote it for a smart \
+reader — or does it read like AI? Then you give the writer specific, surgical notes \
+to fix what reads as machine-made. You are not a proofreader and not an SEO checker.
+
+## What "reads like AI" is (what to hunt for)
+- Mechanical evenness: every paragraph the same length, every section the same shape, \
+a metronomic rhythm. Real writers vary deliberately.
+- Generic, hedged, safe phrasing where a specific number, name, version, or example \
+belongs. Vagueness is the strongest tell.
+- Formulaic constructions: "it's not just X, it's Y"; "whether you're a beginner or a \
+pro"; "in today's world"; "let's dive in"; reflexive rule-of-three triads; "from X to Y".
+- Overused register: delve, leverage, robust, seamless, elevate, unlock, harness, \
+navigate (metaphor), foster, underscore, pivotal, crucial, vibrant, "boasts", "nestled".
+- Empty transitions (Moreover, Furthermore, Additionally, That said), both-sidesing, \
+stating the obvious as insight, over-hedging, bolded bullet lead-ins, "In conclusion" \
+restatements.
+- Em-dashes used as a crutch (several per section, or as the default break). A skilled \
+writer uses one occasionally for real effect — **judge by craft, not by count, and do \
+not flag tasteful use**.
+
+## How to judge
+- `reads_human` 0–100: 85+ means a sharp reader would believe a knowledgeable human \
+wrote it. Below ~80 means noticeable tells.
+- If it genuinely reads human, `verdict` = "ship". Otherwise "revise" with notes.
+
+## Notes — the valuable part
+- Each note targets a SPECIFIC place (quote a short phrase so the writer finds it) and \
+gives a SPECIFIC fix. Not "remove em-dashes" — say which passage and why.
+- Prioritize the few changes that most move the needle. Max 8. Don't nitpick.
+- NEVER ask to remove facts, citations, brand mentions/links, or keywords. Improve how \
+they read, not whether they exist.
+
+## Output
+Return ONLY this JSON (no prose, no code fences):
+{"reads_human": <int>, "verdict": "ship" | "revise", \
+"notes": [{"quote": <str>, "problem": <str>, "fix": <str>}]}
+"""
+
+
+async def ensure_editor_agent(client: PowabaseClient) -> str:
+    return await ensure_agent(
+        client,
+        name=EDITOR_AGENT_NAME,
+        model=EDITOR_MODEL,
+        system_prompt=_EDITOR_SYSTEM,
+        settings={"reasoning_effort": "high"},
+    )
+
+
+def _tell_hints(read: dict | None) -> str:
+    """Surface the deterministic tell scores to the editor as HINTS (where to look),
+    explicitly told not to just chase them."""
+    if not read:
+        return ""
+    by = {s["key"]: s["score"] for s in read.get("signals", [])}
+    return (
+        "\n\n## Automated tell scores (hints only — use your judgment, don't just "
+        "chase these numbers; 100 = clean)\n"
+        f"- em-dash restraint: {by.get('em_dashes', '?')}/100\n"
+        f"- AI vocabulary: {by.get('ai_vocabulary', '?')}/100\n"
+        f"- formulaic constructions: {by.get('tell_phrases', '?')}/100\n"
+        f"- sentence-length variety: {by.get('rhythm', '?')}/100\n"
+    )
+
+
+async def _editor_review(
+    client: PowabaseClient, editor_id: str, md: str, read: dict | None
+) -> dict[str, Any]:
+    """Run the editor over the FULL article; return {reads_human, verdict, notes}.
+    Fails 'ship' (stop editing) on any error so a flaky judge never wedges refine."""
+    msg = (
+        "Review this article for how human it reads, then return the JSON verdict.\n"
+        f"{_tell_hints(read)}\n\n## Output\nReturn ONLY the JSON object.\n\n"
+        f"---ARTICLE---\n{md[:40000]}"
+    )
+    try:
+        res = await client.run_agent(editor_id, msg)
+        data = extract_json(res.get("content") or "")
+    except Exception:  # noqa: BLE001 — judge failure shouldn't block shipping
+        return {"verdict": "ship", "reads_human": None, "notes": []}
+    if not isinstance(data, dict):
+        return {"verdict": "ship", "reads_human": None, "notes": []}
+    return data
+
+
+async def _revise_for_voice(
+    client: PowabaseClient,
+    reviser_id: str,
+    md: str,
+    notes: list[dict],
+    excerpts: str,
+) -> str:
+    """Rewrite the whole article against the editor's notes — for human-ness, while
+    preserving everything objective (facts, citations, brand links, keywords, length)."""
+    note_text = "\n".join(
+        f'- At "{(n.get("quote") or "")[:80]}": {n.get("problem", "")}'
+        f' → {n.get("fix", "")}'
+        for n in notes[:8]
+        if isinstance(n, dict)
+    )
+    msg = (
+        "A senior editor reviewed your article. Apply their notes so it reads like a "
+        "knowledgeable human wrote it — vary rhythm and paragraph length, cut the AI "
+        "tells they flag, and push in real specifics. PRESERVE every fact, citation, "
+        "brand mention/link, keyword, heading, and roughly the length; this is an "
+        "editorial rewrite, not a cut.\n\n"
+        "## Editor's notes\n"
+        f"{note_text}\n\n"
+        "## Additional sources you may cite for added specifics\n"
+        "- Use natural anchor text and vary the source domain.\n"
+        f"{excerpts}\n\n"
+        "## Output\n"
+        "- Output ONLY the full revised article in Markdown, starting at the H1.\n\n"
+        f"---ARTICLE---\n{md}"
+    )
+    res = await client.run_agent_collect(reviser_id, msg)
+    if res.get("error"):
+        raise RuntimeError(f"voice revision failed: {res['error']}")
+    return (res.get("content") or "").strip()
+
+
+async def _editorial_loop(
+    client: PowabaseClient,
+    db: Database,
+    article_id: UUID,
+    brief: dict,
+    kb_id: str | None,
+    source_ids: list[str] | None,
+    url_by_source: dict[str, str],
+) -> None:
+    """Make the prose read human, judged by an LLM editor (not a tell-count).
+
+    Each pass: editor reviews the full article → if it ships, stop → else the reviser
+    rewrites against the editor's specific notes → accept only if the OBJECTIVE axes
+    (SEO/GEO) don't regress → re-fact-check/optimize/score. Capped so it terminates.
+    """
+    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+
+    editor_id: str | None = None
+    reviser_id: str | None = None
+    for i in range(MAX_EDITORIAL_PASSES):
+        article = gen_svc.get_article(db, article_id)
+        cur_md = (article.get("content_md") if article else "") or ""
+        if not cur_md:
+            break
+        if editor_id is None:
+            editor_id = await ensure_editor_agent(client)
+        review = await _editor_review(
+            client, editor_id, cur_md, article.get("readability_score")
+        )
+        verdict = (review.get("verdict") or "").lower()
+        human = review.get("reads_human")
+        if verdict == "ship" or (isinstance(human, int) and human >= _HUMAN_BAR):
+            break
+        notes = [n for n in (review.get("notes") or []) if isinstance(n, dict)]
+        if not notes:
+            break
+
+        _step(db, article_id, i, "editing", MAX_EDITORIAL_PASSES)
+        try:
+            if reviser_id is None:
+                reviser_id = await ensure_reviser_agent(client)
+            excerpts = await _diverse_excerpts(
+                client, kb_id, brief, source_ids, url_by_source
+            )
+            new_md = await _revise_for_voice(
+                client, reviser_id, cur_md, notes, excerpts
+            )
+            if not new_md or len(new_md) < 0.6 * len(cur_md):
+                break
+            # Guard the OBJECTIVE axes only — the editor owns human-ness.
+            title = article.get("meta_title") or article.get("title") or ""
+            meta = article.get("meta_description")
+            if not _accept_revision(cur_md, new_md, title, meta, brief):
+                break
+            gen_svc._update(db, article_id, content_md=new_md)
+            await quality.reflect(client, db, article_id)
+            await geo_optimize.optimize_and_store(client, db, article_id)
+            await scoring.score_and_store(client, db, article_id)
+        except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
+            break
+
+
+async def _objective_loop(
+    client: PowabaseClient,
+    db: Database,
+    article_id: UUID,
+    brief: dict,
+    kb_id: str | None,
+    source_ids: list[str] | None,
+    url_by_source: dict[str, str],
+) -> None:
+    """Iterate the article against the OBJECTIVE evaluators — SEO, GEO, Grounding —
+    until they meet target or stop improving. Readability/human-ness is NOT handled
+    here; that's the editorial loop. Capped so it always terminates."""
+    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+
+    agent_id: str | None = None
+    prev_combined = -1
+    for i in range(MAX_REVISIONS):
+        article = gen_svc.get_article(db, article_id)
+        seo = article.get("seo_score")
+        geo = article.get("geo_score")
+        gr = article.get("grounding_report")
+        if satisfied(seo, geo, gr):  # readability omitted — objective axes only
+            break
+        score_now = combined_score(seo, geo, gr)
+        if score_now <= prev_combined:  # last pass didn't help — stop
+            break
+        prev_combined = score_now
+        issues = collect_issues(seo, geo, gr)
+        if not issues:
+            break
+
+        _step(db, article_id, i, "revising", MAX_REVISIONS)
+        try:
+            if agent_id is None:
+                agent_id = await ensure_reviser_agent(client)
+            excerpts = await _diverse_excerpts(
+                client, kb_id, brief, source_ids, url_by_source
+            )
+            cur_md = article["content_md"] or ""
+            new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
+            if not new_md or len(new_md) < 0.6 * len(cur_md):
+                break
+            title = article.get("meta_title") or article.get("title") or ""
+            meta = article.get("meta_description")
+            if not _accept_revision(cur_md, new_md, title, meta, brief):
+                break
+            gen_svc._update(db, article_id, content_md=new_md)
+            _step(db, article_id, i, "fact-checking", MAX_REVISIONS)
+            await quality.reflect(client, db, article_id)
+            _step(db, article_id, i, "optimizing", MAX_REVISIONS)
+            await geo_optimize.optimize_and_store(client, db, article_id)
+            _step(db, article_id, i, "scoring", MAX_REVISIONS)
+            await scoring.score_and_store(client, db, article_id)
+        except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
+            break
+
+
 async def refine(
     client: PowabaseClient, db: Database, article_id: UUID
 ) -> dict[str, Any] | None:
-    """Iterate the article against the evaluators until satisfactory or stalled."""
-    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+    """Improve the article in two distinct loops, then return it.
+
+    1. OBJECTIVE — drive SEO / GEO / Grounding to target (deterministic-scored).
+    2. EDITORIAL — make the prose read like a human wrote it, judged by an LLM editor
+       (not a tell-count), guarded so it can't regress the objective axes.
+
+    Keeping them separate is the whole point: a keyword counter must never veto a
+    better-written paragraph, and "human-ness" must never be a gameable number.
+    """
+    from . import scoring  # local: avoid import cycle
 
     article = gen_svc.get_article(db, article_id)
     if article is None:
@@ -389,51 +651,10 @@ async def refine(
         await fix_meta(client, db, article_id, article, brief)
         await scoring.score_and_store(client, db, article_id)
 
-    agent_id: str | None = None
-    prev_combined = -1
-    for i in range(MAX_REVISIONS):
-        article = gen_svc.get_article(db, article_id)
-        seo = article.get("seo_score")
-        geo = article.get("geo_score")
-        gr = article.get("grounding_report")
-        read = article.get("readability_score")
-        if satisfied(seo, geo, gr, read):
-            break
-        score_now = combined_score(seo, geo, gr, read)
-        if score_now <= prev_combined:  # last pass didn't help — stop
-            break
-        prev_combined = score_now
-        issues = collect_issues(seo, geo, gr, read)
-        if not issues:
-            break
-
-        _step(db, article_id, i, "revising")
-        try:
-            if agent_id is None:
-                agent_id = await ensure_reviser_agent(client)
-            excerpts = await _diverse_excerpts(
-                client, kb_id, brief, source_ids, url_by_source
-            )
-            cur_md = article["content_md"] or ""
-            new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
-            # Guard against a truncated/empty revision clobbering a good draft.
-            if not new_md or len(new_md) < 0.6 * len(cur_md):
-                break
-            # Commit only if the revision moves the failing axis toward target
-            # without regressing a met axis (an above-target GEO can't veto an
-            # SEO-improving edit).
-            title = article.get("meta_title") or article.get("title") or ""
-            meta = article.get("meta_description")
-            if not _accept_revision(cur_md, new_md, title, meta, brief):
-                break
-            gen_svc._update(db, article_id, content_md=new_md)
-            _step(db, article_id, i, "fact-checking")
-            await quality.reflect(client, db, article_id)
-            _step(db, article_id, i, "optimizing")
-            await geo_optimize.optimize_and_store(client, db, article_id)
-            _step(db, article_id, i, "scoring")
-            await scoring.score_and_store(client, db, article_id)
-        except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
-            break
-
+    await _objective_loop(
+        client, db, article_id, brief, kb_id, source_ids, url_by_source
+    )
+    await _editorial_loop(
+        client, db, article_id, brief, kb_id, source_ids, url_by_source
+    )
     return gen_svc.get_article(db, article_id)

@@ -55,7 +55,7 @@ const PHASE_LABEL: Record<string, string> = {
   outlining: "Outlining…",
   drafting: "Drafting sections…",
   optimizing: "Optimizing & scoring…",
-  refining: "Refining to hit SEO/GEO/Readability targets…",
+  refining: "Refining for SEO/GEO, then editing for a human voice…",
   queued: "Queued…",
 };
 
@@ -159,7 +159,13 @@ function GroundingBody({ report }: { report: GroundingReport }) {
   );
 }
 
-const REFINE_STEPS = ["revising", "fact-checking", "optimizing", "scoring"];
+const REFINE_STEPS = [
+  "revising",
+  "fact-checking",
+  "optimizing",
+  "scoring",
+  "editing",
+];
 
 // One monotonic 0→1 estimate across the whole pipeline, so the bar always moves
 // forward (drafting and refining have real sub-counts; other phases are coarse).

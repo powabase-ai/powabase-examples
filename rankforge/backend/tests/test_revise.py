@@ -1,4 +1,7 @@
-"""Auto-revision evaluator gates (pure helpers)."""
+"""Auto-revision evaluator gates (pure helpers) + editorial loop wiring."""
+
+from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 from rankforge_backend.services import revise
 
@@ -94,3 +97,58 @@ def test_decide_allows_gap_neutral_edit():
     # Unchanged SEO/GEO — let it through; the outer combined-score check (grounding)
     # decides whether the pass actually helped.
     assert revise._decide([_s(73, 80), _s(88, 85)], [_s(73, 80), _s(88, 85)])
+
+
+# --- editorial loop (LLM-editor-judged human-ness) ---
+async def test_editor_review_parses_verdict():
+    client = MagicMock()
+    client.run_agent = AsyncMock(
+        return_value={"content": '{"reads_human": 90, "verdict": "ship", "notes": []}'}
+    )
+    out = await revise._editor_review(client, "ed", "body", None)
+    assert out["verdict"] == "ship"
+    assert out["reads_human"] == 90
+
+
+async def test_editor_review_fails_open_on_bad_output():
+    """A flaky/unparseable judge must STOP editing (ship), never wedge the loop."""
+    client = MagicMock()
+    client.run_agent = AsyncMock(return_value={"content": "not json at all"})
+    out = await revise._editor_review(client, "ed", "body", None)
+    assert out["verdict"] == "ship"
+
+
+async def test_editorial_loop_ships_without_rewrite(monkeypatch):
+    """Editor verdict 'ship' → the reviser is never invoked; content untouched."""
+    art = {"content_md": "Body.", "readability_score": None, "title": "T",
+           "meta_title": None, "meta_description": None}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda db, aid: art)
+    monkeypatch.setattr(revise, "ensure_editor_agent", AsyncMock(return_value="ed"))
+    monkeypatch.setattr(
+        revise, "_editor_review",
+        AsyncMock(return_value={"verdict": "ship", "reads_human": 92, "notes": []}),
+    )
+    rev = AsyncMock()
+    monkeypatch.setattr(revise, "_revise_for_voice", rev)
+    await revise._editorial_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {}
+    )
+    rev.assert_not_awaited()
+
+
+async def test_editorial_loop_skips_rewrite_when_no_notes(monkeypatch):
+    """A 'revise' verdict with no actionable notes shouldn't spin a pointless rewrite."""
+    art = {"content_md": "Body.", "readability_score": None, "title": "T",
+           "meta_title": None, "meta_description": None}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda db, aid: art)
+    monkeypatch.setattr(revise, "ensure_editor_agent", AsyncMock(return_value="ed"))
+    monkeypatch.setattr(
+        revise, "_editor_review",
+        AsyncMock(return_value={"verdict": "revise", "reads_human": 60, "notes": []}),
+    )
+    rev = AsyncMock()
+    monkeypatch.setattr(revise, "_revise_for_voice", rev)
+    await revise._editorial_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {}
+    )
+    rev.assert_not_awaited()
