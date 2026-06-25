@@ -46,6 +46,12 @@ def test_parse_sections_handles_unprefixed():
     assert [s["h2"] for s in secs] == ["Intro", "Details"]
 
 
+def test_first_words_skips_heading():
+    md = "## A Section Heading\n\nThe real opening line continues here for a while."
+    assert svc._first_words(md, 4) == "The real opening line"
+    assert svc._first_words("") == ""
+
+
 def _brand_db() -> MagicMock:
     """A db mock whose fetch_one satisfies assert_brand_access (org match)."""
     db = MagicMock()

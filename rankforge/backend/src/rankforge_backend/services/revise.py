@@ -397,9 +397,12 @@ navigate (metaphor), foster, underscore, pivotal, crucial, vibrant, "boasts", "n
 - Empty transitions (Moreover, Furthermore, Additionally, That said), both-sidesing, \
 stating the obvious as insight, over-hedging, bolded bullet lead-ins, "In conclusion" \
 restatements.
-- Em-dashes used as a crutch (several per section, or as the default break). A skilled \
-writer uses one occasionally for real effect — **judge by craft, not by count, and do \
-not flag tasteful use**.
+- Em-dashes: a skilled writer uses one occasionally for genuine effect. But when \
+they're a crutch — several per section, the default break between clauses, or the \
+automated em-dash score below ~60 — that is a tic, not craft. In that case **tell the \
+writer to CUT MOST of them**: keep only the few that truly earn their place, and \
+replace the rest with periods, commas, or parentheses as each sentence calls for. \
+Don't flag genuinely occasional, tasteful use.
 
 ## How to judge
 - `reads_human` 0–100: 85+ means a sharp reader would believe a knowledgeable human \

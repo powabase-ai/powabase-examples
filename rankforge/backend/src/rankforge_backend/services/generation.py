@@ -56,6 +56,11 @@ asked for.
 claim (see below).
 - Write only the requested part, but make it cohere with a larger article: don't \
 re-introduce the topic mid-article or repeat the intro's framing in every section.
+- You may be given a "Cohere with what's already written" block — the openings and \
+the tail of the parts before this one. Continue naturally from that tail, open THIS \
+part with a DIFFERENT shape, and vary its length and rhythm. Mechanical sameness \
+across sections (every one the same length, every opener the same shape) is the \
+clearest sign a machine wrote it.
 
 ## Grounding & citations
 - Base every factual or statistical claim on the provided source excerpts; never \
@@ -257,6 +262,18 @@ def try_begin_refine(db: Database, article_id: UUID, *, total: int) -> bool:
     return row is not None
 
 
+def _first_words(md: str, n: int = 14) -> str:
+    """The opening prose phrase of a drafted part (skipping the markdown heading) —
+    fed to the next part so it can avoid reusing the same opening shape across
+    sections. Headings come from the fixed outline, so we vary the prose, not them."""
+    for line in md.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        return " ".join(s.split()[:n])
+    return ""
+
+
 async def _draft_part(
     client: PowabaseClient,
     agent_id: str,
@@ -269,6 +286,7 @@ async def _draft_part(
     url_by_source: dict[str, str],
     materials_kb_id: str | None = None,
     materials_url_by_source: dict[str, str] | None = None,
+    prior: str = "",
 ) -> str:
     # Scope research retrieval to THIS article's research sources within the brand KB.
     chunks = (
@@ -300,6 +318,7 @@ async def _draft_part(
         f"- Audience / brand: {ctx.get('audience') or 'n/a'}\n\n"
         "## Write this part\n"
         f"- {instruction}\n\n"
+        f"{prior}"
         "## Grounding excerpts\n"
         "- Cite an excerpt inline with natural anchor text (a descriptive phrase, "
         "never the page title or a bare URL), and vary the source domain.\n"
@@ -385,6 +404,31 @@ async def run_generation_task(
             progress={"phase": "drafting", "total": total, "done": 0},
         )
 
+        # Running context fed to each part so the writer varies openings/length and
+        # coheres with what came before — the per-section writer is otherwise blind
+        # to its siblings, which is what makes drafts mechanically even (a top AI tell).
+        written: list[str] = []
+        openings: list[str] = []
+
+        def _prior() -> str:
+            if not openings:
+                return ""
+            opens = "\n".join(f'- "{o}…"' for o in openings)
+            tail = "\n\n".join(written)[-700:]
+            return (
+                "## Cohere with what's already written — do NOT repeat it\n"
+                "- Earlier parts opened like this; open THIS part with a different "
+                "shape (don't restate the topic or the heading, don't reuse these):\n"
+                f"{opens}\n"
+                f"- The draft so far ends with: …{tail}\n"
+                "- Vary length and rhythm from the previous parts — not every section "
+                "the same size or shape.\n\n"
+            )
+
+        def _record(part: str) -> None:
+            written.append(part)
+            openings.append(_first_words(part))
+
         # 3) intro
         title = brief.get("suggested_title") or topic
         intro = await _draft_part(
@@ -398,6 +442,7 @@ async def run_generation_task(
             materials_url_by_source=materials_url_by_source,
         )
         parts = [f"# {title}", intro]
+        _record(intro)
         _update(db, article_id, progress={"phase": "drafting", "total": total, "done": 1})
 
         # 4) sections
@@ -414,8 +459,12 @@ async def run_generation_task(
                 f"{subs}\nAim for ~250–400 words.",
                 sec["h2"],
                 source_ids=source_ids, url_by_source=url_by_source,
+                materials_kb_id=materials_kb_id,
+                materials_url_by_source=materials_url_by_source,
+                prior=_prior(),
             )
             parts.append(body)
+            _record(body)
             _update(
                 db, article_id,
                 progress={"phase": "drafting", "total": total, "done": i + 2},
@@ -430,6 +479,7 @@ async def run_generation_task(
             source_ids=source_ids, url_by_source=url_by_source,
             materials_kb_id=materials_kb_id,
             materials_url_by_source=materials_url_by_source,
+            prior=_prior(),
         )
         parts.append(conclusion)
 
