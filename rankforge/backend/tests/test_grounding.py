@@ -1,4 +1,8 @@
-"""Grounding retrieval post-filter (pure)."""
+"""Grounding retrieval post-filter (pure) + BM25 rebuild helper."""
+
+from unittest.mock import AsyncMock
+
+import pytest
 
 from rankforge_backend.services import grounding
 
@@ -34,3 +38,18 @@ def test_filter_passthrough_when_no_scores():
 
 def test_filter_empty():
     assert grounding._filter_by_score([]) == []
+
+
+@pytest.mark.asyncio
+async def test_rebuild_bm25_fires_build():
+    client = AsyncMock()
+    await grounding.rebuild_bm25(client, "kb-1")
+    client.build_bm25.assert_awaited_once_with("kb-1")
+
+
+@pytest.mark.asyncio
+async def test_rebuild_bm25_swallows_build_failure():
+    client = AsyncMock()
+    client.build_bm25.side_effect = RuntimeError("400 vector-only KB")
+    # Best-effort: a build failure must not propagate out of the ingest.
+    await grounding.rebuild_bm25(client, "kb-1")

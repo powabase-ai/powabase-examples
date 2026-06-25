@@ -332,6 +332,10 @@ async def ingest(
                 break
             await asyncio.sleep(2)
 
+        # New chunks landed — rebuild BM25 so hybrid's keyword half covers them.
+        if total:
+            await grounding.rebuild_bm25(client, kb_id)
+
         n = len(list_sources(db, business_id))
         _set_progress(
             db, business_id, "done",
@@ -428,6 +432,8 @@ async def ingest_file(
                 if statuses and all(s in _INDEX_TERMINAL for s in statuses):
                     break
                 await asyncio.sleep(2)
+            # New chunks landed — rebuild BM25 so hybrid's keyword half covers them.
+            await grounding.rebuild_bm25(client, kb_id)
 
         n = len(list_sources(db, business_id))
         _set_progress(

@@ -70,6 +70,21 @@ async def ensure_brand_kb(
     return fresh["brand_kb_id"]
 
 
+async def rebuild_bm25(client: PowabaseClient, kb_id: str) -> None:
+    """Rebuild the KB's BM25 keyword index across the full corpus after a batch of
+    sources lands, so `hybrid` retrieval's keyword half is complete and fresh.
+
+    Fire-and-forget: build-bm25 is async (returns 202 {task_id}), and the default
+    chunk_embed strategy already builds BM25 over chunk text incrementally as each
+    source indexes — so the keyword half exists even before this rebuild finishes.
+    We therefore don't block the ingest on it; generation reads the KB in a later
+    step. Best-effort — a 400 (vector-only KB) or transient error is swallowed."""
+    try:
+        await client.build_bm25(kb_id)
+    except Exception:  # noqa: BLE001 — vector-only KB (400) or transient: skip silently
+        pass
+
+
 async def index_run_sources(
     client: PowabaseClient, db: Database, kb_id: str, run_id: UUID
 ) -> int:
@@ -96,6 +111,10 @@ async def index_run_sources(
         if statuses and all(s in _INDEX_TERMINAL for s in statuses):
             break
         await asyncio.sleep(2)
+
+    # New chunks landed — rebuild BM25 so hybrid's keyword half covers them.
+    if source_ids:
+        await rebuild_bm25(client, kb_id)
 
     return len(source_ids)
 

@@ -291,6 +291,15 @@ class PowabaseClient:
         """Indexed sources + their index_status (pending/indexing/indexed/failed)."""
         return await self._request("GET", f"/api/knowledge-bases/{kb_id}/sources")
 
+    async def build_bm25(self, kb_id: str) -> Any:
+        """(Re)build the KB's BM25 keyword index — the keyword half of `hybrid`
+        retrieval. Async: returns 202 {task_id}. 400 on a vector-only KB (no BM25
+        to build). chunk_embed KBs also build BM25 incrementally on index, so this
+        is a freshness/completeness rebuild after a batch — see rebuild_bm25()."""
+        return await self._request(
+            "POST", f"/api/knowledge-bases/{kb_id}/build-bm25"
+        )
+
     async def search_kb(
         self,
         kb_id: str,
