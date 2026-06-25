@@ -13,6 +13,22 @@ from rankforge_backend.services import brief as svc
 
 RID = "33333333-3333-3333-3333-333333333333"
 BID = "11111111-1111-1111-1111-111111111111"
+
+
+def test_direction_block_carries_title_angle_keyword():
+    block = svc._direction_block(
+        {"title": "Cursor breaks Supabase", "angle": "honest critique", "keyword": "backend for Claude Code"}
+    )
+    assert "Editorial direction" in block
+    assert "Cursor breaks Supabase" in block
+    assert "honest critique" in block
+    assert "backend for Claude Code" in block
+
+
+def test_direction_block_empty_without_an_angle_or_title():
+    # a bare keyword is not an editorial direction — the brief stays SERP-driven
+    assert svc._direction_block(None) == ""
+    assert svc._direction_block({"keyword": "k"}) == ""
 BRIEF = {
     "id": "44444444-4444-4444-4444-444444444444",
     "business_id": BID,

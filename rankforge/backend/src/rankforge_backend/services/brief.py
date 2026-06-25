@@ -58,6 +58,13 @@ authoritative sources worth citing).
 meta description (compelling, ~120–160 chars, includes the primary keyword).
 
 ## Rules
+- You may be given an **Editorial direction** (a working title + angle + primary \
+keyword). When present, IT is the article's topic and point of view — your brief \
+executes it. The SERP research grounds the angle in facts and optimizes it for the \
+keyword; it NEVER overrides the angle. Do not let a generic, higher-ranking topic \
+replace the specific framing: the `suggested_title` must deliver the working title's \
+promise (sharpen it, keep its subject and stance), and the outline must argue the \
+angle — not restate what already ranks.
 - Ground every choice in the supplied research; introduce no facts it does not \
 support. If the research is thin on a sub-topic, leave it out rather than inventing \
 coverage.
@@ -137,12 +144,39 @@ def _summarize_research(run: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _direction_block(direction: dict[str, Any] | None) -> str:
+    """The opportunity's working title + angle + keyword — the editorial contract the
+    brief must execute (so a scout's specific angle isn't lost to a generic SERP)."""
+    if not direction:
+        return ""
+    title = (direction.get("title") or "").strip()
+    angle = (direction.get("angle") or "").strip()
+    keyword = (direction.get("keyword") or "").strip()
+    if not (title or angle):
+        return ""
+    lines = ["## Editorial direction — THIS is the article; execute it, don't drift"]
+    if title:
+        lines.append(f"- Working title: {title}")
+    if angle:
+        lines.append(f"- Angle / stance: {angle}")
+    if keyword:
+        lines.append(f"- Primary keyword to rank for: {keyword}")
+    lines.append(
+        "The title and angle ARE the topic and point of view. Ground them in the "
+        "research below and optimize for the primary keyword, but keep the subject "
+        "and stance — your suggested_title must fulfill the working title's promise, "
+        "and the outline must argue this angle, not the generic topic that ranks."
+    )
+    return "\n".join(lines) + "\n\n"
+
+
 async def generate_brief(
     client: PowabaseClient,
     db: Database,
     *,
     research_run_id: UUID,
     article_type: str | None = None,
+    editorial_direction: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     run = research_svc.get_run(db, research_run_id)
     if run is None:
@@ -160,7 +194,8 @@ async def generate_brief(
 
     agent_id = await ensure_brief_agent(client)
     message = (
-        "Create a content brief from this research.\n"
+        "Create a content brief.\n"
+        f"{_direction_block(editorial_direction)}"
         f"{type_block}\n"
         f"{_summarize_research(run)}\n\n"
         "Output ONLY a single ```json block matching exactly this shape:\n"

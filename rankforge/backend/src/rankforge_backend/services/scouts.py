@@ -523,7 +523,10 @@ async def auto_draft(
     """Promote one opportunity through research → brief → draft, staged in_review."""
     opp_id = opp["id"]
     business_id = opp["business_id"]
-    topic = opp.get("keyword") or opp.get("title")
+    # Research the opportunity's actual TITLE (the specific angle), not the bare
+    # keyword — researching just the keyword pulls in whatever generic topic ranks
+    # for it and the article drifts off the angle.
+    topic = opp.get("title") or opp.get("keyword")
     set_opportunity_status(db, opp_id, "drafting")
     _set_opp_progress(
         db, opp_id, "researching",
@@ -552,7 +555,14 @@ async def auto_draft(
             db, opp_id, "briefing", "Building the content brief from the research…"
         )
         brief = await brief_svc.generate_brief(
-            client, db, research_run_id=rrun["id"]
+            client, db, research_run_id=rrun["id"],
+            # carry the opportunity's angle into the brief so the article executes
+            # it (the keyword is for SEO, not the topic).
+            editorial_direction={
+                "title": opp.get("title"),
+                "angle": opp.get("angle"),
+                "keyword": opp.get("keyword"),
+            },
         )
         article = generation.create_article(db, brief)
         # Link the article now (still "drafting") so the user can open it and watch
