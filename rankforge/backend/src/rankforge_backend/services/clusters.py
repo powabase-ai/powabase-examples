@@ -190,6 +190,14 @@ def set_pillar(
     )
     if cluster is None:
         return None
+    # The new pillar must be one of THIS brand's articles — never pull in a foreign
+    # article (the request only carries an article id).
+    art = db.fetch_one(
+        "select id from public.articles where id = %s and business_id = %s",
+        (article_id, business_id),
+    )
+    if art is None:
+        return None
     db.execute(
         "update public.articles set cluster_role = 'member' "
         "where cluster_id = %s and cluster_role = 'pillar'",
@@ -316,12 +324,14 @@ async def _retrieve_candidates(
     if len(clusters) <= limit:
         return clusters
     by_doc = {c["index_doc_id"]: c for c in clusters if c.get("index_doc_id")}
+    # Clusters with no index doc (upload failed) can't be retrieved by search — always
+    # include them so a new topic can still join one instead of founding a duplicate.
+    out: list[dict[str, Any]] = [c for c in clusters if not c.get("index_doc_id")]
+    seen: set[Any] = {c["id"] for c in out}
     try:
         hits = await client.search_kb(kb_id, query, top_k=limit)
     except Exception:  # noqa: BLE001 — fall back to the most recent clusters
-        return clusters[-limit:]
-    out: list[dict[str, Any]] = []
-    seen: set[Any] = set()
+        return out + [c for c in clusters[-limit:] if c["id"] not in seen]
     for h in hits:
         c = by_doc.get(h.get("source_id"))
         if c and c["id"] not in seen:

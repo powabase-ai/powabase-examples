@@ -120,7 +120,8 @@ def test_attach_article_member_does_not_claim_pillar():
 
 def test_set_pillar_demotes_old_promotes_new_and_locks():
     db = MagicMock()
-    db.fetch_one.side_effect = [{"id": CID}, {"id": CID, "pillar_locked": True}]
+    # cluster check, article-in-brand check, then the final update ... returning
+    db.fetch_one.side_effect = [{"id": CID}, {"id": AID}, {"id": CID, "pillar_locked": True}]
     out = clusters.set_pillar(db, BID, CID, AID)
     qs = [c.args[0] for c in db.execute.call_args_list]
     assert any("cluster_role = 'member'" in q for q in qs)  # demote previous pillar
@@ -132,6 +133,13 @@ def test_set_pillar_none_when_cluster_missing():
     db = MagicMock()
     db.fetch_one.return_value = None
     assert clusters.set_pillar(db, BID, CID, AID) is None
+
+
+def test_set_pillar_rejects_article_from_another_brand():
+    db = MagicMock()
+    db.fetch_one.side_effect = [{"id": CID}, None]  # cluster ok, article not in brand
+    assert clusters.set_pillar(db, BID, CID, AID) is None
+    db.execute.assert_not_called()  # nothing mutated
 
 
 def test_list_clusters_view_includes_pillar_and_count():
