@@ -471,19 +471,21 @@ async def _draft_article(
     research = await _gather_grounding(
         client, kb_id, queries, source_ids=source_ids
     )
-    brand = await _gather_grounding(
+    # NB: keep this distinct from the `brand` PROFILE param — it's the brand's
+    # materials-KB grounding excerpts (a list), used only to build brand_block.
+    brand_grounding = await _gather_grounding(
         client, materials_kb_id, queries, per_query=2, limit=30
     )
 
     cluster_block = _cluster_block(cluster)
     brand_block = ""
-    if brand:
+    if brand_grounding:
         brand_block = (
             "\n\n## Your brand's own materials (describe accurately, link as internal links)\n"
             "- Where the article genuinely calls for it, work in the brand's real "
             "capabilities and link to the relevant page with natural anchor text. "
             "Editorial, not an ad — only where it adds value.\n"
-            f"{_grounding_block(brand, materials_url_by_source or {})}"
+            f"{_grounding_block(brand_grounding, materials_url_by_source or {})}"
         )
     wc = brief.get("target_word_count") or 1800
     msg = (
