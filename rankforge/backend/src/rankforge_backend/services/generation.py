@@ -70,6 +70,11 @@ machine-made.
 - Base every factual or statistical claim on the provided source excerpts; never \
 invent statistics or specifics.
 - Cite sources inline as Markdown links.
+- **Only ever link to a URL that appears VERBATIM in the provided source excerpts or \
+brand-materials block. Copy it exactly — character for character.** Never invent, \
+guess, shorten, or extend a URL, and never append a path you think is plausible (e.g. \
+`/docs/...`, `/blog/...`, `/SECURITY.md`). If you have no exact URL for a claim, state \
+the claim without a link rather than fabricating one. A dead link is worse than none.
 - Make each link's anchor text a natural, descriptive phrase that reads well in the \
 sentence — never the source's page title, the site name, or a bare URL.
 - Spread citations across DIFFERENT source domains. Across the whole article, don't \
@@ -644,6 +649,17 @@ async def run_generation_task(
 
         final = get_article(db, article_id)
         final_md = (final.get("content_md") if final else content_md) or content_md
+        # Best-effort, BEFORE flipping to done so the Links panel is accurate the moment
+        # the article is ready: validate outbound links so a fabricated/dead URL (the
+        # writer can emit a plausible-but-dead deep link even when grounded) is flagged
+        # immediately, not at publish time. Never let a link-check failure fail the run.
+        if business_id:
+            try:
+                from . import linkcheck
+
+                await linkcheck.check_article(db, business_id, article_id)
+            except Exception:  # noqa: BLE001
+                log.exception("post-generation link check failed for %s", article_id)
         _update(
             db, article_id,
             generation_status="done",

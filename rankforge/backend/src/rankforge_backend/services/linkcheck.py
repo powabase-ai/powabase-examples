@@ -12,8 +12,10 @@ Findings are surfaced (status 'open') for an editor to fix in the prose or mark
 """
 
 import asyncio
+import ipaddress
 import logging
 import re
+import socket
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -22,7 +24,6 @@ import httpx
 
 from ..db import Database
 from . import generation as gen_svc
-from .brand_materials import _is_public_host
 
 log = logging.getLogger("rankforge.linkcheck")
 
@@ -64,13 +65,41 @@ def _internal_reason(db: Database, target_id: str) -> str | None:
     return None
 
 
+def _host_fetch_state(host: str) -> str:
+    """Classify an external host for link checking:
+      'fetch' — resolves to a public IP: go verify the URL.
+      'dead'  — the hostname does NOT resolve (NXDOMAIN / no address): a broken link.
+                This is the common hallucination — a fabricated host like a made-up docs
+                subdomain — which the old "skip non-public" rule silently passed.
+      'skip'  — internal/private/loopback or an internal-only name: don't fetch (SSRF)
+                and don't flag (we genuinely can't reach it, so we can't judge it)."""
+    host = (host or "").strip().lower()
+    if not host or host == "localhost" or host.endswith((".local", ".internal")):
+        return "skip"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return "dead"  # the hostname itself doesn't resolve
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return "skip"
+        if not ip.is_global:  # private / loopback / link-local / CGNAT
+            return "skip"
+    return "fetch"
+
+
 async def _external_reason(
     client: httpx.AsyncClient, url: str
 ) -> tuple[int | None, str | None]:
-    """(http_status, reason). reason None = healthy. Skips non-public hosts (returns
-    healthy) to avoid both SSRF and false positives on hosts we won't fetch."""
-    p = urlparse(url)
-    if not _is_public_host(p.netloc):
+    """(http_status, reason). reason None = healthy. A host that doesn't resolve is a
+    broken link; private/internal hosts are skipped (healthy) to avoid SSRF and false
+    positives on hosts we can't reach."""
+    state = _host_fetch_state(urlparse(url).hostname or "")
+    if state == "dead":
+        return None, "host does not resolve"
+    if state == "skip":
         return None, None
     try:
         resp = await client.head(url)

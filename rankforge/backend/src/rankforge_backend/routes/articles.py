@@ -167,6 +167,14 @@ async def _refine_and_finish(
         final = svc.get_article(db, article_id)
         words = ((final or {}).get("content_md") or "").split()
         terminal = "done" if words else "failed"
+        # Best-effort, BEFORE flipping to done: a refine pass rewrites the body and can
+        # introduce (or fix) links, so re-validate outbound links — dead URLs surface in
+        # the Links panel without a manual check. Never let it disturb the status.
+        if terminal == "done" and final and final.get("business_id"):
+            try:
+                await linkcheck_svc.check_article(db, final["business_id"], article_id)
+            except Exception:  # noqa: BLE001 — link check is advisory
+                pass
         svc._update(
             db, article_id,
             generation_status=terminal,

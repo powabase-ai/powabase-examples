@@ -61,6 +61,10 @@ accurate, not by puffing.
 - Weave each link into a natural descriptive phrase — never the page title or a bare URL.
 - Spread citations across different source domains.
 - Never invent statistics or sources.
+- Only link to a URL that appears VERBATIM in the existing article or the supplied \
+sources — copy it exactly. Never invent, guess, or extend a URL with a plausible-looking \
+path (e.g. `/docs/...`, `/SECURITY.md`). Keep the existing links intact; if a claim has \
+no exact URL, leave it unlinked rather than fabricating one.
 
 ## De-AI the prose (remove these tells, even if they aren't in the issue list)
 A draft that reads as AI-written is not "improved". As you revise, actively rewrite out every one of these:

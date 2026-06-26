@@ -1,6 +1,6 @@
 """Articles — section parsing (unit) + async route wiring (hermetic)."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 from conftest import ADMIN_ORG, with_auth
@@ -227,3 +227,37 @@ def test_update_article_patches():
     assert resp.json()["title"] == "Edited"
     sql = db.fetch_one.call_args.args[0].lower()
     assert "update public.articles" in sql
+
+
+# --- auto link-check after refine (broken/fabricated URLs surface without a manual run) ---
+async def test_refine_and_finish_revalidates_links_before_done(monkeypatch):
+    from rankforge_backend.routes import articles as art_routes
+
+    monkeypatch.setattr(art_routes.revise_svc, "refine", AsyncMock())
+    monkeypatch.setattr(
+        art_routes.svc, "get_article",
+        lambda db, aid: {"id": aid, "business_id": BID, "content_md": "the body"},
+    )
+    monkeypatch.setattr(art_routes.svc, "_update", lambda *a, **k: None)
+    chk = AsyncMock(return_value=[])
+    monkeypatch.setattr(art_routes.linkcheck_svc, "check_article", chk)
+
+    await art_routes._refine_and_finish(MagicMock(), MagicMock(), UUID(ARTICLE["id"]))
+    chk.assert_awaited_once()
+
+
+async def test_refine_and_finish_skips_link_check_when_no_content(monkeypatch):
+    # An empty/failed refine → terminal 'failed' → don't waste a link check.
+    from rankforge_backend.routes import articles as art_routes
+
+    monkeypatch.setattr(art_routes.revise_svc, "refine", AsyncMock())
+    monkeypatch.setattr(
+        art_routes.svc, "get_article",
+        lambda db, aid: {"id": aid, "business_id": BID, "content_md": ""},
+    )
+    monkeypatch.setattr(art_routes.svc, "_update", lambda *a, **k: None)
+    chk = AsyncMock()
+    monkeypatch.setattr(art_routes.linkcheck_svc, "check_article", chk)
+
+    await art_routes._refine_and_finish(MagicMock(), MagicMock(), UUID(ARTICLE["id"]))
+    chk.assert_not_awaited()

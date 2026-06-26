@@ -3,6 +3,7 @@
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   History,
@@ -36,6 +37,7 @@ import { useAuth } from "@/lib/auth/AuthProvider";
 import {
   useArticle,
   useArticleVersions,
+  useBrokenLinks,
   useDeleteArticle,
   useOptimizeArticle,
   useRefineArticle,
@@ -370,8 +372,19 @@ export default function ArticleView({
   const del = useDeleteArticle(id);
   const versions = useArticleVersions(articleId);
   const restore = useRestoreVersion(articleId);
+  const broken = useBrokenLinks(articleId);
+  const brokenOpen = (broken.data ?? []).filter((b) => b.status === "open").length;
+  const qc = useQueryClient();
   const { profile } = useAuth();
   const mayApprove = canApprove(profile?.role);
+
+  // Generation/refine validates links just before flipping to "done" — refresh the
+  // broken-link findings (and the tab badge) when the article reaches a terminal state.
+  const genStatus = a?.generation_status;
+  useEffect(() => {
+    if (genStatus === "done")
+      qc.invalidateQueries({ queryKey: ["link-health", articleId] });
+  }, [genStatus, articleId, qc]);
 
   function onDeleteArticle() {
     if (
@@ -529,6 +542,15 @@ export default function ArticleView({
                 {badge != null && (
                   <span className="font-data" style={{ color: `rgb(${color})` }}>
                     {badge}
+                  </span>
+                )}
+                {t === "Links" && brokenOpen > 0 && (
+                  <span
+                    className="font-data"
+                    style={{ color: "rgb(var(--destructive))" }}
+                    title={`${brokenOpen} broken link${brokenOpen === 1 ? "" : "s"}`}
+                  >
+                    ⚠{brokenOpen}
                   </span>
                 )}
               </button>

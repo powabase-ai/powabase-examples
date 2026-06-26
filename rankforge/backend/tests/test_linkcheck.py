@@ -90,6 +90,24 @@ async def test_check_article_resolves_a_healthy_link(monkeypatch):
     )
 
 
+def test_host_fetch_state_skips_internal_and_private_offline():
+    # Internal-by-name and private/loopback IP literals: skip (no DNS, fully offline).
+    assert linkcheck._host_fetch_state("localhost") == "skip"
+    assert linkcheck._host_fetch_state("api.internal") == "skip"
+    assert linkcheck._host_fetch_state("svc.local") == "skip"
+    assert linkcheck._host_fetch_state("10.0.0.1") == "skip"  # private IP literal
+    assert linkcheck._host_fetch_state("127.0.0.1") == "skip"  # loopback literal
+
+
+async def test_external_reason_flags_unresolvable_host(monkeypatch):
+    # A fabricated host that doesn't resolve is a broken link — not silently skipped.
+    monkeypatch.setattr(linkcheck, "_host_fetch_state", lambda h: "dead")
+    status, reason = await linkcheck._external_reason(
+        MagicMock(), "https://made-up-docs.example/x"
+    )
+    assert status is None and reason and "resolve" in reason
+
+
 # --- routes (hermetic) ---
 def _brand_db() -> MagicMock:
     db = MagicMock()
