@@ -11,6 +11,7 @@ import {
   Loader2,
   Search,
   Settings,
+  Sparkles,
   Unlink,
   X,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import {
   useBrokenLinks,
   useCheckLinks,
   useDismissLink,
+  useGenerateLink,
   useIgnoreBrokenLink,
   useLinkSuggestions,
   useSuggestLinks,
@@ -33,6 +35,7 @@ import {
 } from "@/lib/hooks/useArticles";
 import { useBrand } from "@/lib/hooks/useBrands";
 import { useCluster } from "@/lib/hooks/useClusters";
+import { cn } from "@/lib/utils";
 
 /** Editor panel: stage internal links to the brand's other published articles, then
  *  accept (insert + re-score) or dismiss each. Deterministic suggestions come from the
@@ -52,6 +55,7 @@ export function InternalLinksPanel({
   const { data, isLoading } = useLinkSuggestions(articleId);
   const suggest = useSuggestLinks(articleId);
   const apply = useApplyLink(articleId);
+  const generate = useGenerateLink(articleId);
   const dismiss = useDismissLink(articleId);
   const [actingId, setActingId] = React.useState<string | null>(null);
 
@@ -82,6 +86,18 @@ export function InternalLinksPanel({
       onSettled: () => setActingId(null),
     });
   }
+
+  function doGenerate(id: string) {
+    setActingId(id);
+    generate.mutate(id, {
+      onSuccess: () => toast.success("Contextual link written & inserted"),
+      onError: (e) =>
+        toast.error(e instanceof Error ? e.message : "Could not write a link"),
+      onSettled: () => setActingId(null),
+    });
+  }
+
+  const busy = apply.isPending || dismiss.isPending || generate.isPending;
 
   return (
     <div className="space-y-3">
@@ -152,52 +168,96 @@ export function InternalLinksPanel({
         </div>
       ) : (
         <ul className="space-y-2">
-          {pending.map((s) => (
-            <li
-              key={s.id}
-              className="rounded-md border border-border p-2.5 text-sm"
-            >
-              <div className="flex items-start gap-1.5">
-                <Link2 className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                <div className="min-w-0">
-                  <div>
-                    Link <span className="font-medium">“{s.anchor_text}”</span>
-                  </div>
-                  {s.target_title && (
-                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                      → {s.target_title}
-                    </div>
+          {pending.map((s) => {
+            const isGap = !s.anchor_text;
+            const structural = s.kind === "pillar" || s.kind === "member";
+            return (
+              <li
+                key={s.id}
+                className={cn(
+                  "rounded-md border p-2.5 text-sm",
+                  structural
+                    ? "border-[rgb(var(--gold))]/40 bg-[rgb(var(--gold))]/[0.04]"
+                    : "border-border"
+                )}
+              >
+                <div className="flex items-start gap-1.5">
+                  {s.kind === "pillar" ? (
+                    <Crown className="mt-0.5 size-3.5 shrink-0 text-[rgb(var(--gold))]" />
+                  ) : s.kind === "member" ? (
+                    <Boxes className="mt-0.5 size-3.5 shrink-0 text-[rgb(var(--ember))]" />
+                  ) : (
+                    <Link2 className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
                   )}
-                </div>
-              </div>
-              {canEdit && (
-                <div className="mt-2 flex gap-2">
-                  <Button
-                    variant="gold"
-                    size="sm"
-                    onClick={() => doApply(s.id)}
-                    disabled={apply.isPending || dismiss.isPending}
-                  >
-                    {apply.isPending && actingId === s.id ? (
-                      <Loader2 className="animate-spin" />
-                    ) : (
-                      <Check />
+                  <div className="min-w-0">
+                    {structural && (
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        {s.kind === "pillar"
+                          ? "Link up to pillar"
+                          : "Link down to member"}
+                      </div>
                     )}
-                    Add
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => dismiss.mutate(s.id)}
-                    disabled={apply.isPending || dismiss.isPending}
-                  >
-                    <X />
-                    Dismiss
-                  </Button>
+                    {isGap ? (
+                      <div className="text-xs text-muted-foreground">
+                        {s.reason}
+                      </div>
+                    ) : (
+                      <div>
+                        Link <span className="font-medium">“{s.anchor_text}”</span>
+                      </div>
+                    )}
+                    {s.target_title && (
+                      <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                        → {s.target_title}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              )}
-            </li>
-          ))}
+                {canEdit && (
+                  <div className="mt-2 flex gap-2">
+                    {isGap ? (
+                      <Button
+                        variant="gold"
+                        size="sm"
+                        onClick={() => doGenerate(s.id)}
+                        disabled={busy}
+                      >
+                        {generate.isPending && actingId === s.id ? (
+                          <Loader2 className="animate-spin" />
+                        ) : (
+                          <Sparkles />
+                        )}
+                        Generate link
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="gold"
+                        size="sm"
+                        onClick={() => doApply(s.id)}
+                        disabled={busy}
+                      >
+                        {apply.isPending && actingId === s.id ? (
+                          <Loader2 className="animate-spin" />
+                        ) : (
+                          <Check />
+                        )}
+                        Add
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => dismiss.mutate(s.id)}
+                      disabled={busy}
+                    >
+                      <X />
+                      Dismiss
+                    </Button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
 

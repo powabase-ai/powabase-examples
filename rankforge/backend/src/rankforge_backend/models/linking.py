@@ -12,10 +12,11 @@ class LinkSuggestion(BaseModel):
     business_id: UUID
     article_id: UUID
     target_article_id: UUID
-    anchor_text: str
+    anchor_text: str | None = None  # null = a structural gap (no natural anchor yet)
     target_url: str
     target_title: str | None = None
     reason: str | None = None
+    kind: str = "mention"  # 'mention' | 'pillar' (up-link) | 'member' (down-link)
     status: str
     created_at: datetime | None = None
 

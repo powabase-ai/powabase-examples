@@ -1,6 +1,6 @@
 """Internal linking (M6 / Phase 12.1) — deterministic anchor logic + route wiring."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 from conftest import ADMIN_ORG, with_auth
@@ -16,6 +16,7 @@ BID = "11111111-1111-1111-1111-111111111111"
 AID = "55555555-5555-5555-5555-555555555555"
 TID = "66666666-6666-6666-6666-666666666666"
 SID = "77777777-7777-7777-7777-777777777777"
+CID = "88888888-8888-8888-8888-888888888888"
 ARTICLE = {"id": AID, "business_id": BID, "status": "draft"}
 SUGGESTION = {
     "id": SID, "business_id": BID, "article_id": AID, "target_article_id": TID,
@@ -166,6 +167,148 @@ def test_apply_noop_when_not_pending():
         "target_url": "https://blog.x.com/guide", "status": "accepted",
     }
     assert linking.apply_suggestion(db, BID, SID) is None
+
+
+# --- cluster-aware linking (structural + gaps) ---
+def test_structural_targets_member_returns_its_pillar():
+    db = MagicMock()
+    pillar = {"id": TID, "title": "Pillar", "slug": "p", "keywords": [],
+              "canonical_url": None}
+    db.fetch_one.side_effect = [{"pillar_article_id": TID}, pillar]
+    out = linking._structural_targets(
+        db, {"id": AID, "cluster_id": CID, "cluster_role": "member"}
+    )
+    assert out == [(pillar, "pillar")]
+
+
+def test_structural_targets_pillar_returns_members():
+    db = MagicMock()
+    m = {"id": "m1", "title": "M1", "slug": "m1", "keywords": [], "canonical_url": None}
+    db.fetch_all.return_value = [m]
+    out = linking._structural_targets(
+        db, {"id": AID, "cluster_id": CID, "cluster_role": "pillar"}
+    )
+    assert out == [(m, "member")]
+
+
+def test_structural_targets_empty_without_cluster():
+    assert linking._structural_targets(MagicMock(), {"id": AID}) == []
+
+
+def test_suggest_stages_a_gap_for_an_unmentioned_pillar(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(
+        linking.gen_svc, "get_article",
+        lambda d, aid: {"content_md": "nothing relevant here at all",
+                        "cluster_id": CID, "cluster_role": "member"},
+    )
+    monkeypatch.setattr(linking.brands, "get_profile", lambda d, bid: _PATTERN_BRAND)
+    monkeypatch.setattr(
+        linking, "_structural_targets",
+        lambda d, a: [({"id": TID, "title": "Pillar Guide", "slug": "guide",
+                        "keywords": ["unmatched phrase"], "canonical_url": None},
+                       "pillar")],
+    )
+    monkeypatch.setattr(linking, "_link_targets", lambda d, bid, aid: [])
+    db.fetch_one.return_value = {**SUGGESTION, "anchor_text": None, "kind": "pillar"}
+    out = linking.suggest_links(db, BID, AID)
+    assert len(out) == 1
+    _, p = db.fetch_one.call_args[0]
+    assert p[3] is None  # anchor null → a gap
+    assert p[7] == "pillar"  # structural up-link
+
+
+def test_suggest_stages_structural_link_when_pillar_is_mentioned(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(
+        linking.gen_svc, "get_article",
+        lambda d, aid: {"content_md": "We cover headless cms in depth.",
+                        "cluster_id": CID, "cluster_role": "member"},
+    )
+    monkeypatch.setattr(linking.brands, "get_profile", lambda d, bid: _PATTERN_BRAND)
+    monkeypatch.setattr(
+        linking, "_structural_targets",
+        lambda d, a: [({"id": TID, "title": "Headless CMS Guide", "slug": "guide",
+                        "keywords": ["headless cms"], "canonical_url": None},
+                       "pillar")],
+    )
+    monkeypatch.setattr(linking, "_link_targets", lambda d, bid, aid: [])
+    db.fetch_one.return_value = {**SUGGESTION}
+    linking.suggest_links(db, BID, AID)
+    _, p = db.fetch_one.call_args[0]
+    assert p[3] == "headless cms"  # natural anchor found
+    assert p[7] == "pillar"  # tagged as the structural up-link
+
+
+def test_apply_rejects_a_gap():
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        "id": SID, "article_id": AID, "anchor_text": None,
+        "target_url": "https://b.com/g", "status": "pending",
+    }
+    assert linking.apply_suggestion(db, BID, SID) is None
+
+
+async def test_generate_gap_link_inserts_and_accepts(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.side_effect = [
+        {"id": SID, "article_id": AID, "anchor_text": None,
+         "target_url": "https://b.com/guide", "target_title": "Guide",
+         "status": "pending"},
+        {"id": SID, "status": "accepted"},
+    ]
+    monkeypatch.setattr(
+        linking.gen_svc, "get_article",
+        lambda d, aid: {"content_md": "# Title\n\nIntro para.\n\nMore body.",
+                        "title": "T"},
+    )
+    monkeypatch.setattr(linking, "_ensure_linker", AsyncMock(return_value="lk"))
+    client = MagicMock()
+    client.run_agent = AsyncMock(
+        return_value={"content": "For the basics, see [the guide](https://b.com/guide)."}
+    )
+    updates: dict = {}
+    monkeypatch.setattr(linking.gen_svc, "_update", lambda d, aid, **f: updates.update(f))
+    out = await linking.generate_gap_link(client, db, BID, SID)
+    assert "[the guide](https://b.com/guide)" in updates["content_md"]
+    assert "seo_score" in updates  # re-scored deterministically
+    assert out["status"] == "accepted"
+
+
+async def test_generate_gap_link_rejects_non_gap():
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        "id": SID, "article_id": AID, "anchor_text": "x",
+        "target_url": "u", "target_title": "t", "status": "pending",
+    }
+    assert await linking.generate_gap_link(MagicMock(), db, BID, SID) is None
+
+
+async def test_generate_gap_link_rejects_output_without_the_link(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        "id": SID, "article_id": AID, "anchor_text": None,
+        "target_url": "https://b.com/guide", "target_title": "Guide",
+        "status": "pending",
+    }
+    monkeypatch.setattr(linking.gen_svc, "get_article", lambda d, aid: {"content_md": "x"})
+    monkeypatch.setattr(linking, "_ensure_linker", AsyncMock(return_value="lk"))
+    client = MagicMock()
+    client.run_agent = AsyncMock(return_value={"content": "a sentence with no link"})
+    assert await linking.generate_gap_link(client, db, BID, SID) is None
+
+
+def test_generate_link_route(monkeypatch):
+    monkeypatch.setattr(gsvc, "get_article", lambda d, aid: ARTICLE)
+
+    async def fake_gen(c, d, bid, sid):
+        return {**SUGGESTION, "anchor_text": None, "kind": "pillar",
+                "status": "accepted"}
+
+    monkeypatch.setattr(linking, "generate_gap_link", fake_gen)
+    resp = _client().post(f"/api/articles/{AID}/links/{SID}/generate")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "accepted"
 
 
 # --- routes (hermetic) ---

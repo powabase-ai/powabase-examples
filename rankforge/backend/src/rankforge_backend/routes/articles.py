@@ -318,6 +318,30 @@ def apply_link_suggestion(
 
 
 @router.post(
+    "/{article_id}/links/{suggestion_id}/generate", response_model=LinkSuggestion
+)
+async def generate_gap_link(
+    article_id: UUID,
+    suggestion_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fill a structural gap with an LLM-written contextual link, insert it, re-score."""
+    article = _guard_article(db, article_id, user)
+    _require_editor(user)
+    row = await linking_svc.generate_gap_link(
+        pb, db, article["business_id"], suggestion_id
+    )
+    if row is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "no fillable gap, or the model couldn't write a usable link",
+        )
+    return row
+
+
+@router.post(
     "/{article_id}/links/{suggestion_id}/dismiss", response_model=LinkSuggestion
 )
 def dismiss_link_suggestion(

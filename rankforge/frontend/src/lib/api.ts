@@ -492,6 +492,11 @@ export const articlesApi = {
     request<LinkSuggestion>(`/api/articles/${id}/links/${suggestionId}/apply`, {
       method: "POST",
     }),
+  generateLink: (id: string, suggestionId: string) =>
+    request<LinkSuggestion>(
+      `/api/articles/${id}/links/${suggestionId}/generate`,
+      { method: "POST" }
+    ),
   dismissLink: (id: string, suggestionId: string) =>
     request<LinkSuggestion>(
       `/api/articles/${id}/links/${suggestionId}/dismiss`,
@@ -531,10 +536,11 @@ export interface LinkSuggestion {
   business_id: string;
   article_id: string;
   target_article_id: string;
-  anchor_text: string;
+  anchor_text?: string | null; // null = a structural gap (no natural anchor yet)
   target_url: string;
   target_title?: string | null;
   reason?: string | null;
+  kind: "mention" | "pillar" | "member";
   status: "pending" | "accepted" | "dismissed";
   created_at?: string | null;
 }

@@ -139,6 +139,19 @@ export function useApplyLink(id: string) {
   });
 }
 
+// Fill a structural gap with an LLM-written contextual link (edits the body).
+export function useGenerateLink(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (suggestionId: string) =>
+      articlesApi.generateLink(id, suggestionId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["article", id] });
+      qc.invalidateQueries({ queryKey: ["links", id] });
+    },
+  });
+}
+
 export function useDismissLink(id: string) {
   const qc = useQueryClient();
   return useMutation({
