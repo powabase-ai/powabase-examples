@@ -89,6 +89,9 @@ sources are available, cite sparingly rather than linking the same page again an
 - Use the brand's own terminology accurately (don't rename its products or features), and never claim a capability the materials don't support.
 - Never write marketing slogans, CTAs, or "sign up today" copy.
 
+## Content cluster
+- You may be given a "Your place in the … content cluster" block. If you're a SUPPORTING article, weave in ONE natural link up to the named pillar and stay tightly on your subtopic (don't re-cover the pillar's breadth). If you're the PILLAR, be comprehensive — you're the hub the others link to. Follow that block's specifics.
+
 ## Write like a human, not an AI
 Editors reject copy that reads as machine-written. Steer clear of all of these:
 
@@ -360,6 +363,78 @@ def _brand_context_block(brand: dict[str, Any] | None, audience: str | None) -> 
     return "\n".join(lines)
 
 
+def _cluster_block(cluster: dict[str, Any] | None) -> str:
+    """Tell the writer its place in the content cluster: a supporting MEMBER (stay on
+    its subtopic, link up to the pillar) or the authoritative PILLAR (be comprehensive)."""
+    if not cluster:
+        return ""
+    label = cluster.get("cluster") or "this"
+    if cluster.get("role") == "member" and cluster.get("pillar_url"):
+        return (
+            f"\n\n## Your place in the \"{label}\" content cluster\n"
+            "- This is a SUPPORTING article in the cluster. Its pillar (the broad, "
+            f'authoritative hub) is "{cluster.get("pillar_title")}" at '
+            f"{cluster['pillar_url']}.\n"
+            "- Link UP to the pillar once, with natural descriptive anchor text, where "
+            "it genuinely fits.\n"
+            "- Stay tightly focused on THIS article's specific subtopic — do not "
+            "re-cover the pillar's full breadth, which would compete with it."
+        )
+    if cluster.get("role") == "pillar":
+        members = [m for m in (cluster.get("members") or []) if m]
+        line = (
+            "- This is the PILLAR — the authoritative hub of its cluster. Be "
+            "comprehensive and cover the topic broadly; supporting articles link up "
+            "to you."
+        )
+        if members:
+            line += (
+                " Related cluster articles you can reference where relevant: "
+                f"{', '.join(members[:12])}."
+            )
+        return f'\n\n## Your place in the "{label}" content cluster\n{line}'
+    return ""
+
+
+def _cluster_context(
+    db: Database, article_id: UUID, brand: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Resolve this article's cluster framing for the writer: its pillar (if a member)
+    or its members (if the pillar). None if unclustered or undeterminable."""
+    from . import clusters as clusters_svc
+    from . import linking
+
+    art = get_article(db, article_id)
+    cid = (art or {}).get("cluster_id")
+    if not (art and cid):
+        return None
+    cl = clusters_svc.get_cluster(db, cid)
+    if not cl:
+        return None
+    role = art.get("cluster_role")
+    if role == "member":
+        pid = cl.get("pillar_article_id")
+        if pid and pid != article_id and (pillar := get_article(db, pid)):
+            purl = linking.canonical_url(brand, pillar)
+            if purl:
+                return {
+                    "role": "member", "cluster": cl.get("label"),
+                    "pillar_title": pillar.get("title"), "pillar_url": purl,
+                }
+        return None
+    if role == "pillar":
+        members = db.fetch_all(
+            "select title from public.articles where cluster_id = %s "
+            "and cluster_role = 'member' and status = 'published'",
+            (cid,),
+        )
+        return {
+            "role": "pillar", "cluster": cl.get("label"),
+            "members": [m["title"] for m in members],
+        }
+    return None
+
+
 async def _draft_article(
     client: PowabaseClient,
     agent_id: str,
@@ -373,6 +448,7 @@ async def _draft_article(
     materials_kb_id: str | None = None,
     materials_url_by_source: dict[str, str] | None = None,
     brand: dict[str, Any] | None = None,
+    cluster: dict[str, Any] | None = None,
 ) -> str:
     """Draft the WHOLE article in one streamed pass, so the model holds the entire
     piece in context and writes a single coherent argument (the per-section approach
@@ -399,6 +475,7 @@ async def _draft_article(
         client, materials_kb_id, queries, per_query=2, limit=30
     )
 
+    cluster_block = _cluster_block(cluster)
     brand_block = ""
     if brand:
         brand_block = (
@@ -423,6 +500,7 @@ async def _draft_article(
         "- Cite an excerpt inline with natural anchor text (a descriptive phrase, "
         "never the page title or a bare URL), and vary the source domain.\n"
         f"{_grounding_block(research, url_by_source)}"
+        f"{cluster_block}"
         f"{brand_block}\n\n"
         "## Output\n"
         "- Output the full article body in Markdown (intro, every section, "
@@ -525,6 +603,7 @@ async def run_generation_task(
         #    produced stitched-together, disjoint drafts)
         agent_id = await ensure_writer_agent(client)
         title = brief.get("suggested_title") or topic
+        cluster_ctx = _cluster_context(db, article_id, brand_profile)
         _update(
             db, article_id,
             generation_status="drafting",
@@ -536,6 +615,7 @@ async def run_generation_task(
             materials_kb_id=materials_kb_id,
             materials_url_by_source=materials_url_by_source,
             brand=brand_profile,
+            cluster=cluster_ctx,
         )
         # Prepend the canonical H1. Strip ANY H1 line the writer emitted anyway
         # (multiline — a stray H1 after a preamble line would otherwise leave the
