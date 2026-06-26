@@ -125,7 +125,8 @@ def list_clusters_view(db: Database, business_id: UUID) -> list[dict[str, Any]]:
     return db.fetch_all(
         f"select {_COLUMNS}, "
         "(select count(*) from public.articles a "
-        "   where a.cluster_id = content_clusters.id) as member_count, "
+        "   where a.cluster_id = content_clusters.id "
+        "     and a.cluster_role = 'member') as member_count, "
         "(select title from public.articles p "
         "   where p.id = content_clusters.pillar_article_id) as pillar_title "
         "from public.content_clusters where business_id = %s order by created_at",
