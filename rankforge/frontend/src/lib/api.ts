@@ -405,6 +405,8 @@ export interface Article extends ArticleSummary {
   json_ld?: Record<string, unknown> | null;
   grounding_report?: GroundingReport | null;
   canonical_url?: string | null;
+  cluster_id?: string | null;
+  cluster_role?: "pillar" | "member" | null;
   created_at: string;
 }
 
@@ -664,6 +666,8 @@ export interface Opportunity {
   scores: Record<string, unknown>;
   status: OpportunityStatus;
   article_id?: string | null;
+  cluster_id?: string | null;
+  cluster_role?: "pillar" | "member" | null;
   progress?: { phase?: string; message?: string };
   created_at: string;
   updated_at: string;
@@ -694,6 +698,50 @@ export const opportunitiesApi = {
     request<Opportunity>(`/api/opportunities/${id}/dismiss`, { method: "POST" }),
   restore: (id: string) =>
     request<Opportunity>(`/api/opportunities/${id}/restore`, { method: "POST" }),
+};
+
+// --- Content clusters (topical authority) ---
+export interface ClusterMember {
+  id: string;
+  title: string;
+  slug?: string | null;
+  status: string;
+  cluster_role?: "pillar" | "member" | null;
+  canonical_url?: string | null;
+}
+export interface ContentCluster {
+  id: string;
+  business_id: string;
+  label: string;
+  theme?: string | null;
+  pillar_article_id?: string | null;
+  pillar_locked: boolean;
+  pillar_title?: string | null;
+  member_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+export interface ClusterDetail extends ContentCluster {
+  members: ClusterMember[];
+}
+
+export const clustersApi = {
+  list: (businessId: string) =>
+    request<ContentCluster[]>(
+      `/api/business-profiles/${businessId}/clusters`
+    ),
+  get: (clusterId: string) =>
+    request<ClusterDetail>(`/api/clusters/${clusterId}`),
+  setPillar: (clusterId: string, articleId: string) =>
+    request<ClusterDetail>(`/api/clusters/${clusterId}/pillar`, {
+      method: "POST",
+      body: JSON.stringify({ article_id: articleId }),
+    }),
+  backfill: (businessId: string) =>
+    request<{ status: string }>(
+      `/api/business-profiles/${businessId}/clusters/backfill`,
+      { method: "POST" }
+    ),
 };
 
 // --- Publishing / export (M8) ---

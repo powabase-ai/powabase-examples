@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  Boxes,
   Layers,
   Library,
   LogOut,
@@ -34,6 +35,7 @@ export function AppSidebar({ brandId }: { brandId: string }) {
     { title: "Research", href: `/brands/${brandId}`, icon: Search, exact: true },
     { title: "Sources", href: `/brands/${brandId}/sources`, icon: Layers },
     { title: "Articles", href: `/brands/${brandId}/articles`, icon: PenLine },
+    { title: "Clusters", href: `/brands/${brandId}/clusters`, icon: Boxes },
     { title: "Materials", href: `/brands/${brandId}/materials`, icon: Library },
     { title: "Team", href: `/brands/${brandId}/team`, icon: Users },
     { title: "Settings", href: `/brands/${brandId}/settings`, icon: Settings },

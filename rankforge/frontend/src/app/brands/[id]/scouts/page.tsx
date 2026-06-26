@@ -3,6 +3,8 @@
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import {
+  Boxes,
+  Crown,
   ExternalLink,
   Link2,
   Loader2,
@@ -29,6 +31,7 @@ import {
   useUpdateRelink,
   useUpdateScoutConfig,
 } from "@/lib/hooks/useScouts";
+import { useClusters } from "@/lib/hooks/useClusters";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import {
@@ -278,9 +281,11 @@ function RelinkCard({
 function OpportunityCard({
   brandId,
   opp,
+  clusterLabel,
 }: {
   brandId: string;
   opp: Opportunity;
+  clusterLabel?: string;
 }) {
   const draft = useDraftOpportunity(brandId);
   const dismiss = useDismissOpportunity(brandId);
@@ -308,6 +313,24 @@ function OpportunityCard({
           )}
           {opp.angle && <p className="mt-1.5 text-sm">{opp.angle}</p>}
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            {opp.cluster_role === "pillar" ? (
+              <Link
+                href={`/brands/${brandId}/clusters`}
+                className="inline-flex items-center gap-1 rounded bg-[rgb(var(--gold))]/12 px-1.5 py-0.5 text-[rgb(var(--gold))] hover:underline"
+                title="Starts a new topic cluster as its pillar"
+              >
+                <Crown className="size-3" /> New cluster
+              </Link>
+            ) : opp.cluster_id ? (
+              <Link
+                href={`/brands/${brandId}/clusters`}
+                className="inline-flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 hover:underline"
+                title="Extends an existing topic cluster"
+              >
+                <Boxes className="size-3" />
+                {clusterLabel ? `In ${clusterLabel}` : "In a cluster"}
+              </Link>
+            ) : null}
             {opp.source_type && (
               <span className="rounded bg-secondary px-1.5 py-0.5 capitalize">
                 {opp.source_type}
@@ -397,6 +420,9 @@ export default function ScoutsPage({
   const runs = useScoutRuns(id);
   const opps = useOpportunities(id);
   const runScout = useRunScout(id);
+  const clusters = useClusters(id);
+  const clusterLabel = (cid?: string | null) =>
+    cid ? clusters.data?.find((c) => c.id === cid)?.label : undefined;
 
   const lastRun = runs.data?.[0];
   const active = opps.data?.filter((o) => o.status !== "dismissed") ?? [];
@@ -498,7 +524,12 @@ export default function ScoutsPage({
 
       <div className="grid gap-3">
         {active.map((o) => (
-          <OpportunityCard key={o.id} brandId={id} opp={o} />
+          <OpportunityCard
+            key={o.id}
+            brandId={id}
+            opp={o}
+            clusterLabel={clusterLabel(o.cluster_id)}
+          />
         ))}
       </div>
 
@@ -509,7 +540,12 @@ export default function ScoutsPage({
           </summary>
           <div className="mt-3 grid gap-3">
             {dismissed.map((o) => (
-              <OpportunityCard key={o.id} brandId={id} opp={o} />
+              <OpportunityCard
+            key={o.id}
+            brandId={id}
+            opp={o}
+            clusterLabel={clusterLabel(o.cluster_id)}
+          />
             ))}
           </div>
         </details>

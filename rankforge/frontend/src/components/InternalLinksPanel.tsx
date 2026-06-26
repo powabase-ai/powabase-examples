@@ -3,7 +3,9 @@
 import * as React from "react";
 import Link from "next/link";
 import {
+  Boxes,
   Check,
+  Crown,
   ExternalLink,
   Link2,
   Loader2,
@@ -30,6 +32,7 @@ import {
   useUpdateArticle,
 } from "@/lib/hooks/useArticles";
 import { useBrand } from "@/lib/hooks/useBrands";
+import { useCluster } from "@/lib/hooks/useClusters";
 
 /** Editor panel: stage internal links to the brand's other published articles, then
  *  accept (insert + re-score) or dismiss each. Deterministic suggestions come from the
@@ -44,11 +47,15 @@ export function InternalLinksPanel({
   const { profile } = useAuth();
   const canEdit = canApprove(profile?.role);
   const brand = useBrand(brandId);
+  const article = useArticle(articleId);
+  const cluster = useCluster(article.data?.cluster_id ?? null);
   const { data, isLoading } = useLinkSuggestions(articleId);
   const suggest = useSuggestLinks(articleId);
   const apply = useApplyLink(articleId);
   const dismiss = useDismissLink(articleId);
   const [actingId, setActingId] = React.useState<string | null>(null);
+
+  const role = article.data?.cluster_role;
 
   const hasPattern = !!brand.data?.url_pattern;
   const pending = (data ?? []).filter((s) => s.status === "pending");
@@ -78,6 +85,23 @@ export function InternalLinksPanel({
 
   return (
     <div className="space-y-3">
+      {article.data?.cluster_id && (
+        <Link
+          href={`/brands/${brandId}/clusters`}
+          className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-secondary/50"
+        >
+          {role === "pillar" ? (
+            <Crown className="size-3.5 shrink-0 text-[rgb(var(--gold))]" />
+          ) : (
+            <Boxes className="size-3.5 shrink-0 text-[rgb(var(--ember))]" />
+          )}
+          <span className="min-w-0 flex-1 truncate">
+            {role === "pillar" ? "Pillar of" : "In cluster"}{" "}
+            <span className="font-medium">{cluster.data?.label ?? "…"}</span>
+          </span>
+        </Link>
+      )}
+
       <p className="text-xs text-muted-foreground">
         Link this article to your other <strong>published</strong> articles where it
         already mentions them — internal links search engines and answer engines
