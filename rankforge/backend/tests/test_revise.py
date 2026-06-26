@@ -316,3 +316,103 @@ async def test_editorial_loop_respects_revise_over_high_score(monkeypatch):
         MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {}
     )
     rev.assert_awaited()
+
+
+# --- user-directed targeted refine ---
+ARTICLE_FOR_TARGETS = {
+    "seo_score": {"signals": [
+        {"key": "internal_links", "label": "Internal links", "score": 55,
+         "fixes": ["Add internal links."]},
+        {"key": "keyword_title", "label": "Title keyword", "score": 10,
+         "fixes": ["Put the keyword in the title."]},  # meta-bound → fix_meta owns it
+    ]},
+    "geo_score": {"signals": []},
+    "readability_score": {"signals": [
+        {"key": "em_dashes", "label": "Em-dash restraint", "score": 30,
+         "fixes": ["Thin out em-dashes; prefer commas, periods, or parentheses."]},
+        {"key": "rhythm", "label": "Sentence-length variety", "score": 40, "fixes": []},
+    ]},
+    "grounding_report": {"grounding_score": 50, "flagged": [
+        {"quote": "the flagged claim text", "issue": "unsupported",
+         "suggestion": "cite a source"},
+    ]},
+}
+
+
+def test_targeted_issues_selects_only_chosen_across_axes():
+    issues = revise._targeted_issues(
+        ARTICLE_FOR_TARGETS,
+        ["readability:em_dashes", "seo:internal_links", "grounding:0"],
+    )
+    text = "\n".join(issues)
+    assert "Em-dash restraint" in text and "Thin out em-dashes" in text
+    assert "Internal links" in text
+    assert "the flagged claim text" in text  # grounding claim picked by index
+    assert "Sentence-length variety" not in text  # an unselected signal is excluded
+
+
+def test_targeted_issues_skips_meta_bound_signals():
+    # keyword_title is meta-bound — the body reviser can't fix it; fix_meta does.
+    assert revise._targeted_issues(ARTICLE_FOR_TARGETS, ["seo:keyword_title"]) == []
+
+
+def test_targeted_issues_falls_back_to_explanation_without_a_canned_fix():
+    issues = revise._targeted_issues(
+        {"readability_score": {"signals": [
+            {"key": "rhythm", "label": "Rhythm", "score": 40, "fixes": [],
+             "explanation": "Mechanically even."}]}},
+        ["readability:rhythm"],
+    )
+    assert len(issues) == 1
+    assert "Rhythm" in issues[0] and "Improve this aspect" in issues[0]
+
+
+def test_selected_total_sums_selected_signals_plus_grounding():
+    total = revise._selected_total(
+        ARTICLE_FOR_TARGETS,
+        ["readability:em_dashes", "seo:internal_links", "grounding:0"],
+    )
+    assert total == 30 + 55 + 50  # em_dashes + internal_links + grounding_score
+
+
+async def test_refine_with_targets_runs_only_the_targeted_loop(monkeypatch):
+    monkeypatch.setattr(
+        revise.gen_svc, "get_article",
+        lambda d, aid: {"id": aid, "brief_id": None, "seo_score": None},
+    )
+    monkeypatch.setattr(revise, "_article_context", lambda d, a: (None, {}, None))
+    called = {"targeted": False, "objective": False, "editorial": False}
+
+    async def _t(*a, **k):
+        called["targeted"] = True
+
+    async def _o(*a, **k):
+        called["objective"] = True
+
+    async def _e(*a, **k):
+        called["editorial"] = True
+
+    monkeypatch.setattr(revise, "_targeted_loop", _t)
+    monkeypatch.setattr(revise, "_objective_loop", _o)
+    monkeypatch.setattr(revise, "_editorial_loop", _e)
+    await revise.refine(
+        MagicMock(), MagicMock(), "aid", targets=["readability:em_dashes"]
+    )
+    assert called["targeted"]
+    assert not called["objective"] and not called["editorial"]
+
+
+async def test_refine_with_a_meta_target_runs_fix_meta(monkeypatch):
+    monkeypatch.setattr(
+        revise.gen_svc, "get_article",
+        lambda d, aid: {"id": aid, "brief_id": None, "seo_score": {"signals": []}},
+    )
+    monkeypatch.setattr(revise, "_article_context", lambda d, a: (None, {}, None))
+    monkeypatch.setattr(revise, "_targeted_loop", AsyncMock())
+    fm = AsyncMock()
+    monkeypatch.setattr(revise, "fix_meta", fm)
+    monkeypatch.setattr(scoring, "score_and_store", AsyncMock())
+    await revise.refine(
+        MagicMock(), MagicMock(), "aid", targets=["seo:keyword_title"]
+    )
+    fm.assert_awaited_once()

@@ -89,7 +89,7 @@ export function useOptimizeArticle(id: string) {
 export function useRefineArticle(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => articlesApi.refine(id),
+    mutationFn: (targets?: string[]) => articlesApi.refine(id, targets),
     onSuccess: (data) => qc.setQueryData(["article", id], data),
   });
 }

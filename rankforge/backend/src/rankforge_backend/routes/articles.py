@@ -12,6 +12,7 @@ from ..models.article import (
     ArticleSummary,
     ArticleUpdate,
     ArticleVersion,
+    RefineRequest,
 )
 from ..models.comment import Comment, CommentCreate, CommentUpdate
 from ..models.linking import BrokenLink, LinkSuggestion
@@ -153,9 +154,12 @@ async def optimize_article(
     return svc.get_article(db, article_id)
 
 
-async def _refine_and_finish(pb: PowabaseClient, db: Database, article_id: UUID) -> None:
+async def _refine_and_finish(
+    pb: PowabaseClient, db: Database, article_id: UUID,
+    targets: list[str] | None = None,
+) -> None:
     try:
-        await revise_svc.refine(pb, db, article_id)
+        await revise_svc.refine(pb, db, article_id, targets=targets)
     finally:
         # Always return the article to a terminal status, even if a pass failed.
         # If there's no content (refine bailed on a failed/empty article), mark it
@@ -177,11 +181,13 @@ async def _refine_and_finish(pb: PowabaseClient, db: Database, article_id: UUID)
 )
 async def refine_article(
     article_id: UUID,
+    body: RefineRequest | None = None,
     db: Database = Depends(get_db),
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Auto-iterate the draft against the SEO/GEO/Grounding evaluators (async)."""
+    """Refine the draft (async). With `body.targets`, fix exactly the selected flagged
+    issues; without it, auto-iterate every below-target axis."""
     _guard_article(db, article_id, user)
     # Atomically claim the article; refuse if a generation/refine is already running
     # so a double-submit can't launch two concurrent pipelines on the same article.
@@ -191,7 +197,7 @@ async def refine_article(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "generation already in progress"
         )
-    spawn(_refine_and_finish(pb, db, article_id))
+    spawn(_refine_and_finish(pb, db, article_id, body.targets if body else None))
     return svc.get_article(db, article_id)
 
 

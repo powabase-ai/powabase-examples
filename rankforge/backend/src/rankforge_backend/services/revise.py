@@ -730,17 +730,151 @@ async def _objective_loop(
             break
 
 
-async def refine(
-    client: PowabaseClient, db: Database, article_id: UUID
-) -> dict[str, Any] | None:
-    """Improve the article in two distinct loops, then return it.
+# --- user-directed targeted refine (fix exactly the selected issues) ---
+_AXIS_SCORE_KEY = {
+    "seo": "seo_score",
+    "geo": "geo_score",
+    "readability": "readability_score",
+}
 
+
+def _targeted_issues(article: dict, targets: list[str]) -> list[str]:
+    """Concrete reviser instructions for exactly the selected signals/claims — across
+    ANY axis, deterministic readability tells (em-dashes, AI vocab) included. The
+    instructions are rebuilt server-side from the stored scores, never trusted from the
+    client. Meta-bound signals are skipped here (fix_meta owns those)."""
+    sel = set(targets)
+    issues: list[str] = []
+    for axis, score_key in _AXIS_SCORE_KEY.items():
+        score = article.get(score_key)
+        if not score:
+            continue
+        for s in score.get("signals", []):
+            if f"{axis}:{s.get('key')}" not in sel or s.get("key") in _META_KEYS:
+                continue
+            fixes = s.get("fixes") or []
+            if fixes:
+                issues.extend(f"[{s['label']}] {fix}" for fix in fixes)
+            else:
+                issues.append(
+                    f"[{s.get('label')}] Scored {s.get('score')}/100 — "
+                    f"{s.get('explanation', '')} Improve this aspect.".strip()
+                )
+    flagged = (article.get("grounding_report") or {}).get("flagged") or []
+    for t in sel:
+        if not t.startswith("grounding:"):
+            continue
+        try:
+            idx = int(t.split(":", 1)[1])
+        except ValueError:
+            continue
+        if 0 <= idx < len(flagged):
+            f = flagged[idx]
+            loc = (f.get("quote") or f.get("claim") or "")[:120]
+            issues.append(
+                f'[Grounding] In "{loc}" — {f.get("issue", "")} '
+                f'— {f.get("suggestion", "")}'.strip()
+            )
+    return issues
+
+
+def _selected_total(article: dict, targets: list[str]) -> float:
+    """Combined score of the selected signals (+ grounding score if selected) — the
+    metric the targeted loop must raise for a pass to be kept."""
+    sel = set(targets)
+    total = 0.0
+    for axis, score_key in _AXIS_SCORE_KEY.items():
+        score = article.get(score_key)
+        if not score:
+            continue
+        for s in score.get("signals", []):
+            if f"{axis}:{s.get('key')}" in sel:
+                total += s.get("score", 0)
+    if any(t.startswith("grounding:") for t in sel):
+        g = (article.get("grounding_report") or {}).get("grounding_score")
+        total += g if isinstance(g, (int, float)) else 0
+    return total
+
+
+async def _targeted_loop(
+    client: PowabaseClient,
+    db: Database,
+    article_id: UUID,
+    brief: dict,
+    kb_id: str | None,
+    source_ids: list[str] | None,
+    url_by_source: dict[str, str],
+    targets: list[str],
+) -> None:
+    """Drive ONLY the user-selected issues via the reviser. Unlike the objective loop,
+    this WILL fix deterministic readability tells (em-dashes, AI vocabulary, formulaic
+    constructions) when the user selects them — they no longer depend on the editorial
+    LLM's discretion. Each pass is kept only if the selected issues' combined score rose
+    and no met objective axis regressed badly; otherwise content + scores are reverted."""
+    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+
+    _SNAP = ("seo_score", "geo_score", "grounding_report", "readability_score", "json_ld")
+    agent_id: str | None = None
+    for i in range(MAX_REVISIONS):
+        article = gen_svc.get_article(db, article_id)
+        if not article:
+            break
+        issues = _targeted_issues(article, targets)
+        if not issues:
+            break
+
+        _step(db, article_id, i, "revising", MAX_REVISIONS)
+        try:
+            if agent_id is None:
+                agent_id = await ensure_reviser_agent(client)
+            excerpts = await _diverse_excerpts(
+                client, kb_id, brief, source_ids, url_by_source
+            )
+            cur_md = article["content_md"] or ""
+            new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
+            if not new_md or len(new_md) < 0.6 * len(cur_md):
+                break
+            before = _selected_total(article, targets)
+            seo, geo = article.get("seo_score"), article.get("geo_score")
+            snap = {k: article.get(k) for k in _SNAP}
+            gen_svc._update(db, article_id, content_md=new_md)
+            _step(db, article_id, i, "fact-checking", MAX_REVISIONS)
+            await quality.reflect(client, db, article_id)
+            _step(db, article_id, i, "optimizing", MAX_REVISIONS)
+            await geo_optimize.optimize_and_store(client, db, article_id)
+            _step(db, article_id, i, "scoring", MAX_REVISIONS)
+            await scoring.score_and_store(client, db, article_id)
+            a2 = gen_svc.get_article(db, article_id) or {}
+            improved = _selected_total(a2, targets) > before
+            if not improved or _met_regressed_badly(
+                [(seo, a2.get("seo_score")), (geo, a2.get("geo_score"))]
+            ):
+                # Didn't move the selected issues (or wrecked a met axis) — revert.
+                gen_svc._update(db, article_id, content_md=cur_md, **snap)
+                break
+        except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
+            break
+
+
+async def refine(
+    client: PowabaseClient,
+    db: Database,
+    article_id: UUID,
+    *,
+    targets: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Improve the article, then return it.
+
+    With `targets` (a user-picked set of `axis:signal` / `grounding:i` selectors): fix
+    EXACTLY those issues and nothing else — including deterministic readability tells.
+
+    Without `targets` (legacy / post-generation auto-refine): two distinct loops —
     1. OBJECTIVE — drive SEO / GEO / Grounding to target (deterministic-scored).
     2. EDITORIAL — make the prose read like a human wrote it, judged by an LLM editor
        (not a tell-count), guarded so it can't regress the objective axes.
 
-    Keeping them separate is the whole point: a keyword counter must never veto a
-    better-written paragraph, and "human-ness" must never be a gameable number.
+    Keeping the legacy loops separate is the whole point: a keyword counter must never
+    veto a better-written paragraph, and "human-ness" must never be a gameable number.
     """
     from . import scoring  # local: avoid import cycle
 
@@ -754,16 +888,24 @@ async def refine(
     ) or {}
     source_ids, url_by_source, kb_id = _article_context(db, article)
 
-    # One-time metadata fix: title/meta-bound SEO signals can't be fixed by revising
-    # the body, so rewrite them up front, then re-score.
-    if _meta_failing(article.get("seo_score")):
+    # Title/meta-bound SEO signals can't be fixed by revising the body — rewrite them up
+    # front when they're failing (legacy) or explicitly selected, then re-score.
+    meta_selected = targets is not None and any(
+        t in {f"seo:{k}" for k in _META_KEYS} for t in targets
+    )
+    if _meta_failing(article.get("seo_score")) or meta_selected:
         await fix_meta(client, db, article_id, article, brief)
         await scoring.score_and_store(client, db, article_id)
 
-    await _objective_loop(
-        client, db, article_id, brief, kb_id, source_ids, url_by_source
-    )
-    await _editorial_loop(
-        client, db, article_id, brief, kb_id, source_ids, url_by_source
-    )
+    if targets is not None:
+        await _targeted_loop(
+            client, db, article_id, brief, kb_id, source_ids, url_by_source, targets
+        )
+    else:
+        await _objective_loop(
+            client, db, article_id, brief, kb_id, source_ids, url_by_source
+        )
+        await _editorial_loop(
+            client, db, article_id, brief, kb_id, source_ids, url_by_source
+        )
     return gen_svc.get_article(db, article_id)

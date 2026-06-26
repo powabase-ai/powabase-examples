@@ -78,9 +78,40 @@ function scoreColor(s?: Score | null) {
   return s.met ? "var(--success)" : "var(--ember)";
 }
 
-function SignalRow({ s }: { s: ScoreSignal }) {
+function SignalRow({
+  s,
+  axis,
+  target,
+  selected,
+  onToggle,
+}: {
+  s: ScoreSignal;
+  axis: string;
+  target: number;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+}) {
+  const id = `${axis}:${s.key}`;
+  // Only below-target signals are "flagged" — the ones refine can act on.
+  const selectable = s.score < target;
+  const checked = selected.has(id);
   return (
-    <div className="flex items-start gap-3 border-t border-border py-2.5 first:border-0">
+    <label
+      className={cn(
+        "flex items-start gap-2.5 border-t border-border py-2.5 first:border-0",
+        selectable && "cursor-pointer"
+      )}
+    >
+      {selectable ? (
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={() => onToggle(id)}
+          className="mt-1 size-3.5 shrink-0 cursor-pointer accent-[rgb(var(--ember))]"
+        />
+      ) : (
+        <span className="mt-1 size-3.5 shrink-0" />
+      )}
       <span className="w-7 shrink-0 font-data text-sm">{s.score}</span>
       <div className="min-w-0">
         <div className="flex items-center gap-1.5 text-sm font-medium">
@@ -96,11 +127,21 @@ function SignalRow({ s }: { s: ScoreSignal }) {
           </div>
         ))}
       </div>
-    </div>
+    </label>
   );
 }
 
-function EvalBody({ score }: { score: Score }) {
+function EvalBody({
+  score,
+  axis,
+  selected,
+  onToggle,
+}: {
+  score: Score;
+  axis: string;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+}) {
   const color = scoreColor(score);
   return (
     <div>
@@ -120,13 +161,28 @@ function EvalBody({ score }: { score: Score }) {
         />
       </div>
       {score.signals.map((s) => (
-        <SignalRow key={s.key} s={s} />
+        <SignalRow
+          key={s.key}
+          s={s}
+          axis={axis}
+          target={score.target}
+          selected={selected}
+          onToggle={onToggle}
+        />
       ))}
     </div>
   );
 }
 
-function GroundingBody({ report }: { report: GroundingReport }) {
+function GroundingBody({
+  report,
+  selected,
+  onToggle,
+}: {
+  report: GroundingReport;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+}) {
   const s = report.grounding_score;
   const color = s == null ? "var(--muted-ink)" : s >= 80 ? "var(--success)" : "var(--ember)";
   return (
@@ -155,23 +211,37 @@ function GroundingBody({ report }: { report: GroundingReport }) {
         Flagged claims
       </p>
       {report.flagged && report.flagged.length > 0 ? (
-        report.flagged.map((f, i) => (
-          <div key={i} className="border-t border-border py-2.5 first:border-0">
-            {f.quote ? (
-              <div className="mb-1 border-l-2 border-[rgb(var(--ember))]/40 pl-2 text-sm italic text-foreground">
-                “{f.quote}”
+        report.flagged.map((f, i) => {
+          const gid = `grounding:${i}`;
+          return (
+            <label
+              key={i}
+              className="flex cursor-pointer items-start gap-2.5 border-t border-border py-2.5 first:border-0"
+            >
+              <input
+                type="checkbox"
+                checked={selected.has(gid)}
+                onChange={() => onToggle(gid)}
+                className="mt-1 size-3.5 shrink-0 cursor-pointer accent-[rgb(var(--ember))]"
+              />
+              <div className="min-w-0">
+                {f.quote ? (
+                  <div className="mb-1 border-l-2 border-[rgb(var(--ember))]/40 pl-2 text-sm italic text-foreground">
+                    “{f.quote}”
+                  </div>
+                ) : (
+                  <div className="text-sm font-medium">{f.claim}</div>
+                )}
+                <div className="text-xs text-muted-foreground">{f.issue}</div>
+                {f.suggestion && (
+                  <div className="mt-0.5 text-xs text-[rgb(var(--ember-deep))]">
+                    → {f.suggestion}
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="text-sm font-medium">{f.claim}</div>
-            )}
-            <div className="text-xs text-muted-foreground">{f.issue}</div>
-            {f.suggestion && (
-              <div className="mt-0.5 text-xs text-[rgb(var(--ember-deep))]">
-                → {f.suggestion}
-              </div>
-            )}
-          </div>
-        ))
+            </label>
+          );
+        })
       ) : (
         <p className="text-sm text-muted-foreground">No unsupported claims flagged.</p>
       )}
@@ -326,6 +396,15 @@ export default function ArticleView({
   >("SEO");
   const [showHistory, setShowHistory] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
+  // Flagged issues the user has ticked to fix (axis:signal / grounding:i), across tabs.
+  const [refineTargets, setRefineTargets] = useState<Set<string>>(new Set());
+  const toggleTarget = (tid: string) =>
+    setRefineTargets((prev) => {
+      const next = new Set(prev);
+      if (next.has(tid)) next.delete(tid);
+      else next.add(tid);
+      return next;
+    });
 
   const generating = a && !["done", "failed"].includes(a.generation_status);
   const dirty = !!a && editing && draft !== a.content_md;
@@ -338,6 +417,7 @@ export default function ArticleView({
     setTab("SEO");
     setShowHistory(false);
     setShowPublish(false);
+    setRefineTargets(new Set());
   }, [articleId]);
 
   // Warn before leaving with unsaved edits.
@@ -467,14 +547,23 @@ export default function ArticleView({
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
             {tab === "Grounding" ? (
               a?.grounding_report ? (
-                <GroundingBody report={a.grounding_report} />
+                <GroundingBody
+                  report={a.grounding_report}
+                  selected={refineTargets}
+                  onToggle={toggleTarget}
+                />
               ) : (
                 <p className="text-sm text-muted-foreground">
                   {generating ? "Fact-check runs after generation." : "No fact-check yet."}
                 </p>
               )
             ) : current ? (
-              <EvalBody score={current} />
+              <EvalBody
+                score={current}
+                axis={tab.toLowerCase()}
+                selected={refineTargets}
+                onToggle={toggleTarget}
+              />
             ) : (
               <p className="text-sm text-muted-foreground">
                 {generating ? "Scores appear once generation finishes." : "No scores yet."}
@@ -482,30 +571,44 @@ export default function ArticleView({
             )}
             {a && a.generation_status === "done" && (
               <div className="mt-4 space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  Tick the flagged issues you want fixed — across the SEO, GEO,
+                  Readability, and Grounding tabs — then refine. Only the selected
+                  issues are addressed.
+                </p>
                 <Button
                   variant="gold"
                   size="sm"
                   className="w-full"
-                  onClick={() =>
-                    refine.mutate(undefined, {
-                      onSuccess: () =>
+                  onClick={() => {
+                    const targets = Array.from(refineTargets);
+                    refine.mutate(targets, {
+                      onSuccess: () => {
                         toast.success(
-                          "Refining against SEO/GEO/Readability/Grounding…"
-                        ),
+                          `Refining ${targets.length} selected issue${
+                            targets.length === 1 ? "" : "s"
+                          }…`
+                        );
+                        setRefineTargets(new Set());
+                      },
                       onError: (e) =>
                         toast.error(
                           e instanceof Error ? e.message : "Refine failed"
                         ),
-                    })
-                  }
-                  disabled={refine.isPending}
+                    });
+                  }}
+                  disabled={refine.isPending || refineTargets.size === 0}
                 >
                   {refine.isPending ? (
                     <Loader2 className="animate-spin" />
                   ) : (
                     <Sparkles />
                   )}
-                  Auto-refine to targets
+                  {refineTargets.size > 0
+                    ? `Refine ${refineTargets.size} selected issue${
+                        refineTargets.size === 1 ? "" : "s"
+                      }`
+                    : "Select issues to refine"}
                 </Button>
                 <Button
                   variant="outline"

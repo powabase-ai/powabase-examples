@@ -449,8 +449,11 @@ export const articlesApi = {
     request<Article>(`/api/articles/${id}/score`, { method: "POST" }),
   optimize: (id: string) =>
     request<Article>(`/api/articles/${id}/optimize`, { method: "POST" }),
-  refine: (id: string) =>
-    request<Article>(`/api/articles/${id}/refine`, { method: "POST" }),
+  refine: (id: string, targets?: string[]) =>
+    request<Article>(`/api/articles/${id}/refine`, {
+      method: "POST",
+      body: JSON.stringify({ targets: targets ?? null }),
+    }),
   retry: (id: string) =>
     request<Article>(`/api/articles/${id}/retry`, { method: "POST" }),
   update: (id: string, data: ArticleUpdate) =>
