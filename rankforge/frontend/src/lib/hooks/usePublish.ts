@@ -26,3 +26,16 @@ export function usePublish(articleId: string) {
     },
   });
 }
+
+export function useUnpublish(articleId: string, brandId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => publishApi.unpublish(articleId),
+    onSuccess: (data) => {
+      // Reverted to draft + detached from its cluster — refresh article, list, clusters.
+      qc.setQueryData(["article", articleId], data);
+      qc.invalidateQueries({ queryKey: ["articles", brandId] });
+      qc.invalidateQueries({ queryKey: ["clusters", brandId] });
+    },
+  });
+}

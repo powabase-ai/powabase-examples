@@ -35,31 +35,32 @@ SCOUT_AGENT_NAME = "rankforge-scout"
 SCOUT_MODEL = "claude-opus-4-7"
 
 _SYSTEM_PROMPT = """\
-You are RankForge's **content scout**. Given a brand, you use the `web_search` (Exa) \
-tool to find timely, high-potential blog opportunities and return them as JSON.
+You are RankForge's content scout **executor**. You're given a Search Plan — specific \
+queries to run with the `web_search` (Exa) tool, each tagged with a source type — plus \
+the brand and what it already covers. Run the searches and return the best NEW, timely \
+blog opportunities as JSON.
 
-## What to look for
-- Recent news, fresh search demand, and emerging trends relevant to the brand's \
-niche and keywords.
-- Gaps where competitors have covered a topic poorly or not at all.
+## Honor each query's source tag
+- **news** — prefer reputable outlets / trade press; favor the last ~30 days (news \
+updates far more often than static blogs, so it's your freshest signal).
+- **youtube** — find well-regarded tutorials/explainers (add "tutorial" or \
+`site:youtube.com`); favor videos with real engagement and note the channel.
+- **social** — surface high-engagement posts from credible accounts on trusted \
+platforms (X, LinkedIn, Reddit).
+- **web** — high-authority general pages.
 
 ## Selection rules
-- Favor specific, actionable angles over evergreen restatements of well-covered topics.
-- Prefer timely opportunities — something changed recently that makes this worth \
-writing now.
-- **Never duplicate existing coverage.** You will be given the brand's already-\
-published, queued, and dismissed topics under "Already covered". Do not propose any \
-of them, nor a reworded variant, nor a topic that targets the same primary keyword. \
-Every opportunity must be genuinely NEW — a fresh angle, sub-topic, or keyword the \
-brand has not addressed.
-- Base every opportunity on a real search result; never fabricate sources or trends.
+- Favor specific, actionable, TIMELY angles — something changed recently.
+- **Never duplicate existing coverage** (given under "Already covered"), nor a \
+reworded variant, nor a topic targeting the same primary keyword.
+- Base every opportunity on a REAL search result; never fabricate sources or trends.
 
 ## For each opportunity provide
-- **title** — a clear working title — and **angle** — the recommended take.
+- **title** and **angle** (the recommended take).
 - **why_now** — the timeliness rationale.
 - **keyword** — the primary keyword.
-- **source_type** — the signal: `news`, `serp`, or `competitor`.
-- **source_url** — a supporting URL.
+- **source_type** — `news`, `youtube`, `social`, `serp`, or `competitor`.
+- **source_url** — the backing result.
 - **opportunity_score** — 0–100, blending timeliness, search potential, and brand fit.
 
 ## Output
@@ -74,9 +75,50 @@ _SCHEMA_HINT = """{
       "angle": "...",
       "why_now": "...",
       "keyword": "...",
-      "source_type": "news|serp|competitor",
+      "source_type": "news|youtube|social|serp|competitor",
       "source_url": "https://...",
       "opportunity_score": 0
+    }
+  ]
+}"""
+
+# The plan step samples what's trending and proposes varied searches across sources.
+_SOURCES = ("news", "youtube", "social", "web")
+PLANNER_AGENT_NAME = "rankforge-scout-planner"
+PLANNER_MODEL = "claude-sonnet-4-6"
+_PLANNER_SYSTEM = """\
+You are RankForge's scout **planner**. BEFORE hunting for content opportunities, you \
+research what's HOT in the brand's niche RIGHT NOW and propose a focused, VARIED set of \
+web searches to run next. Use the `web_search` (Exa) tool to sample recent activity.
+
+## Goal
+Produce a diverse Search Plan so each run explores FRESH ground — not the same \
+evergreen seed terms every time. Bias hard toward what changed recently.
+
+## Spread queries across these sources (vary them — don't pile onto one)
+- **news** — reputable outlets / trade press (freshest signal).
+- **youtube** — tutorials & explainers (how-to demand, what creators are covering).
+- **social** — high-engagement posts from credible accounts (X, LinkedIn, Reddit).
+- **web** — high-authority general pages.
+
+## Rules
+- 5–8 queries, each tied to a SPECIFIC trending angle or question — not the brand's \
+generic seed terms.
+- Steer away from topics already covered (you'll be given the list).
+- Give each query a one-line rationale (why it's timely / promising).
+
+## Output
+- Your final message must be exactly one JSON object in a single ```json fenced \
+block, with nothing after it.
+"""
+
+_PLAN_SCHEMA_HINT = """{
+  "themes": ["a short trending theme", "..."],
+  "queries": [
+    {
+      "query": "the exact web search to run",
+      "source": "news|youtube|social|web",
+      "rationale": "why this is timely / promising"
     }
   ]
 }"""
@@ -86,7 +128,8 @@ _CONFIG_COLUMNS = (
     "focus, last_run_at, next_run_at, updated_at"
 )
 _RUN_COLUMNS = (
-    "id, business_id, status, trigger, found, drafted, error, progress, created_at"
+    "id, business_id, status, trigger, found, drafted, error, progress, plan, "
+    "created_at"
 )
 _OPP_COLUMNS = (
     "id, business_id, scout_run_id, title, angle, why_now, keyword, source_type, "
@@ -101,6 +144,17 @@ async def ensure_scout_agent(client: PowabaseClient) -> str:
         model=SCOUT_MODEL,
         system_prompt=_SYSTEM_PROMPT,
         settings={"reasoning_effort": "medium"},
+        builtin_tools=("web_search",),
+    )
+
+
+async def ensure_planner_agent(client: PowabaseClient) -> str:
+    return await ensure_agent(
+        client,
+        name=PLANNER_AGENT_NAME,
+        model=PLANNER_MODEL,
+        system_prompt=_PLANNER_SYSTEM,
+        settings={"reasoning_effort": "low"},
         builtin_tools=("web_search",),
     )
 
@@ -213,6 +267,17 @@ def set_opportunity_status(
     )
 
 
+def delete_opportunity(db: Database, opp_id: UUID) -> bool:
+    """Permanently remove an opportunity (vs dismiss, which keeps it for restore).
+    App-side only — opportunities own no Powabase resource."""
+    return (
+        db.fetch_one(
+            "delete from public.opportunities where id = %s returning id", (opp_id,)
+        )
+        is not None
+    )
+
+
 def try_claim_opportunity(db: Database, opp_id: UUID) -> dict[str, Any] | None:
     """Atomically move an opportunity to 'queued' for drafting. Returns None if it
     is already queued/drafting/drafted (so a double-submit can't launch two draft
@@ -262,7 +327,7 @@ def score_candidate(
 
 
 # --- existing-coverage awareness (don't re-suggest what the blog already covers) ---
-_SIM_THRESHOLD = 0.7  # title-token Jaccard above which a candidate is a near-duplicate
+_SIM_THRESHOLD = 0.82  # title-token Jaccard above which a candidate is a near-duplicate
 # Bound the dedup working set to the most-recent N rows per brand so a very large
 # blog can't make every scout run load (and Jaccard-scan) unbounded history. The
 # most-recent N comfortably covers timely-topic collisions; older long-tail posts
@@ -312,7 +377,11 @@ def _gather_coverage(db: Database, business_id: UUID) -> dict[str, Any]:
         "keywords": keywords,
         "token_sets": token_sets,
         "articles": articles,
-        "opps": open_opps + dismissed,
+        # Only OPEN opps go in the prompt's "already covered" list. Dismissed titles
+        # stay in `seen` (exact-match filter) so we don't re-surface the exact same
+        # topic, but we no longer over-constrain the agent away from fresh angles on a
+        # theme the user previously passed on.
+        "opps": open_opps,
     }
 
 
@@ -436,6 +505,350 @@ def _set_progress(db: Database, run_id: UUID, phase: str, message: str, **extra:
     )
 
 
+# --- the Search Plan (trending queries the user can review/edit) ---
+def _normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize a plan (agent-generated or user-edited): clean query list, valid
+    sources, bounded lengths."""
+    queries: list[dict[str, Any]] = []
+    for q in plan.get("queries") or []:
+        if not isinstance(q, dict):
+            continue
+        query = (q.get("query") or "").strip()
+        if not query:
+            continue
+        src = q.get("source")
+        queries.append({
+            "query": query[:200],
+            "source": src if src in _SOURCES else "web",
+            "rationale": (q.get("rationale") or "").strip()[:240],
+        })
+        if len(queries) >= 12:
+            break
+    themes = [str(t).strip() for t in (plan.get("themes") or []) if str(t).strip()][:8]
+    return {"themes": themes, "queries": queries, "edited": bool(plan.get("edited"))}
+
+
+def _plan_block(plan: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for q in plan.get("queries") or []:
+        src = q.get("source") or "web"
+        r = (q.get("rationale") or "").strip()
+        lines.append(f'- [{src}] "{q.get("query")}"' + (f" — {r}" if r else ""))
+    return "\n".join(lines) or (
+        "- (no queries — search broadly for timely, on-brand topics across "
+        "news/youtube/social/web)"
+    )
+
+
+def _brand_block(brand: dict[str, Any], focus: list[str]) -> str:
+    return (
+        "## Brand\n"
+        f"- Name: {brand.get('name')}\n"
+        f"- Niche: {brand.get('niche') or 'n/a'}\n"
+        f"- Audience: {brand.get('audience') or 'n/a'}\n"
+        f"- Focus topics: {', '.join(focus) or 'n/a'}\n"
+        f"- Target keywords: {', '.join(brand.get('target_keywords') or []) or 'n/a'}\n"
+        "- Competitors: "
+        f"{', '.join(c.get('domain', '') for c in (brand.get('competitors') or [])) or 'n/a'}"
+    )
+
+
+async def _generate_plan(
+    client: PowabaseClient, brand: dict[str, Any], focus: list[str], cov: dict[str, Any]
+) -> dict[str, Any]:
+    """Sample what's trending and propose a varied Search Plan across sources."""
+    agent_id = await ensure_planner_agent(client)
+    msg = (
+        f"{_brand_block(brand, focus)}\n\n"
+        "## Already covered — steer AWAY from these\n"
+        f"{_covered_block(cov)}\n\n"
+        "## Task\n"
+        "- Research what's trending in this niche right now and propose 5–8 varied, "
+        "timely search queries spread across news / youtube / social / web.\n\n"
+        "## Output\n"
+        f"- Output ONLY a single ```json block matching this shape:\n{_PLAN_SCHEMA_HINT}"
+    )
+    res = await client.run_agent_collect(agent_id, msg)
+    if res.get("error"):
+        raise RuntimeError(f"scout planning failed: {res['error']}")
+    data = extract_json(res["content"])
+    return _normalize_plan(data if isinstance(data, dict) else {})
+
+
+async def _run_executor(
+    client: PowabaseClient,
+    brand: dict[str, Any],
+    focus: list[str],
+    cov: dict[str, Any],
+    plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Run the plan's queries via the scout agent and return raw candidates."""
+    agent_id = await ensure_scout_agent(client)
+    msg = (
+        f"{_brand_block(brand, focus)}\n\n"
+        "## Search plan — run THESE queries with web_search (honor each source tag)\n"
+        f"{_plan_block(plan)}\n\n"
+        "## Already covered — do NOT propose these or close variants\n"
+        f"{_covered_block(cov)}\n\n"
+        "## Task\n"
+        "- Run the planned searches and return 5–10 genuinely new, timely "
+        "opportunities, each tied to a real result.\n\n"
+        "## Output\n"
+        f"- Output ONLY a single ```json block matching this shape:\n{_SCHEMA_HINT}"
+    )
+    res = await client.run_agent_collect(agent_id, msg)
+    if res.get("error"):
+        raise RuntimeError(f"scout search failed: {res['error']}")
+    data = extract_json(res["content"])
+    cands = data.get("opportunities") if isinstance(data, dict) else None
+    return cands or []
+
+
+def _roll_schedule(db: Database, business_id: UUID, cadence: str | None) -> None:
+    """Push the next scheduled run forward (guarded — never masks the real outcome)."""
+    try:
+        db.execute(
+            "update public.scout_configs set last_run_at = now(), "
+            "next_run_at = now() + %s where business_id = %s",
+            (_cadence_delta(cadence or "daily"), business_id),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _discover_and_store(
+    client: PowabaseClient,
+    db: Database,
+    run_id: UUID,
+    business_id: UUID,
+    brand: dict[str, Any],
+    cfg: dict[str, Any],
+    plan: dict[str, Any],
+) -> None:
+    """Run the plan, store + cluster the opportunities, optionally auto-draft, and mark
+    the run done. Raises on failure (the caller records 'failed')."""
+    focus = cfg.get("focus") or brand.get("seed_topics") or []
+    cov = _gather_coverage(db, business_id)
+    _set_progress(
+        db, run_id, "discovering",
+        "Running your search plan across news, YouTube, social & the web…",
+    )
+    candidates = await _run_executor(client, brand, focus, cov, plan)
+    _set_progress(
+        db, run_id, "analyzing",
+        f"Found {len(candidates)} candidate topic"
+        f"{'' if len(candidates) == 1 else 's'} — filtering against your existing "
+        "blog coverage…",
+        considered=[c.get("title") for c in candidates if c.get("title")][:8],
+    )
+
+    brand_terms = _brand_terms(brand)
+    stored: list[dict[str, Any]] = []
+    for cand in candidates:
+        title = (cand.get("title") or "").strip()
+        keyword = cand.get("keyword")
+        if _covers_existing(title, keyword, cov):
+            continue
+        cov["seen"].add(_norm_title(title))
+        if tt := _tokens(title):
+            cov["token_sets"].append(tt)
+        if keyword:
+            cov["keywords"].add(_norm_title(keyword))
+        score, breakdown = score_candidate(cand, brand_terms)
+        if score < 40:  # not worth surfacing
+            continue
+        row = db.fetch_one(
+            "insert into public.opportunities "
+            "(business_id, scout_run_id, title, angle, why_now, keyword, "
+            " source_type, source_url, evidence, score, scores) "
+            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            f"returning {_OPP_COLUMNS}",
+            (
+                business_id, run_id, title, cand.get("angle"),
+                cand.get("why_now"), cand.get("keyword"),
+                cand.get("source_type"), cand.get("source_url"),
+                Json(cand), score, Json(breakdown),
+            ),
+        )
+        stored.append(row)
+
+    db.execute(
+        "update public.scout_runs set found = %s where id = %s",
+        (len(stored), run_id),
+    )
+    _set_progress(
+        db, run_id, "scored",
+        f"{len(stored)} new opportunit"
+        f"{'y' if len(stored) == 1 else 'ies'} surfaced.",
+    )
+
+    # Cluster each opportunity (join an existing cluster or found a new one) so the
+    # inbox shows topical structure and drafts inherit it.
+    if stored:
+        _set_progress(
+            db, run_id, "clustering", "Organizing opportunities into topic clusters…"
+        )
+    founded: list[dict[str, Any]] = []
+    for opp in stored:
+        try:
+            cid, role = await clusters.assign(
+                client, db, business_id,
+                title=opp["title"], keyword=opp.get("keyword"),
+                angle=opp.get("angle"), extra_candidates=founded,
+            )
+            db.execute(
+                "update public.opportunities set cluster_id = %s, "
+                "cluster_role = %s where id = %s",
+                (cid, role, opp["id"]),
+            )
+            opp["cluster_id"], opp["cluster_role"] = cid, role
+            if role == "pillar" and (c := clusters.get_cluster(db, cid)):
+                founded.append(c)
+        except Exception:  # noqa: BLE001 — clustering must not fail the scout run
+            log.exception("cluster assignment failed for opp %s", opp["id"])
+
+    # Auto-draft the best, on-threshold opportunities (L3).
+    drafted = 0
+    if cfg.get("autonomy") == "auto_draft":
+        cap = cfg.get("max_drafts_per_run") or 1
+        floor = cfg.get("min_score") or 70
+        for opp in sorted(stored, key=lambda o: o["score"], reverse=True):
+            if drafted >= cap or opp["score"] < floor:
+                break
+            _set_progress(
+                db, run_id, "drafting",
+                f"Drafting “{opp['title']}” ({drafted + 1}/{cap})…",
+                drafted=drafted, total=cap,
+            )
+            if await auto_draft(client, db, opp):
+                drafted += 1
+
+    _set_progress(
+        db, run_id, "done",
+        f"Done — {len(stored)} new opportunit"
+        f"{'y' if len(stored) == 1 else 'ies'}"
+        f"{f', {drafted} drafted' if drafted else ''}.",
+    )
+    db.execute(
+        "update public.scout_runs set status = 'done', drafted = %s where id = %s",
+        (drafted, run_id),
+    )
+
+
+def start_plan(
+    db: Database, business_id: UUID, *, trigger: str = "manual"
+) -> dict[str, Any]:
+    """Create the 'planned' run row synchronously (so the route can return it); the
+    plan itself is filled in by generate_plan_for_run (spawned)."""
+    ensure_config(db, business_id)
+    # Drop any earlier plan the user never ran — one open plan per brand, and stale
+    # 'planned' rows don't pile up or masquerade as the latest run. (They carry no
+    # opportunities, so this is a clean delete.)
+    db.execute(
+        "delete from public.scout_runs where business_id = %s and status = 'planned'",
+        (business_id,),
+    )
+    return db.fetch_one(
+        "insert into public.scout_runs (business_id, status, trigger, progress) "
+        "values (%s, 'planned', %s, %s) "
+        f"returning {_RUN_COLUMNS}",
+        (
+            business_id, trigger,
+            Json({"phase": "planning", "message": "Researching what's trending…"}),
+        ),
+    )
+
+
+async def generate_plan_for_run(
+    client: PowabaseClient, db: Database, run_id: UUID
+) -> None:
+    """Fill a planned run's Search Plan (the slow LLM+web_search step). Spawned after
+    start_plan; the UI polls the run until the plan appears."""
+    run = get_run(db, run_id)
+    if run is None:
+        return
+    business_id = run["business_id"]
+    cfg = ensure_config(db, business_id)
+    brand = brands.get_profile(db, business_id)
+    try:
+        if brand is None:
+            raise RuntimeError("brand not found")
+        focus = cfg.get("focus") or brand.get("seed_topics") or []
+        plan = await _generate_plan(
+            client, brand, focus, _gather_coverage(db, business_id)
+        )
+        db.execute(
+            "update public.scout_runs set plan = %s where id = %s",
+            (Json(plan), run_id),
+        )
+        _set_progress(
+            db, run_id, "planned", "Search plan ready — review, tweak, and run it."
+        )
+    except Exception:  # noqa: BLE001 — record on the run row
+        log.exception("scout planning %s failed for business %s", run_id, business_id)
+        db.execute(
+            "update public.scout_runs set status = 'failed', error = %s where id = %s",
+            ("scout planning failed — see server logs", run_id),
+        )
+        _set_progress(db, run_id, "failed", "Couldn't build a search plan — see logs.")
+
+
+def update_plan(
+    db: Database, run_id: UUID, plan: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Replace a planned run's Search Plan with the user's edits (only while it's still
+    in the 'planned' state — once it executes, the plan is locked)."""
+    return db.fetch_one(
+        "update public.scout_runs set plan = %s "
+        f"where id = %s and status = 'planned' returning {_RUN_COLUMNS}",
+        (Json({**_normalize_plan(plan), "edited": True}), run_id),
+    )
+
+
+async def execute_run(
+    client: PowabaseClient, db: Database, run_id: UUID
+) -> dict[str, Any] | None:
+    """Execute a previously-planned run (the user reviewed/edited its plan). No-op if
+    the run isn't in the 'planned' state (already running/done)."""
+    run = get_run(db, run_id)
+    if run is None:
+        return None
+    if run["status"] != "planned":
+        return run
+    # Atomically CLAIM the run (compare-and-set on the same statement) so a double
+    # "Run" — or a retried execute — can't run the plan twice (duplicate Exa spend,
+    # duplicate opportunities/drafts). If we don't win the flip, someone else started it.
+    claimed = db.fetch_one(
+        "update public.scout_runs set status = 'running' "
+        "where id = %s and status = 'planned' returning id",
+        (run_id,),
+    )
+    if claimed is None:
+        return get_run(db, run_id)
+    business_id = run["business_id"]
+    cfg = ensure_config(db, business_id)
+    brand = brands.get_profile(db, business_id)
+    try:
+        if brand is None:
+            raise RuntimeError("brand not found")
+        await _discover_and_store(
+            client, db, run_id, business_id, brand, cfg, run.get("plan") or {}
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("scout run %s failed for business %s", run_id, business_id)
+        db.execute(
+            "update public.scout_runs set status = 'failed', error = %s where id = %s",
+            ("scout run failed — see server logs", run_id),
+        )
+        _set_progress(db, run_id, "failed", "Scout run failed — see server logs.")
+    finally:
+        # A manual run never perturbs the brand's automatic cadence (only scheduled
+        # runs roll next_run_at). execute_run is reached only from the manual flow.
+        if run.get("trigger") == "schedule":
+            _roll_schedule(db, business_id, cfg.get("cadence"))
+    return get_run(db, run_id)
+
+
 async def run_scout(
     client: PowabaseClient,
     db: Database,
@@ -443,161 +856,29 @@ async def run_scout(
     business_id: UUID,
     trigger: str = "schedule",
 ) -> dict[str, Any]:
-    """Discover + score opportunities; auto-draft the best ones at L3."""
+    """One-shot run: auto-generate a Search Plan AND execute it (the scheduled path,
+    and the 'quick run' button). The two-phase manual path is plan_scout + execute_run."""
     cfg = ensure_config(db, business_id)
     brand = brands.get_profile(db, business_id)
     run = db.fetch_one(
         "insert into public.scout_runs (business_id, trigger, progress) "
         "values (%s, %s, %s) "
         f"returning {_RUN_COLUMNS}",
-        (
-            business_id,
-            trigger,
-            Json({"phase": "starting", "message": "Starting scout…"}),
-        ),
+        (business_id, trigger, Json({"phase": "starting", "message": "Starting scout…"})),
     )
     run_id = run["id"]
     try:
         if brand is None:
             raise RuntimeError("brand not found")
-
         focus = cfg.get("focus") or brand.get("seed_topics") or []
-        cov = _gather_coverage(db, business_id)
         _set_progress(
-            db, run_id, "discovering",
-            "Searching the web for timely, on-brand topics…",
+            db, run_id, "planning", "Researching what's trending in your niche…"
         )
-        agent_id = await ensure_scout_agent(client)
-        msg = (
-            "## Brand\n"
-            f"- Name: {brand.get('name')}\n"
-            f"- Niche: {brand.get('niche') or 'n/a'}\n"
-            f"- Audience: {brand.get('audience') or 'n/a'}\n"
-            f"- Focus topics: {', '.join(focus) or 'n/a'}\n"
-            f"- Target keywords: {', '.join(brand.get('target_keywords') or []) or 'n/a'}\n"
-            f"- Competitors: {', '.join(c.get('domain', '') for c in (brand.get('competitors') or [])) or 'n/a'}\n\n"
-            "## Already covered — do NOT propose these or close variants\n"
-            f"{_covered_block(cov)}\n\n"
-            "## Task\n"
-            "- Find 5–8 timely content opportunities for this brand right now.\n"
-            "- Each MUST be genuinely new — not listed above, not a reworded variant, "
-            "and not targeting a keyword the brand already covers.\n\n"
-            "## Output\n"
-            "- Output ONLY a single ```json block matching this shape:\n"
-            f"{_SCHEMA_HINT}"
-        )
-        agent_run = await client.run_agent_collect(agent_id, msg)
-        if agent_run["error"]:
-            raise RuntimeError(f"scout search failed: {agent_run['error']}")
-        data = extract_json(agent_run["content"])
-        candidates = data.get("opportunities") if isinstance(data, dict) else None
-        candidates = candidates or []
-        _set_progress(
-            db, run_id, "analyzing",
-            f"Found {len(candidates)} candidate topic"
-            f"{'' if len(candidates) == 1 else 's'} — filtering against your "
-            "existing blog coverage…",
-            considered=[c.get("title") for c in candidates if c.get("title")][:8],
-        )
-
-        brand_terms = _brand_terms(brand)
-
-        stored: list[dict[str, Any]] = []
-        for cand in candidates:
-            title = (cand.get("title") or "").strip()
-            keyword = cand.get("keyword")
-            # Skip anything the brand already covers — exact title, same primary
-            # keyword, or a paraphrase — and dedup candidates against each other.
-            if _covers_existing(title, keyword, cov):
-                continue
-            cov["seen"].add(_norm_title(title))
-            if tt := _tokens(title):
-                cov["token_sets"].append(tt)
-            if keyword:
-                cov["keywords"].add(_norm_title(keyword))
-            score, breakdown = score_candidate(cand, brand_terms)
-            if score < 40:  # not worth surfacing
-                continue
-            row = db.fetch_one(
-                "insert into public.opportunities "
-                "(business_id, scout_run_id, title, angle, why_now, keyword, "
-                " source_type, source_url, evidence, score, scores) "
-                "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                f"returning {_OPP_COLUMNS}",
-                (
-                    business_id, run_id, title, cand.get("angle"),
-                    cand.get("why_now"), cand.get("keyword"),
-                    cand.get("source_type"), cand.get("source_url"),
-                    Json(cand), score, Json(breakdown),
-                ),
-            )
-            stored.append(row)
-
+        plan = await _generate_plan(client, brand, focus, _gather_coverage(db, business_id))
         db.execute(
-            "update public.scout_runs set found = %s where id = %s",
-            (len(stored), run_id),
+            "update public.scout_runs set plan = %s where id = %s", (Json(plan), run_id)
         )
-        _set_progress(
-            db, run_id, "scored",
-            f"{len(stored)} new opportunit"
-            f"{'y' if len(stored) == 1 else 'ies'} surfaced.",
-        )
-
-        # Place each opportunity into a content cluster (join an existing one or found
-        # a new one) so the inbox shows topical structure and drafts inherit it. Pass
-        # clusters founded earlier in THIS run as candidates to avoid intra-run dups.
-        if stored:
-            _set_progress(
-                db, run_id, "clustering",
-                "Organizing opportunities into topic clusters…",
-            )
-        founded: list[dict[str, Any]] = []
-        for opp in stored:
-            try:
-                cid, role = await clusters.assign(
-                    client, db, business_id,
-                    title=opp["title"], keyword=opp.get("keyword"),
-                    angle=opp.get("angle"), extra_candidates=founded,
-                )
-                db.execute(
-                    "update public.opportunities set cluster_id = %s, "
-                    "cluster_role = %s where id = %s",
-                    (cid, role, opp["id"]),
-                )
-                opp["cluster_id"], opp["cluster_role"] = cid, role
-                if role == "pillar" and (c := clusters.get_cluster(db, cid)):
-                    founded.append(c)
-            except Exception:  # noqa: BLE001 — clustering must not fail the scout run
-                log.exception("cluster assignment failed for opp %s", opp["id"])
-
-        # Auto-draft the best, on-threshold opportunities (L3).
-        drafted = 0
-        if cfg.get("autonomy") == "auto_draft":
-            cap = cfg.get("max_drafts_per_run") or 1
-            floor = cfg.get("min_score") or 70
-            top = sorted(stored, key=lambda o: o["score"], reverse=True)
-            for opp in top:
-                if drafted >= cap or opp["score"] < floor:
-                    break
-                _set_progress(
-                    db, run_id, "drafting",
-                    f"Drafting “{opp['title']}” ({drafted + 1}/{cap})…",
-                    drafted=drafted, total=cap,
-                )
-                ok = await auto_draft(client, db, opp)
-                if ok:
-                    drafted += 1
-
-        _set_progress(
-            db, run_id, "done",
-            f"Done — {len(stored)} new opportunit"
-            f"{'y' if len(stored) == 1 else 'ies'}"
-            f"{f', {drafted} drafted' if drafted else ''}.",
-        )
-        db.execute(
-            "update public.scout_runs set status = 'done', drafted = %s where id = %s",
-            (drafted, run_id),
-        )
+        await _discover_and_store(client, db, run_id, business_id, brand, cfg, plan)
     except Exception:  # noqa: BLE001 — record on the run row
         log.exception("scout run %s failed for business %s", run_id, business_id)
         db.execute(
@@ -606,16 +887,10 @@ async def run_scout(
         )
         _set_progress(db, run_id, "failed", "Scout run failed — see server logs.")
     finally:
-        # Roll the schedule forward regardless of outcome (guarded so a failure
-        # here can't mask the original error or stop the run from returning).
-        try:
-            db.execute(
-                "update public.scout_configs set last_run_at = now(), "
-                "next_run_at = now() + %s where business_id = %s",
-                (_cadence_delta(cfg.get("cadence") or "daily"), business_id),
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        # Only a SCHEDULED run advances the cron; a manual "Quick run" leaves the
+        # brand's automatic cadence untouched.
+        if trigger == "schedule":
+            _roll_schedule(db, business_id, cfg.get("cadence"))
     return get_run(db, run_id)
 
 
@@ -638,7 +913,18 @@ async def auto_draft(
     # keyword — researching just the keyword pulls in whatever generic topic ranks
     # for it and the article drifts off the angle.
     topic = opp.get("title") or opp.get("keyword")
-    set_opportunity_status(db, opp_id, "drafting")
+    # Atomically claim the opportunity. The manual route pre-claims to 'queued'; the
+    # scheduled auto-draft loop passes a 'new' opp straight in — either way THIS
+    # compare-and-set is the single gate, so a user click racing the auto-draft loop
+    # can't launch two full draft pipelines (duplicate Exa/LLM spend + an orphaned
+    # second article). A None result means another drafter already has it.
+    claimed = db.fetch_one(
+        "update public.opportunities set status = 'drafting', updated_at = now() "
+        "where id = %s and status in ('new', 'queued') returning id",
+        (opp_id,),
+    )
+    if claimed is None:
+        return False
     _set_opp_progress(
         db, opp_id, "researching",
         "Researching the topic — competitors & the search landscape…",

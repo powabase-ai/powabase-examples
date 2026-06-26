@@ -15,7 +15,6 @@ from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
 from ..services import clusters as svc
 from ..services import scouts as scout_svc
-from ..tasks import spawn
 from .deps import get_db, get_powabase
 
 router = APIRouter(prefix="/api", tags=["clusters"],
@@ -35,20 +34,19 @@ def list_clusters(
     return svc.list_clusters_view(db, business_id)
 
 
-@router.post(
-    "/business-profiles/{business_id}/clusters/backfill",
-    status_code=status.HTTP_202_ACCEPTED,
-)
+@router.post("/business-profiles/{business_id}/clusters/backfill")
 async def backfill_clusters(
     business_id: UUID,
     db: Database = Depends(get_db),
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(require_editor),
 ):
-    """Cluster any published articles that don't have a cluster yet (background)."""
+    """Cluster any not-yet-clustered articles (any status but archived). Runs inline —
+    the unclustered set is bounded (pre-feature articles) — and returns how many were
+    assigned so the UI can report it ("Clustered 3" vs "all already clustered")."""
     assert_brand_access(db, business_id, user)
-    spawn(svc.backfill(pb, db, business_id))
-    return {"status": "started"}
+    assigned = await svc.backfill(pb, db, business_id)
+    return {"assigned": assigned}
 
 
 def _guard_cluster(db: Database, cluster_id: UUID, user: CurrentUser) -> dict:
@@ -80,6 +78,19 @@ def analyze_gaps(
     cluster = _guard_cluster(db, cluster_id, user)
     created = scout_svc.analyze_cluster_gaps(db, cluster["business_id"], cluster_id)
     return {"created": created}
+
+
+@router.delete("/clusters/{cluster_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_cluster(
+    cluster_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Delete a cluster. Its member articles become unclustered (re-clusterable via
+    Backfill); the cluster's index doc is removed from Powabase."""
+    _guard_cluster(db, cluster_id, user)
+    await svc.delete_cluster(pb, db, cluster_id)
 
 
 @router.post("/clusters/{cluster_id}/pillar", response_model=ClusterDetail)

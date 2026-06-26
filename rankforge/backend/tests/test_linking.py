@@ -127,7 +127,8 @@ def test_apply_inserts_link_rescores_and_accepts(monkeypatch):
     db = MagicMock()
     # 1) fetch the suggestion, 2) _set_status ... returning (no brief_id → no brief fetch)
     db.fetch_one.side_effect = [
-        {"id": SID, "article_id": AID, "anchor_text": "headless cms",
+        {"id": SID, "article_id": AID, "target_article_id": TID,
+         "anchor_text": "headless cms",
          "target_url": "https://blog.x.com/guide", "status": "pending"},
         {"id": SID, "status": "accepted"},
     ]
@@ -135,12 +136,14 @@ def test_apply_inserts_link_rescores_and_accepts(monkeypatch):
         linking.gen_svc, "get_article",
         lambda d, aid: {"content_md": "We weigh headless cms options.", "title": "T"},
     )
+    monkeypatch.setattr(linking, "resolve_links", lambda d, b, md, **k: md)
     updates: dict = {}
     monkeypatch.setattr(
         linking.gen_svc, "_update", lambda d, aid, **f: updates.update(f)
     )
     out = linking.apply_suggestion(db, BID, SID)
-    assert "[headless cms](https://blog.x.com/guide)" in updates["content_md"]
+    # The BODY stores a stable ref, not the URL — so the link follows the target's slug.
+    assert f"[headless cms](rf:article/{TID})" in updates["content_md"]
     assert "seo_score" in updates  # re-scored deterministically (no LLM call)
     assert out["status"] == "accepted"
 
@@ -167,6 +170,69 @@ def test_apply_noop_when_not_pending():
         "target_url": "https://blog.x.com/guide", "status": "accepted",
     }
     assert linking.apply_suggestion(db, BID, SID) is None
+
+
+# --- stable internal-link refs → live URLs at render time ---
+def test_resolve_links_replaces_refs_with_canonical(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(
+        linking.brands, "get_profile",
+        lambda d, b: {"url_pattern": "https://blog.x.com/{slug}"},
+    )
+    db.fetch_all.return_value = [
+        {"id": TID, "title": "T", "slug": "headless-guide", "keywords": [],
+         "canonical_url": None},
+    ]
+    out = linking.resolve_links(db, BID, f"See [the guide](rf:article/{TID}) now.")
+    assert out == "See [the guide](https://blog.x.com/headless-guide) now."
+
+
+def test_resolve_links_noop_without_refs():
+    db = MagicMock()
+    assert linking.resolve_links(db, BID, "no internal links here") == (
+        "no internal links here"
+    )
+    db.fetch_all.assert_not_called()
+
+
+def test_resolve_links_falls_back_when_target_missing(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(
+        linking.brands, "get_profile", lambda d, b: {"url_pattern": "https://x/{slug}"}
+    )
+    db.fetch_all.return_value = []  # target deleted
+    out = linking.resolve_links(db, BID, f"x [a](rf:article/{TID}) y")
+    assert f"/p/{TID}" in out
+
+
+def test_mask_restore_round_trips_refs():
+    md = f"intro [a](rf:article/{TID}) and [b](rf:article/{AID}) end"
+    masked, mapping = linking.mask_refs(md)
+    assert "rf:article/" not in masked  # refs hidden from the LLM
+    assert linking.restore_refs(masked, mapping) == md
+
+
+def test_restore_refs_survives_anchor_reword():
+    """The reviser may reword the anchor/prose but keeps the masked token verbatim."""
+    md = f"[x](rf:article/{TID})"
+    masked, mapping = linking.mask_refs(md)
+    rewritten = masked.replace("[x]", "[the related guide]")
+    assert linking.restore_refs(rewritten, mapping) == (
+        f"[the related guide](rf:article/{TID})"
+    )
+
+
+def test_mask_restore_round_trips_with_many_refs():
+    """≥11 refs: sentinel `rfref:1` is a prefix of `rfref:10`/`rfref:11`, so a naive
+    insertion-order restore corrupts the longer tokens. Round-trip must survive."""
+    md = " ".join(
+        f"[link{i}](rf:article/{i:08d}-0000-0000-0000-000000000000)"
+        for i in range(12)
+    )
+    masked, mapping = linking.mask_refs(md)
+    assert len(mapping) == 12
+    assert "rf:article/" not in masked
+    assert linking.restore_refs(masked, mapping) == md
 
 
 # --- cluster-aware linking (structural + gaps) ---
@@ -275,7 +341,7 @@ def test_apply_rejects_a_gap():
 async def test_generate_gap_link_inserts_and_accepts(monkeypatch):
     db = MagicMock()
     db.fetch_one.side_effect = [
-        {"id": SID, "article_id": AID, "anchor_text": None,
+        {"id": SID, "article_id": AID, "target_article_id": TID, "anchor_text": None,
          "target_url": "https://b.com/guide", "target_title": "Guide",
          "status": "pending"},
         {"id": SID, "status": "accepted"},
@@ -286,6 +352,7 @@ async def test_generate_gap_link_inserts_and_accepts(monkeypatch):
                         "title": "T"},
     )
     monkeypatch.setattr(linking, "_ensure_linker", AsyncMock(return_value="lk"))
+    monkeypatch.setattr(linking, "resolve_links", lambda d, b, md, **k: md)
     client = MagicMock()
     client.run_agent = AsyncMock(
         return_value={"content": "For the basics, see [the guide](https://b.com/guide)."}
@@ -293,7 +360,8 @@ async def test_generate_gap_link_inserts_and_accepts(monkeypatch):
     updates: dict = {}
     monkeypatch.setattr(linking.gen_svc, "_update", lambda d, aid, **f: updates.update(f))
     out = await linking.generate_gap_link(client, db, BID, SID)
-    assert "[the guide](https://b.com/guide)" in updates["content_md"]
+    # The model's URL is swapped for a stable ref before storing.
+    assert f"[the guide](rf:article/{TID})" in updates["content_md"]
     assert "seo_score" in updates  # re-scored deterministically
     assert out["status"] == "accepted"
 

@@ -401,6 +401,10 @@ def _article_context(
 async def _revise_once(
     client: PowabaseClient, agent_id: str, md: str, issues: list[str], excerpts: str
 ) -> str:
+    from . import linking  # local: avoid import cycle
+
+    # Mask internal-link refs so the rewrite can't mangle/drop them; restore after.
+    md, refmap = linking.mask_refs(md)
     issue_text = "\n".join(f"- {i}" for i in issues[:14])
     msg = (
         "Revise the article below into an improved full article.\n\n"
@@ -418,7 +422,7 @@ async def _revise_once(
     res = await client.run_agent_collect(agent_id, msg)
     if res.get("error"):
         raise RuntimeError(f"revision failed: {res['error']}")
-    return (res.get("content") or "").strip()
+    return linking.restore_refs((res.get("content") or "").strip(), refmap)
 
 
 def _step(db: Database, article_id: UUID, i: int, step: str, total: int) -> None:
@@ -542,6 +546,10 @@ async def _revise_for_voice(
 ) -> str:
     """Rewrite the whole article against the editor's notes — for human-ness, while
     preserving everything objective (facts, citations, brand links, keywords, length)."""
+    from . import linking  # local: avoid import cycle
+
+    # Mask internal-link refs so the rewrite can't mangle/drop them; restore after.
+    md, refmap = linking.mask_refs(md)
     note_text = "\n".join(
         f'- At "{(n.get("quote") or "")[:80]}": {n.get("problem", "")}'
         f' → {n.get("fix", "")}'
@@ -566,7 +574,7 @@ async def _revise_for_voice(
     res = await client.run_agent_collect(reviser_id, msg)
     if res.get("error"):
         raise RuntimeError(f"voice revision failed: {res['error']}")
-    return (res.get("content") or "").strip()
+    return linking.restore_refs((res.get("content") or "").strip(), refmap)
 
 
 async def _editorial_loop(

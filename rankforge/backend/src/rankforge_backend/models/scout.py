@@ -8,6 +8,21 @@ from pydantic import BaseModel, Field
 
 Cadence = Literal["twice_daily", "daily", "weekly"]
 Autonomy = Literal["suggest", "auto_draft"]
+PlanSource = Literal["news", "youtube", "social", "web"]
+
+
+class PlanQuery(BaseModel):
+    query: str
+    source: PlanSource = "web"
+    rationale: str | None = None
+
+
+class ScoutPlan(BaseModel):
+    """The trending search queries a run will execute — reviewable/editable while the
+    run is still 'planned'."""
+    themes: list[str] = Field(default_factory=list)
+    queries: list[PlanQuery] = Field(default_factory=list)
+    edited: bool = False
 
 
 class ScoutConfig(BaseModel):
@@ -44,6 +59,7 @@ class ScoutRun(BaseModel):
     drafted: int = 0
     error: str | None = None
     progress: dict = Field(default_factory=dict)
+    plan: ScoutPlan | None = None
     created_at: datetime
 
 

@@ -7,6 +7,7 @@ from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
+from rankforge_backend.models.profile import CurrentUser
 from rankforge_backend.routes.business_profiles import get_db
 from rankforge_backend.routes.research import get_powabase
 from rankforge_backend.services import generation as svc
@@ -176,6 +177,41 @@ def test_generate_article_unknown_brief_404(monkeypatch):
     monkeypatch.setattr(svc, "get_brief", lambda db, bid: None)
     resp = make_client().post("/api/articles", json={"brief_id": BRIEF_ID})
     assert resp.status_code == 404
+
+
+def test_delete_article_204(monkeypatch):
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: ARTICLE)
+    removed = MagicMock(return_value=True)
+    monkeypatch.setattr(svc, "delete_article", removed)
+    resp = make_client().delete(f"/api/articles/{ARTICLE['id']}")
+    assert resp.status_code == 204
+    removed.assert_called_once()
+
+
+def test_delete_article_requires_editor(monkeypatch):
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: ARTICLE)
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    resp = TestClient(with_auth(app, writer)).delete(f"/api/articles/{ARTICLE['id']}")
+    assert resp.status_code == 403
+
+
+def test_delete_article_recovers_drafted_opportunities():
+    """A 'drafted' opportunity tied to the article is returned to the inbox before the
+    row is deleted (one transaction), so it isn't left stranded with a dead link."""
+    db = MagicMock()
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = {"id": ARTICLE["id"]}
+    db.connection.return_value.__enter__.return_value = conn
+    assert svc.delete_article(db, ARTICLE["id"]) is True
+    opp_sql = conn.execute.call_args_list[0].args[0].lower()
+    assert "update public.opportunities" in opp_sql
+    assert "status = 'new'" in opp_sql
+    assert "where article_id = %s and status = 'drafted'" in opp_sql
+    del_sql = conn.execute.call_args_list[1].args[0].lower()
+    assert "delete from public.articles" in del_sql
 
 
 def test_update_article_patches():

@@ -14,6 +14,13 @@ from rankforge_backend.services import scouts as svc
 
 BID = "11111111-1111-1111-1111-111111111111"
 OID = "77777777-7777-7777-7777-777777777777"
+RID = "99999999-9999-9999-9999-999999999999"
+PLANNED_RUN = {
+    "id": RID, "business_id": BID, "status": "planned", "trigger": "manual",
+    "found": 0, "drafted": 0, "error": None,
+    "progress": {"phase": "planning", "message": "…"}, "plan": None,
+    "created_at": "2026-06-20T00:00:00Z",
+}
 
 BRAND_TERMS = svc._brand_terms(
     {
@@ -192,6 +199,34 @@ def _client(db=None, user: CurrentUser | None = None) -> TestClient:
     return TestClient(app)
 
 
+def test_delete_opportunity_route(monkeypatch):
+    monkeypatch.setattr(svc, "get_opportunity", lambda d, oid: OPP)
+    removed = MagicMock(return_value=True)
+    monkeypatch.setattr(svc, "delete_opportunity", removed)
+    resp = _client().delete(f"/api/opportunities/{OID}")
+    assert resp.status_code == 204
+    removed.assert_called_once()
+
+
+def test_delete_opportunity_requires_editor(monkeypatch):
+    monkeypatch.setattr(svc, "get_opportunity", lambda d, oid: OPP)
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).delete(f"/api/opportunities/{OID}")
+    assert resp.status_code == 403
+
+
+def test_delete_opportunity_blocked_while_drafting(monkeypatch):
+    """Deleting an opportunity mid-draft would orphan the article being created."""
+    monkeypatch.setattr(
+        svc, "get_opportunity", lambda d, oid: {**OPP, "status": "drafting"}
+    )
+    removed = MagicMock(return_value=True)
+    monkeypatch.setattr(svc, "delete_opportunity", removed)
+    resp = _client().delete(f"/api/opportunities/{OID}")
+    assert resp.status_code == 409
+    removed.assert_not_called()
+
+
 def test_get_config_returns_existing(monkeypatch):
     monkeypatch.setattr(svc, "get_config", lambda db, bid: CFG)
     resp = _client().get(f"/api/scouts/config?business_id={BID}")
@@ -256,6 +291,27 @@ async def test_auto_draft_bails_on_failed_research(monkeypatch):
     assert seen[-1] == "new"
 
 
+async def test_auto_draft_refuses_when_already_claimed(monkeypatch):
+    """The CAS claim is the single gate: if another drafter already has it (claim
+    returns None), auto_draft bails before spending any research/LLM budget."""
+    db = MagicMock()
+    db.fetch_one.return_value = None  # compare-and-set lost → already drafting/drafted
+    called = False
+
+    def _boom(*a, **k):
+        nonlocal called
+        called = True
+        return {"id": "r1"}
+
+    monkeypatch.setattr(svc.research_svc, "create_research_run", _boom)
+    ok = await svc.auto_draft(
+        MagicMock(), db,
+        {"id": "o1", "business_id": BID, "keyword": "k", "title": "t"},
+    )
+    assert ok is False
+    assert called is False  # never started the pipeline
+
+
 def test_run_now_202(monkeypatch):
     async def fake_run(*a, **k):
         return None
@@ -264,6 +320,119 @@ def test_run_now_202(monkeypatch):
     resp = _client().post(f"/api/scouts/run?business_id={BID}")
     assert resp.status_code == 202
     assert resp.json()["status"] == "started"
+
+
+# --- two-phase plan → edit → execute ---
+def test_normalize_plan_sanitizes():
+    out = svc._normalize_plan({
+        "themes": ["a", "   ", "b"],
+        "queries": [
+            {"query": "  hot topic ", "source": "news", "rationale": "fresh"},
+            {"query": "", "source": "web"},          # dropped (empty)
+            {"query": "vid", "source": "bogus"},      # invalid source → web
+            "not a dict",                              # ignored
+        ],
+        "edited": True,
+    })
+    assert out["themes"] == ["a", "b"]
+    assert [q["query"] for q in out["queries"]] == ["hot topic", "vid"]
+    assert out["queries"][0]["source"] == "news"
+    assert out["queries"][1]["source"] == "web"
+    assert out["edited"] is True
+
+
+def test_update_plan_guards_on_planned_status():
+    db = MagicMock()
+    db.fetch_one.return_value = {**PLANNED_RUN}
+    out = svc.update_plan(db, RID, {"queries": [{"query": "q", "source": "web"}]})
+    assert out is not None
+    sql = db.fetch_one.call_args.args[0].lower()
+    assert "status = 'planned'" in sql  # only editable before it runs
+
+
+def test_plan_route_returns_planned_run(monkeypatch):
+    monkeypatch.setattr(svc, "start_plan", lambda db, bid, **k: PLANNED_RUN)
+
+    async def fake_gen(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc, "generate_plan_for_run", fake_gen)
+    resp = _client().post(f"/api/scouts/plan?business_id={BID}")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "planned"
+
+
+def test_plan_route_requires_editor():
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).post(f"/api/scouts/plan?business_id={BID}")
+    assert resp.status_code == 403
+
+
+def test_update_plan_route_editor(monkeypatch):
+    monkeypatch.setattr(svc, "get_run", lambda db, rid: {**PLANNED_RUN})
+    monkeypatch.setattr(
+        svc, "update_plan",
+        lambda db, rid, plan: {**PLANNED_RUN, "plan": {**plan, "edited": True}},
+    )
+    resp = _client().patch(
+        f"/api/scouts/runs/{RID}/plan",
+        json={"themes": [], "queries": [{"query": "x", "source": "news"}]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["plan"]["edited"] is True
+
+
+def test_update_plan_route_409_when_started(monkeypatch):
+    monkeypatch.setattr(svc, "get_run", lambda db, rid: {**PLANNED_RUN})
+    monkeypatch.setattr(svc, "update_plan", lambda db, rid, plan: None)  # already running
+    resp = _client().patch(f"/api/scouts/runs/{RID}/plan", json={"queries": []})
+    assert resp.status_code == 409
+
+
+def test_execute_route_202_when_planned(monkeypatch):
+    monkeypatch.setattr(svc, "get_run", lambda db, rid: {**PLANNED_RUN})
+
+    async def fake_exec(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc, "execute_run", fake_exec)
+    resp = _client().post(f"/api/scouts/runs/{RID}/execute")
+    assert resp.status_code == 202
+
+
+def test_execute_route_409_when_not_planned(monkeypatch):
+    monkeypatch.setattr(svc, "get_run", lambda db, rid: {**PLANNED_RUN, "status": "done"})
+    resp = _client().post(f"/api/scouts/runs/{RID}/execute")
+    assert resp.status_code == 409
+
+
+def test_start_plan_clears_prior_planned():
+    db = MagicMock()
+    db.fetch_one.return_value = PLANNED_RUN  # ensure_config existing + insert returning
+    svc.start_plan(db, BID)
+    sqls = " ".join(c.args[0].lower() for c in db.execute.call_args_list)
+    assert "delete from public.scout_runs" in sqls and "status = 'planned'" in sqls
+
+
+async def test_execute_run_claims_atomically(monkeypatch):
+    """A lost compare-and-set (someone already started the run) must NOT re-discover."""
+    db = MagicMock()
+    monkeypatch.setattr(
+        svc, "get_run", lambda d, rid: {**PLANNED_RUN, "plan": {"queries": []}}
+    )
+    monkeypatch.setattr(svc, "ensure_config", lambda d, b: CFG)
+    monkeypatch.setattr(svc.brands, "get_profile", lambda d, b: {"name": "X"})
+    db.fetch_one.return_value = None  # claim lost (status no longer 'planned')
+    discovered: list[int] = []
+
+    async def fake_disc(*a, **k):
+        discovered.append(1)
+
+    monkeypatch.setattr(svc, "_discover_and_store", fake_disc)
+    await svc.execute_run(MagicMock(), db, RID)
+    assert discovered == []  # didn't win the claim → no duplicate run
+    claim_sql = db.fetch_one.call_args.args[0].lower()
+    assert "status = 'running'" in claim_sql and "status = 'planned'" in claim_sql
 
 
 def test_list_opportunities(monkeypatch):

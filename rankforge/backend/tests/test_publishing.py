@@ -54,6 +54,8 @@ def test_render_markdown_has_frontmatter():
         "https://10.0.0.1/hook",
         "https://192.168.1.5/hook",
         "https://169.254.169.254/latest/meta-data",
+        "https://100.64.0.1/hook",  # CGNAT (100.64/10) — only is_global rejects this
+        "http://api.internal/hook",  # internal name short-circuit
         "ftp://example.com/x",
         "https://",
     ],
@@ -110,8 +112,9 @@ def test_public_article_renders_fresh_from_markdown(monkeypatch):
     monkeypatch.setattr(
         svc, "get_published",
         lambda db, aid: {
-            "id": AID, "title": "T", "slug": "t", "meta_title": "T",
-            "meta_description": "d", "content_md": "# Live Heading\n\nbody",
+            "id": AID, "business_id": AID, "title": "T", "slug": "t",
+            "meta_title": "T", "meta_description": "d",
+            "content_md": "# Live Heading\n\nbody",
             "json_ld": {"@type": "BlogPosting"}, "updated_at": "2026-06-20T00:00:00Z",
         },
     )
@@ -134,6 +137,55 @@ def test_publish_requires_editor(monkeypatch):
     resp = TestClient(app).post(
         f"/api/articles/{AID}/publish", json={"target_type": "export"}
     )
+    assert resp.status_code == 403
+
+
+CID = "88888888-8888-8888-8888-888888888888"
+
+
+def test_unpublish_pillar_clears_cluster_pillar_and_detaches(monkeypatch):
+    db = MagicMock()
+    conn = MagicMock()
+    db.connection.return_value.__enter__.return_value = conn
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        MagicMock(side_effect=[
+            {"id": AID, "business_id": BID, "cluster_id": CID, "cluster_role": "pillar"},
+            {"id": AID, "status": "draft", "cluster_id": None, "cluster_role": None},
+        ]),
+    )
+    out = svc.unpublish(db, AID)
+    assert out["status"] == "draft"
+    # one transaction: vacate the cluster's pillar slot + revert/detach the article
+    assert conn.execute.call_count == 2
+    sql = " ".join(c.args[0].lower() for c in conn.execute.call_args_list)
+    assert "content_clusters set pillar_article_id = null" in sql
+    assert "status = 'draft'" in sql and "cluster_id = null" in sql
+
+
+def test_unpublish_member_detaches_without_touching_pillar(monkeypatch):
+    db = MagicMock()
+    conn = MagicMock()
+    db.connection.return_value.__enter__.return_value = conn
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        MagicMock(side_effect=[
+            {"id": AID, "business_id": BID, "cluster_id": CID, "cluster_role": "member"},
+            {"id": AID, "status": "draft"},
+        ]),
+    )
+    svc.unpublish(db, AID)
+    assert conn.execute.call_count == 1  # no pillar clear for a member
+
+
+def test_unpublish_route_requires_editor():
+    from rankforge_backend.models.profile import CurrentUser
+
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    with_auth(app, CurrentUser(id=AID, role="writer", org_id=ADMIN_ORG))
+    resp = TestClient(app).post(f"/api/articles/{AID}/unpublish")
     assert resp.status_code == 403
 
 

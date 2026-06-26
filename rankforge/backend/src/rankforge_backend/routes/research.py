@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..auth import assert_brand_access, get_current_user
+from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
 from ..models.profile import CurrentUser
 from ..models.research import ResearchRun, ResearchRunCreate, ResearchSource
@@ -90,3 +90,19 @@ def get_research(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "research run not found")
     assert_brand_access(db, row["business_id"], user)
     return row
+
+
+@router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_research(
+    run_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Delete a research run and its captured sources, deleting each scraped page's
+    Powabase Source too (unless another run or brand material still uses it)."""
+    run = svc.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "research run not found")
+    assert_brand_access(db, run["business_id"], user)
+    await svc.delete_run(pb, db, run_id)

@@ -177,6 +177,8 @@ export const researchApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  remove: (id: string) =>
+    request<void>(`/api/research/${id}`, { method: "DELETE" }),
 };
 
 export const TERMINAL_RESEARCH: ResearchStatus[] = ["done", "failed"];
@@ -456,6 +458,8 @@ export const articlesApi = {
       method: "PATCH",
       body: JSON.stringify(data),
     }),
+  remove: (id: string) =>
+    request<void>(`/api/articles/${id}`, { method: "DELETE" }),
   versions: (id: string) =>
     request<ArticleVersion[]>(`/api/articles/${id}/versions`),
   restoreVersion: (id: string, versionId: string) =>
@@ -645,15 +649,28 @@ export interface ScoutRunProgress {
   total?: number;
 }
 
+export type PlanSource = "news" | "youtube" | "social" | "web";
+export interface PlanQuery {
+  query: string;
+  source: PlanSource;
+  rationale?: string | null;
+}
+export interface ScoutPlan {
+  themes: string[];
+  queries: PlanQuery[];
+  edited: boolean;
+}
+
 export interface ScoutRun {
   id: string;
   business_id: string;
-  status: "running" | "done" | "failed";
+  status: "planned" | "running" | "done" | "failed";
   trigger: "schedule" | "manual";
   found: number;
   drafted: number;
   error?: string | null;
   progress?: ScoutRunProgress;
+  plan?: ScoutPlan | null;
   created_at: string;
 }
 
@@ -693,6 +710,21 @@ export const scoutsApi = {
     }),
   runs: (businessId: string) =>
     request<ScoutRun[]>(`/api/scouts/runs?business_id=${businessId}`),
+  // Two-phase manual run: plan → review/edit → execute.
+  plan: (businessId: string) =>
+    request<ScoutRun>(`/api/scouts/plan?business_id=${businessId}`, {
+      method: "POST",
+    }),
+  getRun: (runId: string) => request<ScoutRun>(`/api/scouts/runs/${runId}`),
+  updatePlan: (runId: string, plan: ScoutPlan) =>
+    request<ScoutRun>(`/api/scouts/runs/${runId}/plan`, {
+      method: "PATCH",
+      body: JSON.stringify(plan),
+    }),
+  execute: (runId: string) =>
+    request<{ status: string }>(`/api/scouts/runs/${runId}/execute`, {
+      method: "POST",
+    }),
 };
 
 export const opportunitiesApi = {
@@ -704,6 +736,8 @@ export const opportunitiesApi = {
     request<Opportunity>(`/api/opportunities/${id}/dismiss`, { method: "POST" }),
   restore: (id: string) =>
     request<Opportunity>(`/api/opportunities/${id}/restore`, { method: "POST" }),
+  remove: (id: string) =>
+    request<void>(`/api/opportunities/${id}`, { method: "DELETE" }),
 };
 
 // --- Content clusters (topical authority) ---
@@ -749,10 +783,12 @@ export const clustersApi = {
       { method: "POST" }
     ),
   backfill: (businessId: string) =>
-    request<{ status: string }>(
+    request<{ assigned: number }>(
       `/api/business-profiles/${businessId}/clusters/backfill`,
       { method: "POST" }
     ),
+  remove: (clusterId: string) =>
+    request<void>(`/api/clusters/${clusterId}`, { method: "DELETE" }),
 };
 
 // --- Publishing / export (M8) ---
@@ -777,6 +813,8 @@ export const publishApi = {
     }),
   publications: (id: string) =>
     request<Publication[]>(`/api/articles/${id}/publications`),
+  unpublish: (id: string) =>
+    request<Article>(`/api/articles/${id}/unpublish`, { method: "POST" }),
 };
 
 /** Export an article as raw text (markdown/html) with the auth header attached.

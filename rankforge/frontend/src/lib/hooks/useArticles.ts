@@ -45,6 +45,19 @@ export function useGenerateArticle(businessId: string) {
   });
 }
 
+export function useDeleteArticle(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => articlesApi.remove(id),
+    onSuccess: (_d, id) => {
+      qc.invalidateQueries({ queryKey: ["articles", businessId] });
+      qc.removeQueries({ queryKey: ["article", id] });
+      // A deleted article may have been a cluster pillar/member — refresh clusters.
+      qc.invalidateQueries({ queryKey: ["clusters", businessId] });
+    },
+  });
+}
+
 export function useScoreArticle(id: string) {
   const qc = useQueryClient();
   return useMutation({

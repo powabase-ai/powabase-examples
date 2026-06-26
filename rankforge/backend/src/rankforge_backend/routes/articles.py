@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..auth import assert_brand_access, get_current_user
+from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
 from ..models.article import (
     Article,
@@ -236,6 +236,20 @@ def update_article(
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     return row
+
+
+@router.delete("/{article_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_article(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Permanently delete an article and everything attached to it (versions,
+    comments, internal-link suggestions, broken-link findings, publication records).
+    If it was a cluster's pillar, the cluster is left pillar-less, not removed."""
+    _guard_article(db, article_id, user)
+    if not svc.delete_article(db, article_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
 
 
 @router.get("/{article_id}/versions", response_model=list[ArticleVersion])

@@ -554,7 +554,13 @@ async def score_and_store(
         return None
     brief = brief_svc.get_brief(db, article["brief_id"]) if article.get("brief_id") else {}
     brief = brief or {}
-    md = article.get("content_md") or ""
+    # Resolve internal-link refs to real URLs so link signals are counted (and the LLM
+    # judges see real links, not `rf:article/{id}` tokens). Local import avoids a cycle.
+    from . import linking
+
+    md = linking.resolve_links(
+        db, article["business_id"], article.get("content_md") or ""
+    )
 
     seo = score_seo(md, article.get("meta_title") or article.get("title") or "",
                     article.get("meta_description"), brief)

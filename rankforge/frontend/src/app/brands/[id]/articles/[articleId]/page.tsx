@@ -2,6 +2,7 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   History,
@@ -13,6 +14,7 @@ import {
   Save,
   Share2,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -34,6 +36,7 @@ import { useAuth } from "@/lib/auth/AuthProvider";
 import {
   useArticle,
   useArticleVersions,
+  useDeleteArticle,
   useOptimizeArticle,
   useRefineArticle,
   useRestoreVersion,
@@ -50,6 +53,16 @@ import { ARTICLE_STATUSES, canApprove } from "@/lib/api";
 import type { Article, GroundingReport, Score, ScoreSignal } from "@/lib/api";
 
 const GATED_STATUSES = new Set(["approved", "published"]);
+
+// Internal links are stored as stable refs (rf:article/{id}) and resolved to the live
+// blog URL server-side on export/publish. In the in-app preview, point them at the
+// cited article so the editor can click through.
+function resolveInternalRefs(md: string, brandId: string): string {
+  return md.replace(
+    /rf:article\/([0-9a-fA-F-]{36})/g,
+    `/brands/${brandId}/articles/$1`
+  );
+}
 
 const PHASE_LABEL: Record<string, string> = {
   grounding: "Grounding in research sources…",
@@ -278,15 +291,34 @@ export default function ArticleView({
   params: Promise<{ id: string; articleId: string }>;
 }) {
   const { id, articleId } = use(params);
+  const router = useRouter();
   const { data: a, isLoading } = useArticle(articleId);
   const optimize = useOptimizeArticle(articleId);
   const refine = useRefineArticle(articleId);
   const retry = useRetryArticle(articleId);
   const update = useUpdateArticle(articleId);
+  const del = useDeleteArticle(id);
   const versions = useArticleVersions(articleId);
   const restore = useRestoreVersion(articleId);
   const { profile } = useAuth();
   const mayApprove = canApprove(profile?.role);
+
+  function onDeleteArticle() {
+    if (
+      !window.confirm(
+        `Permanently delete “${a?.title ?? "this article"}”? This removes its ` +
+          "versions, comments, internal links, and publication records."
+      )
+    )
+      return;
+    del.mutate(articleId, {
+      onSuccess: () => {
+        toast.success("Article deleted");
+        router.push(`/brands/${id}/articles`);
+      },
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+    });
+  }
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [tab, setTab] = useState<
@@ -552,6 +584,22 @@ export default function ArticleView({
                 >
                   <Share2 /> Publish
                 </Button>
+                {mayApprove && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-muted-foreground hover:text-destructive"
+                    onClick={onDeleteArticle}
+                    disabled={del.isPending}
+                    title="Delete this article"
+                  >
+                    {del.isPending ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Trash2 />
+                    )}
+                  </Button>
+                )}
               </div>
             )}
             {editing && (
@@ -655,7 +703,7 @@ export default function ArticleView({
               ) : (
                 a.content_md && (
                   <article className="mt-8">
-                    <Markdown>{a.content_md}</Markdown>
+                    <Markdown>{resolveInternalRefs(a.content_md, id)}</Markdown>
                   </article>
                 )
               )}
@@ -670,6 +718,7 @@ export default function ArticleView({
           open={showPublish}
           onOpenChange={setShowPublish}
           articleId={articleId}
+          brandId={id}
           slug={a.slug}
           published={a.status === "published"}
         />

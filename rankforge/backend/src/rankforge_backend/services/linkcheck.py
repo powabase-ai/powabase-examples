@@ -35,6 +35,9 @@ _COLUMNS = (
 _LINK_RE = re.compile(r"\[([^\]]*)\]\(\s*<?([^\s)>]+)>?\s*\)")
 _FENCED = re.compile(r"```.*?```", re.S)
 _INTERNAL_RE = re.compile(r"^/p/([0-9a-fA-F-]{36})/?$")
+# Internal-link refs (resolved to live URLs at render time) — check the TARGET's
+# integrity (exists + published), not an HTTP URL that may not be live on the blog yet.
+_REF_RE = re.compile(r"^rf:article/([0-9a-fA-F-]{36})$")
 
 _CHECK_CONCURRENCY = 6
 _TIMEOUT = 10.0
@@ -149,9 +152,11 @@ async def check_article(
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as client:
         async def _one(url: str, anchor: str) -> None:
-            im = _INTERNAL_RE.match(url)
-            if im:
-                reason, status, kind = _internal_reason(db, im.group(1)), None, "internal"
+            internal = _INTERNAL_RE.match(url) or _REF_RE.match(url)
+            if internal:
+                reason, status, kind = (
+                    _internal_reason(db, internal.group(1)), None, "internal",
+                )
             elif url.startswith(("http://", "https://")):
                 async with sem:
                     status, reason = await _external_reason(client, url)

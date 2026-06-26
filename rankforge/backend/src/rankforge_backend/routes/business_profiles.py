@@ -13,6 +13,7 @@ from ..models.business import (
 )
 from ..models.profile import CurrentUser
 from ..services import business_profiles as svc
+from ..services import source_refs
 from .deps import get_db, get_powabase  # re-exported for callers/tests
 
 __all__ = ["router", "get_db", "get_powabase"]
@@ -80,11 +81,23 @@ async def delete_business_profile(
     brand = svc.get_profile(db, profile_id)
     if brand is None or brand.get("org_id") != user.org_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "business profile not found")
-    # Best-effort: delete the brand's grounding KB so it doesn't dangle in Powabase.
+    # Best-effort Powabase cleanup BEFORE the cascade drops the tracking rows:
+    #  - delete the brand's KBs (grounding, materials, cluster index), and
+    #  - delete the Sources only THIS brand uploaded (shared ones are left for the
+    #    other workspaces). Otherwise the cascade removes the rows but leaks the
+    #    project-wide Sources in Powabase.
     pb = request.app.state.powabase
-    if pb and brand.get("brand_kb_id"):
-        try:
-            await pb.delete_kb(brand["brand_kb_id"])
-        except Exception:  # noqa: BLE001 — cleanup is best-effort
-            pass
+    if pb:
+        for kb_col in ("brand_kb_id", "materials_kb_id", "cluster_kb_id"):
+            kb_id = brand.get(kb_col)
+            if kb_id:
+                try:
+                    await pb.delete_kb(kb_id)
+                except Exception:  # noqa: BLE001 — cleanup is best-effort
+                    pass
+        for sid in source_refs.brand_exclusive_source_ids(db, profile_id):
+            try:
+                await pb.delete_source(sid)
+            except Exception:  # noqa: BLE001 — cleanup is best-effort
+                pass
     svc.delete_profile(db, profile_id, user.org_id)

@@ -2,14 +2,62 @@
 
 import { use, useState } from "react";
 import Link from "next/link";
-import { Loader2, PenLine, Search } from "lucide-react";
+import { Loader2, PenLine, Search, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
-import { useArticles } from "@/lib/hooks/useArticles";
-import { ARTICLE_STATUSES, type ArticleStatus, type ArticleSummary } from "@/lib/api";
+import { useArticles, useDeleteArticle } from "@/lib/hooks/useArticles";
+import { useAuth } from "@/lib/auth/AuthProvider";
+import {
+  ARTICLE_STATUSES,
+  canApprove,
+  type ArticleStatus,
+  type ArticleSummary,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+function DeleteArticleButton({
+  brandId,
+  article,
+}: {
+  brandId: string;
+  article: ArticleSummary;
+}) {
+  const del = useDeleteArticle(brandId);
+  return (
+    <button
+      type="button"
+      title="Delete article"
+      onClick={(e) => {
+        // The row is a Link — don't navigate when deleting.
+        e.preventDefault();
+        e.stopPropagation();
+        if (
+          !window.confirm(
+            `Permanently delete “${article.title}”? This removes its versions, ` +
+              "comments, internal links, and any publication records."
+          )
+        )
+          return;
+        del.mutate(article.id, {
+          onSuccess: () => toast.success("Article deleted"),
+          onError: (err) =>
+            toast.error(err instanceof Error ? err.message : "Failed"),
+        });
+      }}
+      disabled={del.isPending}
+      className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-destructive"
+    >
+      {del.isPending ? (
+        <Loader2 className="size-4 animate-spin" />
+      ) : (
+        <Trash2 className="size-4" />
+      )}
+    </button>
+  );
+}
 
 function GenBadge({ a }: { a: ArticleSummary }) {
   if (a.generation_status === "done")
@@ -33,6 +81,8 @@ export default function ArticlesList({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const { profile } = useAuth();
+  const canEdit = canApprove(profile?.role);
   const { data: articles, isLoading } = useArticles(id);
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<ArticleStatus | "all">("all");
@@ -105,9 +155,12 @@ export default function ArticlesList({
                     ) : null}
                   </div>
                 </div>
-                <span className="shrink-0 rounded bg-secondary px-2 py-0.5 text-xs capitalize text-muted-foreground">
-                  {a.status.replace(/_/g, " ")}
-                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="rounded bg-secondary px-2 py-0.5 text-xs capitalize text-muted-foreground">
+                    {a.status.replace(/_/g, " ")}
+                  </span>
+                  {canEdit && <DeleteArticleButton brandId={id} article={a} />}
+                </div>
               </CardContent>
             </Card>
           </Link>

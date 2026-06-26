@@ -11,7 +11,13 @@ from ..auth import (
 )
 from ..db import Database
 from ..models.profile import CurrentUser
-from ..models.scout import Opportunity, ScoutConfig, ScoutConfigUpdate, ScoutRun
+from ..models.scout import (
+    Opportunity,
+    ScoutConfig,
+    ScoutConfigUpdate,
+    ScoutPlan,
+    ScoutRun,
+)
 from ..powabase import PowabaseClient
 from ..ratelimit import rate_limit
 from ..services import scouts as svc
@@ -78,6 +84,73 @@ def list_scout_runs(
     return svc.list_runs(db, business_id)
 
 
+@router.get("/scouts/runs/{run_id}", response_model=ScoutRun)
+def get_scout_run(
+    run_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    run = svc.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scout run not found")
+    assert_brand_access(db, run["business_id"], user)
+    return run
+
+
+# --- two-phase manual run: plan → review/edit → execute ---
+@router.post("/scouts/plan", response_model=ScoutRun)
+async def plan_scout(
+    business_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Start a Search Plan: research trending queries the user can review/edit before
+    running. Returns the 'planned' run immediately; poll it until the plan appears."""
+    assert_brand_access(db, business_id, user)
+    run = svc.start_plan(db, business_id, trigger="manual")
+    spawn(svc.generate_plan_for_run(pb, db, run["id"]))
+    return run
+
+
+@router.patch("/scouts/runs/{run_id}/plan", response_model=ScoutRun)
+def update_scout_plan(
+    run_id: UUID,
+    payload: ScoutPlan,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Replace a planned run's Search Plan with the user's edits (only while planned)."""
+    run = svc.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scout run not found")
+    assert_brand_access(db, run["business_id"], user)
+    updated = svc.update_plan(db, run_id, payload.model_dump())
+    if updated is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "this run has already started — its plan is locked"
+        )
+    return updated
+
+
+@router.post("/scouts/runs/{run_id}/execute", status_code=status.HTTP_202_ACCEPTED)
+async def execute_scout_run(
+    run_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Run a planned (optionally edited) Search Plan. Poll the run / opportunities."""
+    run = svc.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scout run not found")
+    assert_brand_access(db, run["business_id"], user)
+    if run["status"] != "planned":
+        raise HTTPException(status.HTTP_409_CONFLICT, "run already started")
+    spawn(svc.execute_run(pb, db, run_id))
+    return {"status": "started", "run_id": str(run_id)}
+
+
 # --- opportunity inbox ---
 @router.get("/opportunities", response_model=list[Opportunity])
 def list_opportunities(
@@ -125,6 +198,28 @@ def dismiss_opportunity(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "opportunity not found")
     assert_brand_access(db, opp["business_id"], user)
     return svc.set_opportunity_status(db, opp_id, "dismissed")
+
+
+@router.delete("/opportunities/{opp_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_opportunity(
+    opp_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Permanently remove an opportunity from the inbox. (Dismiss keeps it for restore;
+    this deletes it outright.)"""
+    opp = svc.get_opportunity(db, opp_id)
+    if opp is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "opportunity not found")
+    assert_brand_access(db, opp["business_id"], user)
+    # A draft pipeline is mid-flight for this opportunity and is about to create an
+    # article for it — deleting now would orphan that article. Make the caller wait.
+    if opp["status"] in ("queued", "drafting"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "can't delete an opportunity while it's being drafted",
+        )
+    svc.delete_opportunity(db, opp_id)
 
 
 @router.post("/opportunities/{opp_id}/restore", response_model=Opportunity)

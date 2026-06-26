@@ -50,6 +50,18 @@ export function useRunResearch(businessId: string) {
   });
 }
 
+export function useDeleteResearchRun(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => researchApi.remove(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["research", businessId] });
+      // Its captured sources go away with it — refresh the sources library too.
+      qc.invalidateQueries({ queryKey: ["sources", businessId] });
+    },
+  });
+}
+
 export function useSourceMarkdown(sourceId: string | null) {
   return useQuery({
     queryKey: ["source-markdown", sourceId],

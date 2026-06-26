@@ -16,9 +16,15 @@ from typing import Any
 from uuid import UUID
 
 from ..db import Database
-from ..powabase import PowabaseClient
+from ..powabase import (
+    EXTRACTION_TERMINAL,
+    PowabaseClient,
+    indexed_source_id,
+    wait_for_kb_index,
+)
 from ..util import extract_json
 from . import business_profiles as brands
+from . import source_refs
 from .agents import ensure_agent
 
 log = logging.getLogger("rankforge.clusters")
@@ -27,8 +33,6 @@ _COLUMNS = (
     "id, business_id, label, theme, pillar_article_id, pillar_locked, "
     "index_doc_id, created_at, updated_at"
 )
-_EXTRACTION_TERMINAL = {"extracted", "attention_required", "failed", "cancelled"}
-_INDEX_TERMINAL = {"indexed", "failed", "cancelled"}
 
 # full_document: each cluster's pillar summary is ONE short doc → one embedding, so
 # search returns nearest CLUSTERS (not chunk fragments). The docs are tiny, so the
@@ -86,19 +90,13 @@ async def _index_doc(
             return None
         for _ in range(20):  # tiny doc — extraction is near-instant, poll briefly
             src = await client.get_source(sid)
-            if src.get("extraction_status") in _EXTRACTION_TERMINAL:
+            if src.get("extraction_status") in EXTRACTION_TERMINAL:
                 break
             await asyncio.sleep(1)
         await client.add_source_to_kb(kb_id, sid)
         # add_source_to_kb triggers indexing ASYNC — wait for it to settle so the
         # freshly-founded cluster is immediately retrievable by the next assignment.
-        for _ in range(30):
-            listing = await client.list_kb_sources(kb_id)
-            items = listing.get("items", []) if isinstance(listing, dict) else []
-            mine = [i.get("index_status") for i in items if i.get("source_id") == sid]
-            if mine and all(st in _INDEX_TERMINAL for st in mine):
-                break
-            await asyncio.sleep(1)
+        await wait_for_kb_index(client, kb_id, source_id=sid, attempts=30, delay=1)
         return sid
     except Exception:  # noqa: BLE001 — retrieval degrades to pass-all without the doc
         log.exception("cluster index-doc upload failed for kb %s", kb_id)
@@ -167,17 +165,23 @@ def attach_article(
     db: Database, article_id: UUID, cluster_id: UUID, role: str
 ) -> None:
     """Link an article to its cluster. If it's the pillar and the cluster has no pillar
-    article yet, claim the slot (permanent — only filled while still empty)."""
+    article yet, claim the slot (permanent — only filled while still empty). Claim the
+    slot FIRST: if a concurrent draft already took it, attach this article as a member so
+    its cluster_role can never disagree with the cluster's pillar_article_id (no phantom
+    second pillar)."""
+    if role == "pillar":
+        claimed = db.fetch_one(
+            "update public.content_clusters set pillar_article_id = %s, "
+            "updated_at = now() where id = %s and pillar_article_id is null "
+            "returning id",
+            (article_id, cluster_id),
+        )
+        if claimed is None:
+            role = "member"  # slot already filled → don't record a second pillar
     db.execute(
         "update public.articles set cluster_id = %s, cluster_role = %s where id = %s",
         (cluster_id, role, article_id),
     )
-    if role == "pillar":
-        db.execute(
-            "update public.content_clusters set pillar_article_id = %s, "
-            "updated_at = now() where id = %s and pillar_article_id is null",
-            (article_id, cluster_id),
-        )
 
 
 def set_pillar(
@@ -394,12 +398,70 @@ async def assign(
     return str(cluster["id"]), "pillar"
 
 
+async def delete_cluster(
+    client: PowabaseClient, db: Database, cluster_id: UUID
+) -> bool:
+    """Delete a cluster. Removes its one cluster-index doc from Powabase (de-index +
+    Source delete), clears members' role, then drops the row — members' cluster_id is
+    nulled by the FK (ON DELETE SET NULL), so they become unclustered (Backfill can
+    re-cluster them). Remote steps are best-effort. Returns whether a row was deleted."""
+    cluster = get_cluster(db, cluster_id)
+    if cluster is None:
+        return False
+    doc_id = cluster.get("index_doc_id")
+    if doc_id:
+        brand = brands.get_profile(db, cluster["business_id"])
+        kb_id = (brand or {}).get("cluster_kb_id")
+        if kb_id:
+            indexed = await indexed_source_id(client, kb_id, doc_id)
+            try:
+                await client.remove_source_from_kb(kb_id, indexed)
+            except Exception:  # noqa: BLE001 — de-index failure must not block deletion
+                log.exception("cluster de-index failed for %s/%s", kb_id, indexed)
+
+    # cluster_id FK is ON DELETE SET NULL, but cluster_role is a plain text column —
+    # clear it on members BEFORE the delete, while cluster_id still matches. One
+    # transaction so members can't be left half-detached (role cleared, row still there).
+    with db.connection() as conn:
+        conn.execute(
+            "update public.articles set cluster_role = null where cluster_id = %s",
+            (cluster_id,),
+        )
+        conn.execute(
+            "update public.opportunities set cluster_role = null where cluster_id = %s",
+            (cluster_id,),
+        )
+        deleted = conn.execute(
+            "delete from public.content_clusters where id = %s returning id",
+            (cluster_id,),
+        ).fetchone()
+
+    # The index doc is a project-wide Source too. Decide AFTER the cluster row is gone
+    # (orphan-safe under concurrency) — delete it only if nothing else references it
+    # (cluster docs are distinct content, so this is near-always 0, but the guard keeps
+    # a content collision from nuking another cluster's Source).
+    if (
+        deleted is not None
+        and doc_id
+        and source_refs.source_reference_count(db, doc_id) == 0
+    ):
+        try:
+            await client.delete_source(doc_id)
+        except Exception:  # noqa: BLE001 — Source delete must not block deletion
+            log.exception("cluster source delete failed for %s", doc_id)
+    return deleted is not None
+
+
 async def backfill(client: PowabaseClient, db: Database, business_id: UUID) -> int:
-    """Assign any not-yet-clustered PUBLISHED articles to clusters (one-time seed +
-    ongoing maintenance). Returns how many were assigned."""
+    """Assign any not-yet-clustered articles to clusters (one-time seed for articles
+    that pre-date clustering + ongoing maintenance). Returns how many were assigned.
+
+    Clusters are an editorial/topical-authority concept that applies regardless of
+    publish state — new drafts are clustered at generation time, so the unclustered
+    set is just pre-feature articles in any status (archived excluded)."""
     rows = db.fetch_all(
         "select id, title, keywords from public.articles "
-        "where business_id = %s and status = 'published' and cluster_id is null "
+        "where business_id = %s and cluster_id is null and status <> 'archived' "
         "order by created_at",
         (business_id,),
     )

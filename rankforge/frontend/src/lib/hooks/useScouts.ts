@@ -9,6 +9,7 @@ import {
   type Opportunity,
   type RelinkConfig,
   type ScoutConfig,
+  type ScoutPlan,
   type ScoutRun,
 } from "@/lib/api";
 
@@ -83,6 +84,47 @@ export function useRunScout(businessId: string) {
   });
 }
 
+// --- two-phase manual run: plan → review/edit → execute ---
+export function usePlanScout(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => scoutsApi.plan(businessId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["scoutRuns", businessId] }),
+  });
+}
+
+export function useScoutRun(runId: string | null) {
+  return useQuery({
+    queryKey: ["scoutRun", runId],
+    queryFn: () => scoutsApi.getRun(runId as string),
+    enabled: !!runId,
+    refetchInterval: (query) => {
+      const r = query.state.data as ScoutRun | undefined;
+      if (!r) return 1500;
+      if (r.status === "planned" && !r.plan) return 1500; // plan still generating
+      if (r.status === "running") return 2500;
+      return false;
+    },
+  });
+}
+
+export function useUpdatePlan(runId: string) {
+  return useMutation({
+    mutationFn: (plan: ScoutPlan) => scoutsApi.updatePlan(runId, plan),
+  });
+}
+
+export function useExecuteRun(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: string) => scoutsApi.execute(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["scoutRuns", businessId] });
+      qc.invalidateQueries({ queryKey: ["opportunities", businessId] });
+    },
+  });
+}
+
 export function useOpportunities(businessId: string) {
   return useQuery({
     queryKey: ["opportunities", businessId],
@@ -121,5 +163,17 @@ export function useRestoreOpportunity(businessId: string) {
   return useMutation({
     mutationFn: (id: string) => opportunitiesApi.restore(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["opportunities", businessId] }),
+  });
+}
+
+export function useDeleteOpportunity(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => opportunitiesApi.remove(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["opportunities", businessId] });
+      // A deleted opportunity may have contributed to a cluster's view.
+      qc.invalidateQueries({ queryKey: ["clusters", businessId] });
+    },
   });
 }

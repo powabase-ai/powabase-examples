@@ -674,6 +674,28 @@ def list_articles(db: Database, business_id: UUID) -> list[dict[str, Any]]:
     )
 
 
+def delete_article(db: Database, article_id: UUID) -> bool:
+    """Hard-delete an article. Its versions, publications, comments, link suggestions,
+    and broken-link findings cascade; cluster membership is FK ON DELETE SET NULL (a
+    deleted pillar leaves its cluster pillar-less, not removed). Articles own no
+    per-article Powabase resource, so there's nothing to clean up remotely. Returns
+    whether a row was deleted."""
+    # An opportunity drafted into this article points at it. The FK would null its
+    # article_id but leave it stranded in a dead 'drafted' state (no inbox action) —
+    # so return it to the inbox first, ready to re-draft or dismiss. One transaction:
+    # the opportunity reset and the delete commit together or not at all.
+    with db.connection() as conn:
+        conn.execute(
+            "update public.opportunities set status = 'new', article_id = null, "
+            "updated_at = now() where article_id = %s and status = 'drafted'",
+            (article_id,),
+        )
+        deleted = conn.execute(
+            "delete from public.articles where id = %s returning id", (article_id,)
+        ).fetchone()
+    return deleted is not None
+
+
 def list_versions(db: Database, article_id: UUID) -> list[dict[str, Any]]:
     rows = db.fetch_all(
         "select id, article_id, created_at, content_md from public.article_versions "
