@@ -209,3 +209,15 @@ def test_backfill_route_is_202(monkeypatch):
     monkeypatch.setattr(clusters, "backfill", AsyncMock())
     resp = _client().post(f"/api/business-profiles/{BID}/clusters/backfill")
     assert resp.status_code == 202
+
+
+def test_analyze_gaps_route(monkeypatch):
+    from rankforge_backend.services import scouts as scout_svc
+
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    monkeypatch.setattr(scout_svc, "analyze_cluster_gaps", lambda d, bid, cid: 3)
+    resp = _client().post(f"/api/clusters/{CID}/analyze-gaps")
+    assert resp.status_code == 200
+    assert resp.json()["created"] == 3

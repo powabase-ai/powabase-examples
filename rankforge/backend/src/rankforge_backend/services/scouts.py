@@ -343,6 +343,86 @@ def _covered_block(cov: dict[str, Any], limit: int = 60) -> str:
     return "\n".join(lines) or "- (nothing published yet)"
 
 
+# --- cluster gap analysis: a pillar's subtopics with no dedicated member yet ---
+# Headings that aren't real subtopics — skip them as opportunity seeds.
+_GENERIC_HEADING = re.compile(
+    r"(?i)^(introduction|intro|conclusion|summary|overview|faq|frequently asked|"
+    r"getting started|wrap[- ]?up|final thoughts|key takeaways?|takeaways?|"
+    r"what is|why|tl;?dr)\b"
+)
+
+
+def _pillar_subtopics(
+    pillar: dict[str, Any], brief: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Candidate subtopics a pillar implies — its brief's secondary keywords plus its
+    own H2 sections — each a possible standalone member article. Generic headings
+    (intro/conclusion/…) are dropped."""
+    cands: list[tuple[str, str | None]] = []
+    if brief:
+        cands += [(k, k) for k in (brief.get("secondary_keywords") or []) if k]
+    for m in re.finditer(r"(?m)^##[ \t]+(.+?)\s*$", pillar.get("content_md") or ""):
+        cands.append((m.group(1).strip(), None))
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for label, kw in cands:
+        label = (label or "").strip()
+        nt = _norm_title(label)
+        if len(label) > 3 and nt and nt not in seen and not _GENERIC_HEADING.match(label):
+            seen.add(nt)
+            out.append({"label": label, "keyword": kw})
+    return out[:12]
+
+
+def analyze_cluster_gaps(db: Database, business_id: UUID, cluster_id: UUID) -> int:
+    """Stage opportunities for the pillar subtopics this cluster doesn't yet cover with
+    a dedicated article. Deterministic; dedups against all existing brand coverage."""
+    cl = clusters.get_cluster(db, cluster_id)
+    if not cl or not cl.get("pillar_article_id"):
+        return 0
+    pillar = generation.get_article(db, cl["pillar_article_id"])
+    if not pillar:
+        return 0
+    brief = (
+        brief_svc.get_brief(db, pillar["brief_id"]) if pillar.get("brief_id") else None
+    )
+    subtopics = _pillar_subtopics(pillar, brief)
+    if not subtopics:
+        return 0
+    cov = _gather_coverage(db, business_id)
+    label = cl.get("label") or "this"
+    created = 0
+    for st in subtopics:
+        if _covers_existing(st["label"], st.get("keyword"), cov):
+            continue
+        db.execute(
+            "insert into public.opportunities "
+            "(business_id, title, angle, keyword, source_type, evidence, score, "
+            " scores, status, cluster_id, cluster_role) "
+            "values (%s, %s, %s, %s, 'gap', %s, %s, %s, 'new', %s, 'member')",
+            (
+                business_id, st["label"],
+                f'Deepen the "{label}" cluster with a dedicated article on this '
+                "subtopic, linking up to the pillar.",
+                st.get("keyword"), Json({}), 60, Json({}), cluster_id,
+            ),
+        )
+        cov["seen"].add(_norm_title(st["label"]))  # avoid intra-run duplicates
+        created += 1
+    return created
+
+
+def analyze_all_gaps(db: Database, business_id: UUID) -> int:
+    """Run gap analysis across all of a brand's clusters (maintenance pass)."""
+    total = 0
+    for cl in clusters.list_clusters(db, business_id):
+        try:
+            total += analyze_cluster_gaps(db, business_id, cl["id"])
+        except Exception:  # noqa: BLE001 — one cluster shouldn't fail the sweep
+            log.exception("gap analysis failed for cluster %s", cl["id"])
+    return total
+
+
 # --- the worker ---
 def _set_progress(db: Database, run_id: UUID, phase: str, message: str, **extra: Any):
     """Narrate what the scout is doing right now so the UI can show it live."""

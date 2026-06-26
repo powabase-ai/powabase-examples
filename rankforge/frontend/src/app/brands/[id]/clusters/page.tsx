@@ -2,13 +2,21 @@
 
 import { use, useState } from "react";
 import Link from "next/link";
-import { Boxes, ChevronDown, Crown, Loader2, RefreshCw } from "lucide-react";
+import {
+  Boxes,
+  ChevronDown,
+  Crown,
+  Loader2,
+  RefreshCw,
+  Sparkles,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import {
+  useAnalyzeGaps,
   useBackfillClusters,
   useCluster,
   useClusters,
@@ -30,6 +38,7 @@ function ClusterCard({
   const [open, setOpen] = useState(false);
   const detail = useCluster(open ? cluster.id : null);
   const setPillar = useSetPillar(cluster.id);
+  const analyzeGaps = useAnalyzeGaps();
 
   return (
     <Card>
@@ -121,6 +130,36 @@ function ClusterCard({
                   </li>
                 )}
               </ul>
+            )}
+            {canEdit && cluster.pillar_article_id && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mt-2"
+                onClick={() =>
+                  analyzeGaps.mutate(cluster.id, {
+                    onSuccess: (r) =>
+                      toast.success(
+                        r.created
+                          ? `${r.created} gap opportunit${
+                              r.created === 1 ? "y" : "ies"
+                            } added to Scouts`
+                          : "No new coverage gaps found"
+                      ),
+                    onError: (e) =>
+                      toast.error(e instanceof Error ? e.message : "Failed"),
+                  })
+                }
+                disabled={analyzeGaps.isPending}
+                title="Suggest articles for pillar subtopics not yet covered"
+              >
+                {analyzeGaps.isPending ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <Sparkles />
+                )}
+                Find coverage gaps
+              </Button>
             )}
           </div>
         )}

@@ -743,6 +743,11 @@ export const clustersApi = {
       method: "POST",
       body: JSON.stringify({ article_id: articleId }),
     }),
+  analyzeGaps: (clusterId: string) =>
+    request<{ created: number }>(
+      `/api/clusters/${clusterId}/analyze-gaps`,
+      { method: "POST" }
+    ),
   backfill: (businessId: string) =>
     request<{ status: string }>(
       `/api/business-profiles/${businessId}/clusters/backfill`,

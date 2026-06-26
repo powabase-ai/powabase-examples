@@ -79,6 +79,45 @@ def test_score_clamps_missing_agent_score():
     assert b["agent_score"] == 50
 
 
+def test_pillar_subtopics_filters_generic_and_dedups():
+    pillar = {"content_md": "## Introduction\n\n## SSO Setup\n\n## SSO Setup\n\n## FAQ\n"}
+    out = svc._pillar_subtopics(pillar, {"secondary_keywords": ["mfa setup"]})
+    labels = [s["label"] for s in out]
+    assert "mfa setup" in labels  # from the brief
+    assert "SSO Setup" in labels  # an H2
+    assert "Introduction" not in labels and "FAQ" not in labels  # generic dropped
+    assert labels.count("SSO Setup") == 1  # deduped
+
+
+def test_analyze_cluster_gaps_stages_opps_for_uncovered_subtopics(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(
+        svc.clusters, "get_cluster",
+        lambda d, cid: {"label": "Auth", "pillar_article_id": "P"},
+    )
+    monkeypatch.setattr(
+        svc.generation, "get_article",
+        lambda d, aid: {"id": "P", "brief_id": "B",
+                        "content_md": "## SSO Setup\n\n## MFA Setup\n\n## Conclusion\n"},
+    )
+    monkeypatch.setattr(svc.brief_svc, "get_brief", lambda d, bid: {"secondary_keywords": []})
+    monkeypatch.setattr(
+        svc, "_gather_coverage",
+        lambda d, bid: {"seen": set(), "keywords": set(), "token_sets": [],
+                        "articles": [], "opps": []},
+    )
+    n = svc.analyze_cluster_gaps(db, BID, "C")
+    assert n == 2  # SSO Setup + MFA Setup (Conclusion filtered out)
+    q = db.execute.call_args.args[0]
+    assert "insert into public.opportunities" in q and "'gap'" in q
+
+
+def test_analyze_cluster_gaps_zero_without_a_pillar(monkeypatch):
+    monkeypatch.setattr(svc.clusters, "get_cluster",
+                        lambda d, cid: {"label": "Auth", "pillar_article_id": None})
+    assert svc.analyze_cluster_gaps(MagicMock(), BID, "C") == 0
+
+
 def test_norm_title_dedups():
     assert svc._norm_title("Headless CMS, Compared!") == svc._norm_title(
         "headless cms compared"

@@ -31,6 +31,12 @@ export function useSetPillar(clusterId: string) {
   });
 }
 
+export function useAnalyzeGaps() {
+  return useMutation({
+    mutationFn: (clusterId: string) => clustersApi.analyzeGaps(clusterId),
+  });
+}
+
 export function useBackfillClusters(businessId: string) {
   const qc = useQueryClient();
   return useMutation({

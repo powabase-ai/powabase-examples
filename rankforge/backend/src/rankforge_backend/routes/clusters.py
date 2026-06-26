@@ -14,6 +14,7 @@ from ..models.clusters import ClusterDetail, ContentCluster, SetPillar
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
 from ..services import clusters as svc
+from ..services import scouts as scout_svc
 from ..tasks import spawn
 from .deps import get_db, get_powabase
 
@@ -66,6 +67,19 @@ def get_cluster(
 ):
     _guard_cluster(db, cluster_id, user)
     return svc.get_cluster_detail(db, cluster_id)
+
+
+@router.post("/clusters/{cluster_id}/analyze-gaps")
+def analyze_gaps(
+    cluster_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Stage opportunities for this cluster's uncovered pillar subtopics. Returns the
+    number created; they appear in the Scouts inbox tagged to the cluster."""
+    cluster = _guard_cluster(db, cluster_id, user)
+    created = scout_svc.analyze_cluster_gaps(db, cluster["business_id"], cluster_id)
+    return {"created": created}
 
 
 @router.post("/clusters/{cluster_id}/pillar", response_model=ClusterDetail)

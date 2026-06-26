@@ -94,6 +94,10 @@ class ScoutScheduler:
         try:
             await asyncio.to_thread(relink_svc.run_relink, self._db, business_id)
             await linkcheck_svc.check_business(self._db, business_id)
+            # Surface cluster coverage gaps as opportunities (deterministic, sync).
+            await asyncio.to_thread(
+                scout_svc.analyze_all_gaps, self._db, business_id
+            )
         except Exception:  # noqa: BLE001
             log.exception("relink run failed for %s", business_id)
         finally:
