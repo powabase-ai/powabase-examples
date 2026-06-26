@@ -118,6 +118,16 @@ def test_analyze_cluster_gaps_zero_without_a_pillar(monkeypatch):
     assert svc.analyze_cluster_gaps(MagicMock(), BID, "C") == 0
 
 
+def test_analyze_all_gaps_respects_the_budget(monkeypatch):
+    monkeypatch.setattr(
+        svc.clusters, "list_clusters",
+        lambda d, bid: [{"id": "c1"}, {"id": "c2"}, {"id": "c3"}],
+    )
+    monkeypatch.setattr(svc, "analyze_cluster_gaps", lambda d, bid, cid: 15)
+    total = svc.analyze_all_gaps(MagicMock(), BID, budget=20)
+    assert total == 30  # c1 (15) + c2 (30 ≥ 20) → stop; c3 never runs
+
+
 def test_norm_title_dedups():
     assert svc._norm_title("Headless CMS, Compared!") == svc._norm_title(
         "headless cms compared"

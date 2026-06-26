@@ -412,10 +412,14 @@ def analyze_cluster_gaps(db: Database, business_id: UUID, cluster_id: UUID) -> i
     return created
 
 
-def analyze_all_gaps(db: Database, business_id: UUID) -> int:
-    """Run gap analysis across all of a brand's clusters (maintenance pass)."""
+def analyze_all_gaps(db: Database, business_id: UUID, *, budget: int = 20) -> int:
+    """Run gap analysis across all of a brand's clusters (maintenance pass). Capped at
+    `budget` new opportunities so the first run can't flood the inbox; subsequent runs
+    dedup, so the remaining gaps surface over later passes."""
     total = 0
     for cl in clusters.list_clusters(db, business_id):
+        if total >= budget:
+            break
         try:
             total += analyze_cluster_gaps(db, business_id, cl["id"])
         except Exception:  # noqa: BLE001 — one cluster shouldn't fail the sweep

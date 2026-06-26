@@ -224,6 +224,14 @@ def _insert_suggestion(
 ) -> dict[str, Any] | None:
     """Stage one suggestion (anchor=None → a gap). None on conflict (already staged
     or dismissed/accepted)."""
+    if anchor is not None:
+        # A real anchored link supersedes any still-pending GAP to the same target
+        # (the prose now mentions it), so the editor doesn't see both.
+        db.execute(
+            "delete from public.link_suggestions where article_id = %s "
+            "and target_article_id = %s and anchor_text is null and status = 'pending'",
+            (article_id, target["id"]),
+        )
     return db.fetch_one(
         "insert into public.link_suggestions "
         "(business_id, article_id, target_article_id, anchor_text, target_url, "

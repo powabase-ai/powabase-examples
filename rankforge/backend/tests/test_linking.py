@@ -240,6 +240,29 @@ def test_suggest_stages_structural_link_when_pillar_is_mentioned(monkeypatch):
     assert p[7] == "pillar"  # tagged as the structural up-link
 
 
+def test_anchored_suggestion_supersedes_a_pending_gap(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(
+        linking.gen_svc, "get_article",
+        lambda d, aid: {"content_md": "We cover headless cms here.",
+                        "cluster_id": CID, "cluster_role": "member"},
+    )
+    monkeypatch.setattr(linking.brands, "get_profile", lambda d, bid: _PATTERN_BRAND)
+    monkeypatch.setattr(
+        linking, "_structural_targets",
+        lambda d, a: [({"id": TID, "title": "Guide", "slug": "g",
+                        "keywords": ["headless cms"], "canonical_url": None}, "pillar")],
+    )
+    monkeypatch.setattr(linking, "_link_targets", lambda d, bid, aid: [])
+    db.fetch_one.return_value = {**SUGGESTION}
+    linking.suggest_links(db, BID, AID)
+    deletes = [c.args[0] for c in db.execute.call_args_list]
+    assert any(
+        "delete from public.link_suggestions" in q and "anchor_text is null" in q
+        for q in deletes
+    )
+
+
 def test_apply_rejects_a_gap():
     db = MagicMock()
     db.fetch_one.return_value = {
