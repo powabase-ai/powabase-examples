@@ -876,28 +876,38 @@ def _brand_run_lock(db: Database, business_id: UUID) -> Iterator[bool]:
     per-statement pooled connections; yields True if this caller won it, False if
     another run for the brand already holds it.
 
-    The lock is held on a dedicated connection put in autocommit, so we hold only the
-    advisory lock (not an idle-in-transaction) while the long, LLM/scrape-bound run
-    proceeds on other pooled connections. A test double (MagicMock) yields a truthy
-    `got`, so hermetic tests calling run_scout proceed normally."""
+    The lock is held on its connection in autocommit, so we hold only the advisory lock
+    (not an idle-in-transaction) while the long, LLM/scrape-bound run proceeds on other
+    pooled connections. A test double (MagicMock) yields a truthy `got`, so hermetic
+    tests calling run_scout proceed normally."""
     with db.connection() as conn:
+        # CRITICAL: restore autocommit before the connection returns to the pool. The
+        # psycopg pool resets open transactions, NOT session attributes — a leaked
+        # autocommit=True would poison the pooled connection process-wide and silently
+        # defeat the single-transaction atomicity that other `with db.connection()`
+        # blocks rely on (clusters.delete_cluster, publishing.unpublish/publish,
+        # generation.delete_article).
+        prev_autocommit = conn.autocommit
         conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute(
-                "select pg_try_advisory_lock(hashtext('rankforge:scout'), "
-                "hashtext(%s)) as got",
-                (str(business_id),),
-            )
-            got = bool((cur.fetchone() or {}).get("got"))
-            try:
-                yield got
-            finally:
-                if got:
-                    cur.execute(
-                        "select pg_advisory_unlock(hashtext('rankforge:scout'), "
-                        "hashtext(%s))",
-                        (str(business_id),),
-                    )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select pg_try_advisory_lock(hashtext('rankforge:scout'), "
+                    "hashtext(%s)) as got",
+                    (str(business_id),),
+                )
+                got = bool((cur.fetchone() or {}).get("got"))
+                try:
+                    yield got
+                finally:
+                    if got:
+                        cur.execute(
+                            "select pg_advisory_unlock(hashtext('rankforge:scout'), "
+                            "hashtext(%s))",
+                            (str(business_id),),
+                        )
+        finally:
+            conn.autocommit = prev_autocommit
 
 
 async def run_scout(
@@ -917,6 +927,13 @@ async def run_scout(
             # or insert a second 'running' row. Surface the in-flight run to the caller.
             log.info("scout run for %s skipped — a run is already in flight", business_id)
             return _latest_run(db, business_id) or {}
+        # Drop any stale two-phase 'planned' row the user never executed (same cleanup
+        # start_plan does) so a save-plan-then-Quick-Run doesn't orphan it. Planned rows
+        # carry no opportunities, so this is a clean delete.
+        db.execute(
+            "delete from public.scout_runs where business_id = %s and status = 'planned'",
+            (business_id,),
+        )
         run = db.fetch_one(
             "insert into public.scout_runs (business_id, trigger, progress) "
             "values (%s, %s, %s) "

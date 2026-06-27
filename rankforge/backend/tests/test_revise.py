@@ -356,6 +356,18 @@ def test_targeted_issues_skips_meta_bound_signals():
     assert revise._targeted_issues(ARTICLE_FOR_TARGETS, ["seo:keyword_title"]) == []
 
 
+def test_grounding_indices_are_index_based_only():
+    """The grounding wire selector is `grounding:<int>` — the suffix is parsed with
+    int(). This pins the FE<->BE contract: a content-derived selector (e.g. the claim
+    text) is silently dropped, which once turned grounding-refine into a no-op."""
+    assert sorted(revise._grounding_indices({"grounding:0", "grounding:2"})) == [0, 2]
+    # non-grounding selectors ignored; a non-numeric (content) suffix is dropped
+    got = revise._grounding_indices(
+        {"grounding:1", "seo:internal_links", "grounding:a claim about widgets"}
+    )
+    assert got == [1]
+
+
 def test_targeted_issues_falls_back_to_explanation_without_a_canned_fix():
     issues = revise._targeted_issues(
         {"readability_score": {"signals": [

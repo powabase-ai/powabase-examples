@@ -295,6 +295,29 @@ async def test_remove_source_keeps_shared_source(monkeypatch):
     client.delete_source.assert_not_awaited()  # shared — Source preserved
 
 
+async def test_refresh_one_marks_shared_source_in_place(monkeypatch):
+    """When the Source is shared, refresh can't delete it and the re-import dedupes back
+    to the SAME Source — so the row is marked status='shared' to signal it was refreshed
+    in place, not independently re-scraped (otherwise the no-op looks like success)."""
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda *a, **k: 2)
+
+    async def _noop_import(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc, "_import_one", _noop_import)
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+
+    row = {"id": RID, "url": "https://example.com/page", "source_id": "src_1"}
+    assert await svc._refresh_one(client, db, "kb_1", row, {}) is True
+    client.delete_source.assert_not_awaited()  # shared — old Source preserved
+    sqls = " ".join(c.args[0].lower() for c in db.aexecute.call_args_list)
+    assert "status = 'shared'" in sqls  # row marked refreshed-in-place
+
+
 async def test_remove_source_false_when_missing():
     db = MagicMock()
     db.afetch_one = AsyncMock(return_value=None)

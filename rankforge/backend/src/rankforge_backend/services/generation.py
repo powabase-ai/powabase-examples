@@ -705,8 +705,10 @@ def delete_article(db: Database, article_id: UUID) -> bool:
     `rf:article/{deleted_id}` are NOT rewritten here — after delete they resolve to a
     dead /p/{deleted_id} preview. We log the citing articles (below) so an operator can
     re-link/re-score them, but we deliberately do not edit other articles' content_md."""
-    # Find articles that cite this one (via staged suggestions or recorded link health)
-    # BEFORE the delete cascades those rows away, so the log names the affected pieces.
+    # Find articles that cite this one via staged link_suggestions BEFORE the delete
+    # cascades those rows away, so the log names the affected pieces. (This catches
+    # suggested/applied internal links; it doesn't chase raw rf:article refs baked into
+    # bodies with no suggestion row — those remain the documented by-design limitation.)
     citing = db.fetch_all(
         "select distinct article_id from public.link_suggestions "
         "where target_article_id = %s and article_id <> %s",

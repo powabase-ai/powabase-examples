@@ -403,10 +403,8 @@ def test_brand_run_lock_unlocks_with_matching_key():
     """The advisory unlock must use the SAME two keys as the lock, or the lock leaks
     and serializes the brand's runs forever."""
     db = MagicMock()
-    cur = (
-        db.connection.return_value.__enter__.return_value
-        .cursor.return_value.__enter__.return_value
-    )
+    conn = db.connection.return_value.__enter__.return_value
+    cur = conn.cursor.return_value.__enter__.return_value
     cur.fetchone.return_value = {"got": True}
     with svc._brand_run_lock(db, BID) as got:
         assert got is True
@@ -415,6 +413,20 @@ def test_brand_run_lock_unlocks_with_matching_key():
     unlock = next(c for c in calls if "pg_advisory_unlock" in c[0])
     # identical key params on lock and unlock — no leaked advisory lock
     assert lock[1] == unlock[1] == (str(BID),)
+
+
+def test_brand_run_lock_restores_autocommit():
+    """autocommit must be put back before the connection returns to the pool — a leaked
+    autocommit=True poisons the pooled connection and breaks single-transaction
+    atomicity elsewhere (delete_cluster/unpublish/delete_article)."""
+    db = MagicMock()
+    conn = db.connection.return_value.__enter__.return_value
+    conn.autocommit = False  # how the pool hands it out
+    cur = conn.cursor.return_value.__enter__.return_value
+    cur.fetchone.return_value = {"got": True}
+    with svc._brand_run_lock(db, BID):
+        pass
+    assert conn.autocommit is False  # restored, not left True
 
 
 def test_run_now_202(monkeypatch):
