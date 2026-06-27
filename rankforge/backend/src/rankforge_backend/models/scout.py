@@ -20,9 +20,11 @@ class PlanQuery(BaseModel):
 class ScoutPlan(BaseModel):
     """The trending search queries a run will execute — reviewable/editable while the
     run is still 'planned'."""
-    themes: list[str] = Field(default_factory=list)
-    queries: list[PlanQuery] = Field(default_factory=list)
-    edited: bool = False
+    # Bounded at the Pydantic layer so a hostile/buggy PATCH body is rejected before
+    # the service even parses it (these mirror the 8/12 caps _normalize_plan enforces
+    # on write — keep the two in sync).
+    themes: list[str] = Field(default_factory=list, max_length=8)
+    queries: list[PlanQuery] = Field(default_factory=list, max_length=12)
 
 
 class ScoutConfig(BaseModel):

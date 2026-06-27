@@ -12,6 +12,8 @@ module is the pure worker, callable on a schedule or on a manual trigger.
 
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -269,10 +271,18 @@ def set_opportunity_status(
 
 def delete_opportunity(db: Database, opp_id: UUID) -> bool:
     """Permanently remove an opportunity (vs dismiss, which keeps it for restore).
-    App-side only — opportunities own no Powabase resource."""
+    App-side only — opportunities own no Powabase resource.
+
+    The status guard lives IN the statement (not just the route's pre-check) so a
+    concurrent draft claiming the opp to 'queued'/'drafting' in the TOCTOU window
+    can't have its row deleted out from under the in-flight pipeline — which would
+    orphan the article and silently no-op auto_draft's later status flip. Returns
+    False (the caller 409s) when the opp is mid-draft and so was not deleted."""
     return (
         db.fetch_one(
-            "delete from public.opportunities where id = %s returning id", (opp_id,)
+            "delete from public.opportunities "
+            "where id = %s and status not in ('queued', 'drafting') returning id",
+            (opp_id,),
         )
         is not None
     )
@@ -327,7 +337,12 @@ def score_candidate(
 
 
 # --- existing-coverage awareness (don't re-suggest what the blog already covers) ---
-_SIM_THRESHOLD = 0.82  # title-token Jaccard above which a candidate is a near-duplicate
+# Title-token Jaccard above which a candidate is treated as a near-duplicate of
+# existing coverage. Calibration tradeoff: too high lets reworded variants ('X tips'
+# vs 'X guide', Jaccard ~0.6) through as fresh, too low false-merges genuinely
+# distinct angles. 0.78 keeps close rewordings out while leaving room for distinct
+# takes; the exact-title and shared-keyword filters still catch the obvious cases.
+_SIM_THRESHOLD = 0.78
 # Bound the dedup working set to the most-recent N rows per brand so a very large
 # blog can't make every scout run load (and Jaccard-scan) unbounded history. The
 # most-recent N comfortably covers timely-topic collisions; older long-tail posts
@@ -525,7 +540,7 @@ def _normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         if len(queries) >= 12:
             break
     themes = [str(t).strip() for t in (plan.get("themes") or []) if str(t).strip()][:8]
-    return {"themes": themes, "queries": queries, "edited": bool(plan.get("edited"))}
+    return {"themes": themes, "queries": queries}
 
 
 def _plan_block(plan: dict[str, Any]) -> str:
@@ -624,11 +639,15 @@ async def _discover_and_store(
     brand: dict[str, Any],
     cfg: dict[str, Any],
     plan: dict[str, Any],
+    cov: dict[str, Any] | None = None,
 ) -> None:
     """Run the plan, store + cluster the opportunities, optionally auto-draft, and mark
-    the run done. Raises on failure (the caller records 'failed')."""
+    the run done. Raises on failure (the caller records 'failed').
+
+    `cov` lets the one-shot path hand over the coverage snapshot it already built for
+    planning, halving the (up to 3 queries x 500 rows) coverage scan on that path."""
     focus = cfg.get("focus") or brand.get("seed_topics") or []
-    cov = _gather_coverage(db, business_id)
+    cov = cov if cov is not None else _gather_coverage(db, business_id)
     _set_progress(
         db, run_id, "discovering",
         "Running your search plan across news, YouTube, social & the web…",
@@ -801,7 +820,7 @@ def update_plan(
     return db.fetch_one(
         "update public.scout_runs set plan = %s "
         f"where id = %s and status = 'planned' returning {_RUN_COLUMNS}",
-        (Json({**_normalize_plan(plan), "edited": True}), run_id),
+        (Json(_normalize_plan(plan)), run_id),
     )
 
 
@@ -841,12 +860,44 @@ async def execute_run(
             ("scout run failed — see server logs", run_id),
         )
         _set_progress(db, run_id, "failed", "Scout run failed — see server logs.")
-    finally:
-        # A manual run never perturbs the brand's automatic cadence (only scheduled
-        # runs roll next_run_at). execute_run is reached only from the manual flow.
-        if run.get("trigger") == "schedule":
-            _roll_schedule(db, business_id, cfg.get("cadence"))
+    # No _roll_schedule here: the two-phase plan→execute flow is manual-only
+    # (start_plan always inserts trigger='manual'), and a manual run never perturbs
+    # the brand's automatic cadence. Only the scheduled run_scout path rolls next_run_at.
     return get_run(db, run_id)
+
+
+@contextmanager
+def _brand_run_lock(db: Database, business_id: UUID) -> Iterator[bool]:
+    """Serialize whole scout runs for one brand. The scheduler's in-memory `_running`
+    set only de-dups scheduled ticks within one process — it does NOT cover the manual
+    Quick-Run route (a double-click, or a quick run overlapping a cron tick), which
+    would otherwise launch two concurrent runs that duplicate Exa/LLM spend and the
+    opportunity inbox. A Postgres session-level advisory lock works across the
+    per-statement pooled connections; yields True if this caller won it, False if
+    another run for the brand already holds it.
+
+    The lock is held on a dedicated connection put in autocommit, so we hold only the
+    advisory lock (not an idle-in-transaction) while the long, LLM/scrape-bound run
+    proceeds on other pooled connections. A test double (MagicMock) yields a truthy
+    `got`, so hermetic tests calling run_scout proceed normally."""
+    with db.connection() as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                "select pg_try_advisory_lock(hashtext('rankforge:scout'), "
+                "hashtext(%s)) as got",
+                (str(business_id),),
+            )
+            got = bool((cur.fetchone() or {}).get("got"))
+            try:
+                yield got
+            finally:
+                if got:
+                    cur.execute(
+                        "select pg_advisory_unlock(hashtext('rankforge:scout'), "
+                        "hashtext(%s))",
+                        (str(business_id),),
+                    )
 
 
 async def run_scout(
@@ -860,38 +911,53 @@ async def run_scout(
     and the 'quick run' button). The two-phase manual path is plan_scout + execute_run."""
     cfg = ensure_config(db, business_id)
     brand = brands.get_profile(db, business_id)
-    run = db.fetch_one(
-        "insert into public.scout_runs (business_id, trigger, progress) "
-        "values (%s, %s, %s) "
-        f"returning {_RUN_COLUMNS}",
-        (business_id, trigger, Json({"phase": "starting", "message": "Starting scout…"})),
-    )
-    run_id = run["id"]
-    try:
-        if brand is None:
-            raise RuntimeError("brand not found")
-        focus = cfg.get("focus") or brand.get("seed_topics") or []
-        _set_progress(
-            db, run_id, "planning", "Researching what's trending in your niche…"
+    with _brand_run_lock(db, business_id) as got_lock:
+        if not got_lock:
+            # Another run for this brand is already in flight — don't duplicate spend
+            # or insert a second 'running' row. Surface the in-flight run to the caller.
+            log.info("scout run for %s skipped — a run is already in flight", business_id)
+            return _latest_run(db, business_id) or {}
+        run = db.fetch_one(
+            "insert into public.scout_runs (business_id, trigger, progress) "
+            "values (%s, %s, %s) "
+            f"returning {_RUN_COLUMNS}",
+            (
+                business_id, trigger,
+                Json({"phase": "starting", "message": "Starting scout…"}),
+            ),
         )
-        plan = await _generate_plan(client, brand, focus, _gather_coverage(db, business_id))
-        db.execute(
-            "update public.scout_runs set plan = %s where id = %s", (Json(plan), run_id)
-        )
-        await _discover_and_store(client, db, run_id, business_id, brand, cfg, plan)
-    except Exception:  # noqa: BLE001 — record on the run row
-        log.exception("scout run %s failed for business %s", run_id, business_id)
-        db.execute(
-            "update public.scout_runs set status = 'failed', error = %s where id = %s",
-            ("scout run failed — see server logs", run_id),
-        )
-        _set_progress(db, run_id, "failed", "Scout run failed — see server logs.")
-    finally:
-        # Only a SCHEDULED run advances the cron; a manual "Quick run" leaves the
-        # brand's automatic cadence untouched.
-        if trigger == "schedule":
-            _roll_schedule(db, business_id, cfg.get("cadence"))
-    return get_run(db, run_id)
+        run_id = run["id"]
+        try:
+            if brand is None:
+                raise RuntimeError("brand not found")
+            focus = cfg.get("focus") or brand.get("seed_topics") or []
+            _set_progress(
+                db, run_id, "planning", "Researching what's trending in your niche…"
+            )
+            cov = _gather_coverage(db, business_id)
+            plan = await _generate_plan(client, brand, focus, cov)
+            db.execute(
+                "update public.scout_runs set plan = %s where id = %s",
+                (Json(plan), run_id),
+            )
+            # Hand the just-built coverage snapshot to discovery so it isn't re-scanned.
+            await _discover_and_store(
+                client, db, run_id, business_id, brand, cfg, plan, cov
+            )
+        except Exception:  # noqa: BLE001 — record on the run row
+            log.exception("scout run %s failed for business %s", run_id, business_id)
+            db.execute(
+                "update public.scout_runs set status = 'failed', error = %s "
+                "where id = %s",
+                ("scout run failed — see server logs", run_id),
+            )
+            _set_progress(db, run_id, "failed", "Scout run failed — see server logs.")
+        finally:
+            # Only a SCHEDULED run advances the cron; a manual "Quick run" leaves the
+            # brand's automatic cadence untouched.
+            if trigger == "schedule":
+                _roll_schedule(db, business_id, cfg.get("cadence"))
+        return get_run(db, run_id)
 
 
 def _set_opp_progress(db: Database, opp_id: UUID, phase: str, message: str) -> None:
@@ -978,6 +1044,24 @@ async def auto_draft(
         await generation.run_generation_task(
             client, db, article_id=article["id"], brief=brief
         )
+        # run_generation_task swallows its own errors onto the article row, so a failed
+        # or empty draft would otherwise fall through to 'in_review'/'drafted' and the
+        # inbox would report success on an unretryable article with no body. Re-read and
+        # gate: on a failed status or empty content_md, reset the opp to 'new' (so the
+        # user can retry from the inbox) and leave the half-built article behind.
+        written = generation.get_article(db, article["id"])
+        if (
+            not written
+            or written.get("generation_status") == "failed"
+            or not (written.get("content_md") or "").strip()
+        ):
+            log.warning(
+                "auto_draft: generation produced no usable draft for opp %s "
+                "(article %s) — returning it to the inbox",
+                opp_id, article["id"],
+            )
+            set_opportunity_status(db, opp_id, "new")
+            return False
         # Stage for human review — scouts never auto-publish.
         generation.update_article(db, article["id"], {"status": "in_review"})
         set_opportunity_status(db, opp_id, "drafted", article_id=article["id"])
@@ -991,4 +1075,12 @@ async def auto_draft(
 def get_run(db: Database, run_id: UUID) -> dict[str, Any] | None:
     return db.fetch_one(
         f"select {_RUN_COLUMNS} from public.scout_runs where id = %s", (run_id,)
+    )
+
+
+def _latest_run(db: Database, business_id: UUID) -> dict[str, Any] | None:
+    return db.fetch_one(
+        f"select {_RUN_COLUMNS} from public.scout_runs where business_id = %s "
+        "order by created_at desc limit 1",
+        (business_id,),
     )

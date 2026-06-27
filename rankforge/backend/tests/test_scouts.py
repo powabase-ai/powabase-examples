@@ -312,6 +312,111 @@ async def test_auto_draft_refuses_when_already_claimed(monkeypatch):
     assert called is False  # never started the pipeline
 
 
+async def test_auto_draft_bails_when_generation_empty(monkeypatch):
+    """run_generation_task swallows its own errors, so a failed/empty draft must be
+    caught by re-reading the article — otherwise the inbox reports a 'drafted' card on
+    an unretryable article with no body."""
+    seen: list[str] = []
+    monkeypatch.setattr(svc.brands, "get_profile", lambda db, bid: {"id": BID})
+    monkeypatch.setattr(
+        svc.research_svc, "create_research_run", lambda db, **k: {"id": "r1"}
+    )
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc.research_svc, "run_research_task", _noop)
+    monkeypatch.setattr(svc.research_svc, "get_run", lambda db, rid: {"status": "done"})
+    monkeypatch.setattr(svc.research_svc, "list_sources", lambda db, rid: [{"id": "s1"}])
+
+    async def _brief(*a, **k):
+        return {"id": "b1"}
+
+    monkeypatch.setattr(svc.brief_svc, "generate_brief", _brief)
+    monkeypatch.setattr(svc.generation, "create_article", lambda db, brief: {"id": "a1"})
+    monkeypatch.setattr(svc.generation, "run_generation_task", _noop)
+    # generation failed and left no body behind
+    monkeypatch.setattr(
+        svc.generation, "get_article",
+        lambda db, aid: {"generation_status": "failed", "content_md": None},
+    )
+    staged: list[str] = []
+    monkeypatch.setattr(svc.generation, "update_article", lambda *a, **k: staged.append(1))
+    monkeypatch.setattr(
+        svc, "set_opportunity_status", lambda db, oid, st, **k: seen.append(st)
+    )
+    ok = await svc.auto_draft(
+        MagicMock(), MagicMock(),
+        {"id": "o1", "business_id": BID, "keyword": "k", "title": "t",
+         "cluster_id": None},
+    )
+    assert ok is False
+    assert seen[-1] == "new"        # returned to the inbox for retry
+    assert staged == []             # never staged in_review / 'drafted'
+
+
+def test_delete_opportunity_guards_in_statement():
+    """The status guard lives in the DELETE itself (not only the route pre-check) so a
+    concurrent draft claim in the TOCTOU window can't have its opp deleted."""
+    db = MagicMock()
+    db.fetch_one.return_value = {"id": OID}
+    assert svc.delete_opportunity(db, OID) is True
+    sql = db.fetch_one.call_args.args[0].lower()
+    assert "delete from public.opportunities" in sql
+    assert "status not in ('queued', 'drafting')" in sql
+
+
+def test_delete_opportunity_route_409_when_delete_lost(monkeypatch):
+    """Opp looks deletable at fetch time but flips to 'drafting' before the DELETE —
+    the conditional delete returns False and the route must 409, not 204."""
+    monkeypatch.setattr(svc, "get_opportunity", lambda d, oid: OPP)  # status 'new'
+    monkeypatch.setattr(svc, "delete_opportunity", lambda d, oid: False)  # lost the race
+    resp = _client().delete(f"/api/opportunities/{OID}")
+    assert resp.status_code == 409
+
+
+async def test_run_scout_skips_when_brand_locked(monkeypatch):
+    """A second concurrent run for the brand (manual double-click / quick-run vs cron)
+    can't win the advisory lock, so it neither inserts a run row nor re-discovers."""
+    db = MagicMock()
+    cur = (
+        db.connection.return_value.__enter__.return_value
+        .cursor.return_value.__enter__.return_value
+    )
+    cur.fetchone.return_value = {"got": False}  # lock held by the in-flight run
+    monkeypatch.setattr(svc, "ensure_config", lambda d, b: CFG)
+    monkeypatch.setattr(svc.brands, "get_profile", lambda d, b: {"name": "X"})
+    discovered: list[int] = []
+
+    async def fake_disc(*a, **k):
+        discovered.append(1)
+
+    monkeypatch.setattr(svc, "_discover_and_store", fake_disc)
+    out = await svc.run_scout(MagicMock(), db, business_id=BID, trigger="manual")
+    assert discovered == []          # no duplicate discovery
+    assert out is db.fetch_one.return_value  # surfaced the in-flight run via _latest_run
+    lock_sql = cur.execute.call_args.args[0].lower()
+    assert "pg_try_advisory_lock" in lock_sql and "rankforge:scout" in lock_sql
+
+
+def test_brand_run_lock_unlocks_with_matching_key():
+    """The advisory unlock must use the SAME two keys as the lock, or the lock leaks
+    and serializes the brand's runs forever."""
+    db = MagicMock()
+    cur = (
+        db.connection.return_value.__enter__.return_value
+        .cursor.return_value.__enter__.return_value
+    )
+    cur.fetchone.return_value = {"got": True}
+    with svc._brand_run_lock(db, BID) as got:
+        assert got is True
+    calls = [c.args for c in cur.execute.call_args_list]
+    lock = next(c for c in calls if "pg_try_advisory_lock" in c[0])
+    unlock = next(c for c in calls if "pg_advisory_unlock" in c[0])
+    # identical key params on lock and unlock — no leaked advisory lock
+    assert lock[1] == unlock[1] == (str(BID),)
+
+
 def test_run_now_202(monkeypatch):
     async def fake_run(*a, **k):
         return None
@@ -332,13 +437,12 @@ def test_normalize_plan_sanitizes():
             {"query": "vid", "source": "bogus"},      # invalid source → web
             "not a dict",                              # ignored
         ],
-        "edited": True,
     })
     assert out["themes"] == ["a", "b"]
     assert [q["query"] for q in out["queries"]] == ["hot topic", "vid"]
     assert out["queries"][0]["source"] == "news"
     assert out["queries"][1]["source"] == "web"
-    assert out["edited"] is True
+    assert "edited" not in out  # dead write-only flag removed
 
 
 def test_update_plan_guards_on_planned_status():
@@ -372,14 +476,14 @@ def test_update_plan_route_editor(monkeypatch):
     monkeypatch.setattr(svc, "get_run", lambda db, rid: {**PLANNED_RUN})
     monkeypatch.setattr(
         svc, "update_plan",
-        lambda db, rid, plan: {**PLANNED_RUN, "plan": {**plan, "edited": True}},
+        lambda db, rid, plan: {**PLANNED_RUN, "plan": plan},
     )
     resp = _client().patch(
         f"/api/scouts/runs/{RID}/plan",
         json={"themes": [], "queries": [{"query": "x", "source": "news"}]},
     )
     assert resp.status_code == 200
-    assert resp.json()["plan"]["edited"] is True
+    assert resp.json()["plan"]["queries"][0]["query"] == "x"
 
 
 def test_update_plan_route_409_when_started(monkeypatch):
@@ -433,6 +537,29 @@ async def test_execute_run_claims_atomically(monkeypatch):
     assert discovered == []  # didn't win the claim → no duplicate run
     claim_sql = db.fetch_one.call_args.args[0].lower()
     assert "status = 'running'" in claim_sql and "status = 'planned'" in claim_sql
+
+
+async def test_execute_run_happy_path_discovers_once(monkeypatch):
+    """When the claim WINS, the plan is discovered exactly once (no schedule roll —
+    the two-phase flow is manual-only)."""
+    db = MagicMock()
+    db.fetch_one.return_value = {"id": RID}  # claim won (planned→running)
+    monkeypatch.setattr(
+        svc, "get_run", lambda d, rid: {**PLANNED_RUN, "plan": {"queries": []}}
+    )
+    monkeypatch.setattr(svc, "ensure_config", lambda d, b: CFG)
+    monkeypatch.setattr(svc.brands, "get_profile", lambda d, b: {"name": "X"})
+    rolled: list[int] = []
+    monkeypatch.setattr(svc, "_roll_schedule", lambda *a, **k: rolled.append(1))
+    discovered: list[int] = []
+
+    async def fake_disc(*a, **k):
+        discovered.append(1)
+
+    monkeypatch.setattr(svc, "_discover_and_store", fake_disc)
+    await svc.execute_run(MagicMock(), db, RID)
+    assert discovered == [1]  # ran exactly once
+    assert rolled == []        # manual two-phase run never rolls the cron cadence
 
 
 def test_list_opportunities(monkeypatch):

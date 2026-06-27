@@ -98,7 +98,14 @@ def get_scout_run(
 
 
 # --- two-phase manual run: plan → review/edit → execute ---
-@router.post("/scouts/plan", response_model=ScoutRun)
+@router.post(
+    "/scouts/plan",
+    response_model=ScoutRun,
+    # Same expensive bucket as /scouts/run: planning spawns a planner LLM + web_search
+    # and replaces the prior 'planned' row, so an unthrottled two-phase path would let
+    # a user bypass the one-shot run's limiter and rack up unbounded Exa/LLM spend.
+    dependencies=[Depends(rate_limit("scout:run"))],
+)
 async def plan_scout(
     business_id: UUID,
     db: Database = Depends(get_db),
@@ -133,7 +140,14 @@ def update_scout_plan(
     return updated
 
 
-@router.post("/scouts/runs/{run_id}/execute", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/scouts/runs/{run_id}/execute",
+    status_code=status.HTTP_202_ACCEPTED,
+    # The planned->running CAS makes execute self-limiting per plan, but paired with
+    # /scouts/plan a user could loop plan->execute freely — share the run bucket for
+    # defense-in-depth (the full discover/store/auto-draft pipeline is the spend).
+    dependencies=[Depends(rate_limit("scout:run"))],
+)
 async def execute_scout_run(
     run_id: UUID,
     db: Database = Depends(get_db),
@@ -213,13 +227,17 @@ def remove_opportunity(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "opportunity not found")
     assert_brand_access(db, opp["business_id"], user)
     # A draft pipeline is mid-flight for this opportunity and is about to create an
-    # article for it — deleting now would orphan that article. Make the caller wait.
-    if opp["status"] in ("queued", "drafting"):
+    # article for it — deleting now would orphan that article. The pre-check is a
+    # fast path; the authoritative guard is the conditional DELETE in the service
+    # (see delete_opportunity), which also closes the TOCTOU window when the opp
+    # flips to 'drafting' between this fetch and the delete.
+    if opp["status"] in ("queued", "drafting") or not svc.delete_opportunity(
+        db, opp_id
+    ):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "can't delete an opportunity while it's being drafted",
         )
-    svc.delete_opportunity(db, opp_id)
 
 
 @router.post("/opportunities/{opp_id}/restore", response_model=Opportunity)

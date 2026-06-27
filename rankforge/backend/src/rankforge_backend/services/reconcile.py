@@ -43,6 +43,16 @@ def reconcile_interrupted(db: Database) -> None:
         "where generation_status in "
         "('grounding', 'outlining', 'drafting', 'optimizing', 'refining')",
     )
+    # A scout run orphaned mid-flight stays status='running' with no task behind it;
+    # the UI then disables both run buttons (busyRun) and polls forever. Fail it so the
+    # user can start a fresh run. 'planned' runs are user-owned saved plans awaiting a
+    # manual execute — they are NOT in flight, so leave them be.
+    scout = _count_update(
+        db,
+        "update public.scout_runs set status = 'failed', "
+        "error = 'interrupted by a server restart' "
+        "where status = 'running'",
+    )
     # Brand-materials ingest narrates phase on business_profiles.materials_progress;
     # a non-terminal phase at boot means an orphaned ingest the UI would poll forever.
     mat = _count_update(
@@ -53,9 +63,10 @@ def reconcile_interrupted(db: Database) -> None:
         "where materials_progress is not null "
         "and coalesce(materials_progress->>'phase', '') not in ('done', 'failed')",
     )
-    if opp or run or art or mat:
+    if opp or run or art or mat or scout:
         log.info(
             "startup reconciliation: reset %s opportunity(ies), %s research run(s), "
-            "%s article(s), %s materials ingest(s) orphaned by a prior restart",
-            opp, run, art, mat,
+            "%s article(s), %s scout run(s), %s materials ingest(s) orphaned by a "
+            "prior restart",
+            opp, run, art, scout, mat,
         )
