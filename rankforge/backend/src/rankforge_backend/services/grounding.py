@@ -5,16 +5,13 @@ is just: ensure the brand has a KB, add the run's sources to it, and let generat
 retrieve from it for cited, factual writing.
 """
 
-import asyncio
 from typing import Any
 from uuid import UUID
 
 from ..db import Database
-from ..powabase import PowabaseClient
+from ..powabase import PowabaseClient, wait_for_kb_index
 from . import business_profiles as brands
 from . import research as research_svc
-
-_INDEX_TERMINAL = {"indexed", "failed", "cancelled"}
 
 # chunk_embed + hybrid (dense embeddings + keyword), reranked: retrieve 120 candidates
 # -> zerank -> top 24, so per-section drafting sees enough chunks to span many distinct
@@ -103,14 +100,8 @@ async def index_run_sources(
         except Exception:  # noqa: BLE001 — skip a source that won't index, keep going
             continue
 
-    # poll until all sources reach a terminal index_status (bounded)
-    for _ in range(45):
-        listing = await client.list_kb_sources(kb_id)
-        items = listing.get("items", []) if isinstance(listing, dict) else []
-        statuses = [i.get("index_status") for i in items]
-        if statuses and all(s in _INDEX_TERMINAL for s in statuses):
-            break
-        await asyncio.sleep(2)
+    # Wait until all sources reach a terminal index_status (bounded).
+    await wait_for_kb_index(client, kb_id)
 
     # New chunks landed — rebuild BM25 so hybrid's keyword half covers them.
     if source_ids:

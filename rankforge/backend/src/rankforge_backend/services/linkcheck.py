@@ -12,8 +12,10 @@ Findings are surfaced (status 'open') for an editor to fix in the prose or mark
 """
 
 import asyncio
+import ipaddress
 import logging
 import re
+import socket
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -22,7 +24,6 @@ import httpx
 
 from ..db import Database
 from . import generation as gen_svc
-from .brand_materials import _is_public_host
 
 log = logging.getLogger("rankforge.linkcheck")
 
@@ -35,6 +36,9 @@ _COLUMNS = (
 _LINK_RE = re.compile(r"\[([^\]]*)\]\(\s*<?([^\s)>]+)>?\s*\)")
 _FENCED = re.compile(r"```.*?```", re.S)
 _INTERNAL_RE = re.compile(r"^/p/([0-9a-fA-F-]{36})/?$")
+# Internal-link refs (resolved to live URLs at render time) — check the TARGET's
+# integrity (exists + published), not an HTTP URL that may not be live on the blog yet.
+_REF_RE = re.compile(r"^rf:article/([0-9a-fA-F-]{36})$")
 
 _CHECK_CONCURRENCY = 6
 _TIMEOUT = 10.0
@@ -61,13 +65,51 @@ def _internal_reason(db: Database, target_id: str) -> str | None:
     return None
 
 
+def _host_fetch_state(host: str) -> str:
+    """Classify an external host for link checking:
+      'fetch' — resolves to a public IP: go verify the URL.
+      'dead'  — the hostname does NOT resolve (NXDOMAIN / no address): a broken link.
+                This is the common hallucination — a fabricated host like a made-up docs
+                subdomain — which the old "skip non-public" rule silently passed.
+      'skip'  — internal/private/loopback or an internal-only name, OR a transient
+                resolver failure (EAI_AGAIN): don't fetch (SSRF) and don't flag — we
+                genuinely can't reach/judge it, and a DNS hiccup isn't a broken link."""
+    host = (host or "").strip().lower()
+    if not host or host == "localhost" or host.endswith((".local", ".internal")):
+        return "skip"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        # NXDOMAIN / no-address → the host genuinely doesn't exist (a broken link).
+        # A transient resolver failure (EAI_AGAIN and friends) is NOT evidence the
+        # link is dead — skip it rather than flag a healthy link off a DNS hiccup.
+        return (
+            "dead"
+            if e.errno in (socket.EAI_NONAME, socket.EAI_NODATA)
+            else "skip"
+        )
+    except OSError:
+        return "skip"  # any other resolver error → can't judge, don't flag
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return "skip"
+        if not ip.is_global:  # private / loopback / link-local / CGNAT
+            return "skip"
+    return "fetch"
+
+
 async def _external_reason(
     client: httpx.AsyncClient, url: str
 ) -> tuple[int | None, str | None]:
-    """(http_status, reason). reason None = healthy. Skips non-public hosts (returns
-    healthy) to avoid both SSRF and false positives on hosts we won't fetch."""
-    p = urlparse(url)
-    if not _is_public_host(p.netloc):
+    """(http_status, reason). reason None = healthy. A host that doesn't resolve is a
+    broken link; private/internal hosts are skipped (healthy) to avoid SSRF and false
+    positives on hosts we can't reach."""
+    state = _host_fetch_state(urlparse(url).hostname or "")
+    if state == "dead":
+        return None, "host does not resolve"
+    if state == "skip":
         return None, None
     try:
         resp = await client.head(url)
@@ -149,9 +191,11 @@ async def check_article(
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as client:
         async def _one(url: str, anchor: str) -> None:
-            im = _INTERNAL_RE.match(url)
-            if im:
-                reason, status, kind = _internal_reason(db, im.group(1)), None, "internal"
+            internal = _INTERNAL_RE.match(url) or _REF_RE.match(url)
+            if internal:
+                reason, status, kind = (
+                    _internal_reason(db, internal.group(1)), None, "internal",
+                )
             elif url.startswith(("http://", "https://")):
                 async with sem:
                     status, reason = await _external_reason(client, url)

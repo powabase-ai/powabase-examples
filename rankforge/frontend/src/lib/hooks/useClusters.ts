@@ -37,15 +37,27 @@ export function useAnalyzeGaps() {
   });
 }
 
+export function useDeleteCluster(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (clusterId: string) => clustersApi.remove(clusterId),
+    onSuccess: (_d, clusterId) => {
+      qc.invalidateQueries({ queryKey: ["clusters", businessId] });
+      qc.removeQueries({ queryKey: ["cluster", clusterId] });
+      // Members became unclustered — their article rows and any opportunity tags
+      // tied to this cluster changed.
+      qc.invalidateQueries({ queryKey: ["articles", businessId] });
+      qc.invalidateQueries({ queryKey: ["opportunities", businessId] });
+    },
+  });
+}
+
 export function useBackfillClusters(businessId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => clustersApi.backfill(businessId),
-    // Backfill is async on the server; refetch the list shortly after.
+    // Backfill runs inline and returns its count; the new clusters are ready now.
     onSuccess: () =>
-      setTimeout(
-        () => qc.invalidateQueries({ queryKey: ["clusters", businessId] }),
-        5000
-      ),
+      qc.invalidateQueries({ queryKey: ["clusters", businessId] }),
   });
 }

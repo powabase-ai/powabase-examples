@@ -1,5 +1,6 @@
 """Broken-link detection (M6 / Phase 12.3) — checker logic + route wiring."""
 
+import socket
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -88,6 +89,52 @@ async def test_check_article_resolves_a_healthy_link(monkeypatch):
     assert any(
         "status = 'resolved'" in c[0][0] for c in db.execute.call_args_list
     )
+
+
+def test_host_fetch_state_skips_internal_and_private_offline():
+    # Internal-by-name and private/loopback IP literals: skip (no DNS, fully offline).
+    assert linkcheck._host_fetch_state("localhost") == "skip"
+    assert linkcheck._host_fetch_state("api.internal") == "skip"
+    assert linkcheck._host_fetch_state("svc.local") == "skip"
+    assert linkcheck._host_fetch_state("10.0.0.1") == "skip"  # private IP literal
+    assert linkcheck._host_fetch_state("127.0.0.1") == "skip"  # loopback literal
+
+
+def test_host_fetch_state_nxdomain_is_dead(monkeypatch):
+    # A truly-nonexistent host (NXDOMAIN / no address) → 'dead' (a broken link).
+    def _raise(host, port):
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _raise)
+    assert linkcheck._host_fetch_state("made-up-docs.example") == "dead"
+
+
+def test_host_fetch_state_transient_resolver_failure_is_skip(monkeypatch):
+    # EAI_AGAIN is a transient resolver hiccup, NOT evidence the link is dead — a
+    # momentary DNS failure must not mark a healthy external link broken.
+    def _raise(host, port):
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _raise)
+    assert linkcheck._host_fetch_state("real-but-flaky.example") == "skip"
+
+
+def test_host_fetch_state_public_ip_is_fetch(monkeypatch):
+    # Resolves to a public IP → go verify the URL.
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("8.8.8.8", 0))],
+    )
+    assert linkcheck._host_fetch_state("dns.example") == "fetch"
+
+
+async def test_external_reason_flags_unresolvable_host(monkeypatch):
+    # A fabricated host that doesn't resolve is a broken link — not silently skipped.
+    monkeypatch.setattr(linkcheck, "_host_fetch_state", lambda h: "dead")
+    status, reason = await linkcheck._external_reason(
+        MagicMock(), "https://made-up-docs.example/x"
+    )
+    assert status is None and reason and "resolve" in reason
 
 
 # --- routes (hermetic) ---

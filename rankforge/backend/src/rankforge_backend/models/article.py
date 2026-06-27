@@ -10,6 +10,15 @@ class ArticleGenerate(BaseModel):
     brief_id: UUID
 
 
+class RefineRequest(BaseModel):
+    """Which flagged issues the user picked to fix. Each selector is `axis:signal_key`
+    (e.g. `readability:em_dashes`, `seo:internal_links`) or `grounding:<index>`. When
+    omitted (None), refine drives every below-target axis automatically (legacy / the
+    post-generation auto-refine)."""
+
+    targets: list[str] | None = None
+
+
 class ArticleUpdate(BaseModel):
     title: str | None = None
     content_md: str | None = None

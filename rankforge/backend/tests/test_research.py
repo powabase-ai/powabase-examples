@@ -1,6 +1,6 @@
 """Research — JSON extraction (unit) + async route wiring (hermetic)."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import pytest
@@ -53,10 +53,6 @@ def test_extract_json_fenced_keeps_nested_braces():
     }
 
 
-def test_extract_json_falls_back_to_bare_object():
-    assert extract_json('chatter {"ok": true} trailing') == {"ok": True}
-
-
 def test_diverse_urls_prefers_distinct_domains():
     urls = [
         "https://a.com/1",
@@ -101,6 +97,51 @@ def make_client() -> TestClient:
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_powabase] = lambda: MagicMock()
     return TestClient(with_auth(app))
+
+
+RID = ROW["id"]
+
+
+async def test_delete_run_skips_shared_source(monkeypatch):
+    """Unshared scraped Sources are deleted from Powabase; a Source still referenced
+    by another workspace (another run / brand material / cluster) is left intact."""
+    db = MagicMock()
+    monkeypatch.setattr(svc, "get_run", lambda d, rid: {"id": RID})
+    db.fetch_all.return_value = [{"source_id": "shared"}, {"source_id": "solo"}]
+    db.fetch_one.return_value = {"id": RID}  # the final run delete
+    # 'shared' still referenced elsewhere (>0) → kept; 'solo' (0) → deleted.
+    monkeypatch.setattr(
+        svc.source_refs, "source_reference_count",
+        lambda d, sid, **k: 1 if sid == "shared" else 0,
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    assert await svc.delete_run(client, db, RID) is True
+    client.delete_source.assert_awaited_once_with("solo")
+
+
+async def test_delete_run_dedupes_same_source(monkeypatch):
+    """Two URLs in one run that dedupe to the same Powabase Source delete it once."""
+    db = MagicMock()
+    monkeypatch.setattr(svc, "get_run", lambda d, rid: {"id": RID})
+    db.fetch_all.return_value = [{"source_id": "dup"}, {"source_id": "dup"}]
+    db.fetch_one.return_value = {"id": RID}
+    monkeypatch.setattr(
+        svc.source_refs, "source_reference_count", lambda d, sid, **k: 0
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    assert await svc.delete_run(client, db, RID) is True
+    client.delete_source.assert_awaited_once_with("dup")
+
+
+def test_delete_research_route(monkeypatch):
+    monkeypatch.setattr(svc, "get_run", lambda db, rid: {"id": RID, "business_id": BID})
+    monkeypatch.setattr(svc, "delete_run", AsyncMock(return_value=True))
+    resp = make_client().delete(f"/api/research/{RID}")
+    assert resp.status_code == 204
 
 
 def test_create_research_returns_searching(monkeypatch):

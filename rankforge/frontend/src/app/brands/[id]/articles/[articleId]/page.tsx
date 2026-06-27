@@ -2,6 +2,8 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   History,
@@ -13,6 +15,7 @@ import {
   Save,
   Share2,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -34,6 +37,8 @@ import { useAuth } from "@/lib/auth/AuthProvider";
 import {
   useArticle,
   useArticleVersions,
+  useBrokenLinks,
+  useDeleteArticle,
   useOptimizeArticle,
   useRefineArticle,
   useRestoreVersion,
@@ -51,6 +56,16 @@ import type { Article, GroundingReport, Score, ScoreSignal } from "@/lib/api";
 
 const GATED_STATUSES = new Set(["approved", "published"]);
 
+// Internal links are stored as stable refs (rf:article/{id}) and resolved to the live
+// blog URL server-side on export/publish. In the in-app preview, point them at the
+// cited article so the editor can click through.
+function resolveInternalRefs(md: string, brandId: string): string {
+  return md.replace(
+    /rf:article\/([0-9a-fA-F-]{36})/g,
+    `/brands/${brandId}/articles/$1`
+  );
+}
+
 const PHASE_LABEL: Record<string, string> = {
   grounding: "Grounding in research sources…",
   outlining: "Outlining…",
@@ -65,9 +80,40 @@ function scoreColor(s?: Score | null) {
   return s.met ? "var(--success)" : "var(--ember)";
 }
 
-function SignalRow({ s }: { s: ScoreSignal }) {
+function SignalRow({
+  s,
+  axis,
+  target,
+  selected,
+  onToggle,
+}: {
+  s: ScoreSignal;
+  axis: string;
+  target: number;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+}) {
+  const id = `${axis}:${s.key}`;
+  // Only below-target signals are "flagged" — the ones refine can act on.
+  const selectable = s.score < target;
+  const checked = selected.has(id);
   return (
-    <div className="flex items-start gap-3 border-t border-border py-2.5 first:border-0">
+    <label
+      className={cn(
+        "flex items-start gap-2.5 border-t border-border py-2.5 first:border-0",
+        selectable && "cursor-pointer"
+      )}
+    >
+      {selectable ? (
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={() => onToggle(id)}
+          className="mt-1 size-3.5 shrink-0 cursor-pointer accent-[rgb(var(--ember))]"
+        />
+      ) : (
+        <span className="mt-1 size-3.5 shrink-0" />
+      )}
       <span className="w-7 shrink-0 font-data text-sm">{s.score}</span>
       <div className="min-w-0">
         <div className="flex items-center gap-1.5 text-sm font-medium">
@@ -83,11 +129,21 @@ function SignalRow({ s }: { s: ScoreSignal }) {
           </div>
         ))}
       </div>
-    </div>
+    </label>
   );
 }
 
-function EvalBody({ score }: { score: Score }) {
+function EvalBody({
+  score,
+  axis,
+  selected,
+  onToggle,
+}: {
+  score: Score;
+  axis: string;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+}) {
   const color = scoreColor(score);
   return (
     <div>
@@ -107,13 +163,28 @@ function EvalBody({ score }: { score: Score }) {
         />
       </div>
       {score.signals.map((s) => (
-        <SignalRow key={s.key} s={s} />
+        <SignalRow
+          key={s.key}
+          s={s}
+          axis={axis}
+          target={score.target}
+          selected={selected}
+          onToggle={onToggle}
+        />
       ))}
     </div>
   );
 }
 
-function GroundingBody({ report }: { report: GroundingReport }) {
+function GroundingBody({
+  report,
+  selected,
+  onToggle,
+}: {
+  report: GroundingReport;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+}) {
   const s = report.grounding_score;
   const color = s == null ? "var(--muted-ink)" : s >= 80 ? "var(--success)" : "var(--ember)";
   return (
@@ -142,23 +213,42 @@ function GroundingBody({ report }: { report: GroundingReport }) {
         Flagged claims
       </p>
       {report.flagged && report.flagged.length > 0 ? (
-        report.flagged.map((f, i) => (
-          <div key={i} className="border-t border-border py-2.5 first:border-0">
-            {f.quote ? (
-              <div className="mb-1 border-l-2 border-[rgb(var(--ember))]/40 pl-2 text-sm italic text-foreground">
-                “{f.quote}”
+        report.flagged.map((f, i) => {
+          // The WIRE selector must be index-based: the backend (_grounding_indices)
+          // parses the suffix with int(), so a content-derived id is silently dropped
+          // and the grounding fix never runs. Use a content-derived value ONLY for
+          // React's key (stable rendering across a re-ordered re-fetch).
+          const target = `grounding:${i}`;
+          const key = `grounding:${f.claim ?? f.quote ?? i}`;
+          return (
+            <label
+              key={key}
+              className="flex cursor-pointer items-start gap-2.5 border-t border-border py-2.5 first:border-0"
+            >
+              <input
+                type="checkbox"
+                checked={selected.has(target)}
+                onChange={() => onToggle(target)}
+                className="mt-1 size-3.5 shrink-0 cursor-pointer accent-[rgb(var(--ember))]"
+              />
+              <div className="min-w-0">
+                {f.quote ? (
+                  <div className="mb-1 border-l-2 border-[rgb(var(--ember))]/40 pl-2 text-sm italic text-foreground">
+                    “{f.quote}”
+                  </div>
+                ) : (
+                  <div className="text-sm font-medium">{f.claim}</div>
+                )}
+                <div className="text-xs text-muted-foreground">{f.issue}</div>
+                {f.suggestion && (
+                  <div className="mt-0.5 text-xs text-[rgb(var(--ember-deep))]">
+                    → {f.suggestion}
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="text-sm font-medium">{f.claim}</div>
-            )}
-            <div className="text-xs text-muted-foreground">{f.issue}</div>
-            {f.suggestion && (
-              <div className="mt-0.5 text-xs text-[rgb(var(--ember-deep))]">
-                → {f.suggestion}
-              </div>
-            )}
-          </div>
-        ))
+            </label>
+          );
+        })
       ) : (
         <p className="text-sm text-muted-foreground">No unsupported claims flagged.</p>
       )}
@@ -278,15 +368,45 @@ export default function ArticleView({
   params: Promise<{ id: string; articleId: string }>;
 }) {
   const { id, articleId } = use(params);
+  const router = useRouter();
   const { data: a, isLoading } = useArticle(articleId);
   const optimize = useOptimizeArticle(articleId);
   const refine = useRefineArticle(articleId);
   const retry = useRetryArticle(articleId);
   const update = useUpdateArticle(articleId);
+  const del = useDeleteArticle(id);
   const versions = useArticleVersions(articleId);
   const restore = useRestoreVersion(articleId);
+  const broken = useBrokenLinks(articleId);
+  const brokenOpen = (broken.data ?? []).filter((b) => b.status === "open").length;
+  const qc = useQueryClient();
   const { profile } = useAuth();
   const mayApprove = canApprove(profile?.role);
+
+  // Generation/refine validates links just before flipping to "done" — refresh the
+  // broken-link findings (and the tab badge) when the article reaches a terminal state.
+  const genStatus = a?.generation_status;
+  useEffect(() => {
+    if (genStatus === "done")
+      qc.invalidateQueries({ queryKey: ["link-health", articleId] });
+  }, [genStatus, articleId, qc]);
+
+  function onDeleteArticle() {
+    if (
+      !window.confirm(
+        `Permanently delete “${a?.title ?? "this article"}”? This removes its ` +
+          "versions, comments, internal links, and publication records."
+      )
+    )
+      return;
+    del.mutate(articleId, {
+      onSuccess: () => {
+        toast.success("Article deleted");
+        router.push(`/brands/${id}/articles`);
+      },
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+    });
+  }
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [tab, setTab] = useState<
@@ -294,6 +414,15 @@ export default function ArticleView({
   >("SEO");
   const [showHistory, setShowHistory] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
+  // Flagged issues the user has ticked to fix (axis:signal / grounding:i), across tabs.
+  const [refineTargets, setRefineTargets] = useState<Set<string>>(new Set());
+  const toggleTarget = (tid: string) =>
+    setRefineTargets((prev) => {
+      const next = new Set(prev);
+      if (next.has(tid)) next.delete(tid);
+      else next.add(tid);
+      return next;
+    });
 
   const generating = a && !["done", "failed"].includes(a.generation_status);
   const dirty = !!a && editing && draft !== a.content_md;
@@ -306,6 +435,7 @@ export default function ArticleView({
     setTab("SEO");
     setShowHistory(false);
     setShowPublish(false);
+    setRefineTargets(new Set());
   }, [articleId]);
 
   // Warn before leaving with unsaved edits.
@@ -419,6 +549,15 @@ export default function ArticleView({
                     {badge}
                   </span>
                 )}
+                {t === "Links" && brokenOpen > 0 && (
+                  <span
+                    className="font-data"
+                    style={{ color: "rgb(var(--destructive))" }}
+                    title={`${brokenOpen} broken link${brokenOpen === 1 ? "" : "s"}`}
+                  >
+                    ⚠{brokenOpen}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -435,14 +574,23 @@ export default function ArticleView({
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
             {tab === "Grounding" ? (
               a?.grounding_report ? (
-                <GroundingBody report={a.grounding_report} />
+                <GroundingBody
+                  report={a.grounding_report}
+                  selected={refineTargets}
+                  onToggle={toggleTarget}
+                />
               ) : (
                 <p className="text-sm text-muted-foreground">
                   {generating ? "Fact-check runs after generation." : "No fact-check yet."}
                 </p>
               )
             ) : current ? (
-              <EvalBody score={current} />
+              <EvalBody
+                score={current}
+                axis={tab.toLowerCase()}
+                selected={refineTargets}
+                onToggle={toggleTarget}
+              />
             ) : (
               <p className="text-sm text-muted-foreground">
                 {generating ? "Scores appear once generation finishes." : "No scores yet."}
@@ -450,30 +598,44 @@ export default function ArticleView({
             )}
             {a && a.generation_status === "done" && (
               <div className="mt-4 space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  Tick the flagged issues you want fixed — across the SEO, GEO,
+                  Readability, and Grounding tabs — then refine. Only the selected
+                  issues are addressed.
+                </p>
                 <Button
                   variant="gold"
                   size="sm"
                   className="w-full"
-                  onClick={() =>
-                    refine.mutate(undefined, {
-                      onSuccess: () =>
+                  onClick={() => {
+                    const targets = Array.from(refineTargets);
+                    refine.mutate(targets, {
+                      onSuccess: () => {
                         toast.success(
-                          "Refining against SEO/GEO/Readability/Grounding…"
-                        ),
+                          `Refining ${targets.length} selected issue${
+                            targets.length === 1 ? "" : "s"
+                          }…`
+                        );
+                        setRefineTargets(new Set());
+                      },
                       onError: (e) =>
                         toast.error(
                           e instanceof Error ? e.message : "Refine failed"
                         ),
-                    })
-                  }
-                  disabled={refine.isPending}
+                    });
+                  }}
+                  disabled={refine.isPending || refineTargets.size === 0}
                 >
                   {refine.isPending ? (
                     <Loader2 className="animate-spin" />
                   ) : (
                     <Sparkles />
                   )}
-                  Auto-refine to targets
+                  {refineTargets.size > 0
+                    ? `Refine ${refineTargets.size} selected issue${
+                        refineTargets.size === 1 ? "" : "s"
+                      }`
+                    : "Select issues to refine"}
                 </Button>
                 <Button
                   variant="outline"
@@ -552,6 +714,22 @@ export default function ArticleView({
                 >
                   <Share2 /> Publish
                 </Button>
+                {mayApprove && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-muted-foreground hover:text-destructive"
+                    onClick={onDeleteArticle}
+                    disabled={del.isPending}
+                    title="Delete this article"
+                  >
+                    {del.isPending ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Trash2 />
+                    )}
+                  </Button>
+                )}
               </div>
             )}
             {editing && (
@@ -655,7 +833,7 @@ export default function ArticleView({
               ) : (
                 a.content_md && (
                   <article className="mt-8">
-                    <Markdown>{a.content_md}</Markdown>
+                    <Markdown>{resolveInternalRefs(a.content_md, id)}</Markdown>
                   </article>
                 )
               )}
@@ -670,6 +848,7 @@ export default function ArticleView({
           open={showPublish}
           onOpenChange={setShowPublish}
           articleId={articleId}
+          brandId={id}
           slug={a.slug}
           published={a.status === "published"}
         />

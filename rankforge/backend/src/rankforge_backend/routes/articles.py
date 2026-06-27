@@ -1,10 +1,11 @@
 """Article (Stage C) endpoints — async generation + status polling."""
 
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..auth import assert_brand_access, get_current_user
+from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
 from ..models.article import (
     Article,
@@ -12,6 +13,7 @@ from ..models.article import (
     ArticleSummary,
     ArticleUpdate,
     ArticleVersion,
+    RefineRequest,
 )
 from ..models.comment import Comment, CommentCreate, CommentUpdate
 from ..models.linking import BrokenLink, LinkSuggestion
@@ -28,6 +30,8 @@ from ..services import revise as revise_svc
 from ..services import scoring as scoring_svc
 from ..tasks import spawn
 from .deps import get_db, get_powabase
+
+log = logging.getLogger("rankforge.routes.articles")
 
 # Every article endpoint requires an authenticated user.
 router = APIRouter(
@@ -153,9 +157,12 @@ async def optimize_article(
     return svc.get_article(db, article_id)
 
 
-async def _refine_and_finish(pb: PowabaseClient, db: Database, article_id: UUID) -> None:
+async def _refine_and_finish(
+    pb: PowabaseClient, db: Database, article_id: UUID,
+    targets: list[str] | None = None,
+) -> None:
     try:
-        await revise_svc.refine(pb, db, article_id)
+        await revise_svc.refine(pb, db, article_id, targets=targets)
     finally:
         # Always return the article to a terminal status, even if a pass failed.
         # If there's no content (refine bailed on a failed/empty article), mark it
@@ -163,6 +170,14 @@ async def _refine_and_finish(pb: PowabaseClient, db: Database, article_id: UUID)
         final = svc.get_article(db, article_id)
         words = ((final or {}).get("content_md") or "").split()
         terminal = "done" if words else "failed"
+        # Best-effort, BEFORE flipping to done: a refine pass rewrites the body and can
+        # introduce (or fix) links, so re-validate outbound links — dead URLs surface in
+        # the Links panel without a manual check. Never let it disturb the status.
+        if terminal == "done" and final and final.get("business_id"):
+            try:
+                await linkcheck_svc.check_article(db, final["business_id"], article_id)
+            except Exception:  # noqa: BLE001 — link check is advisory
+                log.exception("post-refine link check failed for %s", article_id)
         svc._update(
             db, article_id,
             generation_status=terminal,
@@ -177,11 +192,13 @@ async def _refine_and_finish(pb: PowabaseClient, db: Database, article_id: UUID)
 )
 async def refine_article(
     article_id: UUID,
+    body: RefineRequest | None = None,
     db: Database = Depends(get_db),
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Auto-iterate the draft against the SEO/GEO/Grounding evaluators (async)."""
+    """Refine the draft (async). With `body.targets`, fix exactly the selected flagged
+    issues; without it, auto-iterate every below-target axis."""
     _guard_article(db, article_id, user)
     # Atomically claim the article; refuse if a generation/refine is already running
     # so a double-submit can't launch two concurrent pipelines on the same article.
@@ -191,7 +208,11 @@ async def refine_article(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "generation already in progress"
         )
-    spawn(_refine_and_finish(pb, db, article_id))
+    # Normalize an empty selection (`{"targets": []}`) to None so it runs the legacy
+    # auto-refine instead of taking the targeted path into a guaranteed no-op (which
+    # would still burn a rate-limit token for zero work).
+    targets = (body.targets or None) if body else None
+    spawn(_refine_and_finish(pb, db, article_id, targets))
     return svc.get_article(db, article_id)
 
 
@@ -236,6 +257,20 @@ def update_article(
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     return row
+
+
+@router.delete("/{article_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_article(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Permanently delete an article and everything attached to it (versions,
+    comments, internal-link suggestions, broken-link findings, publication records).
+    If it was a cluster's pillar, the cluster is left pillar-less, not removed."""
+    _guard_article(db, article_id, user)
+    if not svc.delete_article(db, article_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
 
 
 @router.get("/{article_id}/versions", response_model=list[ArticleVersion])

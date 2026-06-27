@@ -10,6 +10,7 @@ import {
   PenLine,
   Search,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -29,12 +30,15 @@ import { useGenerateArticle } from "@/lib/hooks/useArticles";
 import { useBrands } from "@/lib/hooks/useBrands";
 import {
   useBriefs,
+  useDeleteResearchRun,
   useGenerateBrief,
   useResearchRuns,
   useRunResearch,
   useSourceMarkdown,
   useTemplates,
 } from "@/lib/hooks/useResearch";
+import { useAuth } from "@/lib/auth/AuthProvider";
+import { canApprove, TERMINAL_RESEARCH } from "@/lib/api";
 import type { Brief, CompetitorTeardown, ResearchRun } from "@/lib/api";
 
 function StatusBadge({ run }: { run: ResearchRun }) {
@@ -63,6 +67,8 @@ export default function BrandWorkspace({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const { profile } = useAuth();
+  const canEdit = canApprove(profile?.role);
   const { data: brands } = useBrands();
   const brand = brands?.find((b) => b.id === id);
 
@@ -213,7 +219,13 @@ export default function BrandWorkspace({
 
           {selected && (
             <>
-              <RunDetail run={selected} onViewSource={setSourceForMd} />
+              <RunDetail
+                run={selected}
+                onViewSource={setSourceForMd}
+                brandId={id}
+                canEdit={canEdit}
+                onDeleted={() => setSelectedRun(null)}
+              />
 
               {selected.status === "failed" && (
                 <Card>
@@ -282,18 +294,65 @@ export default function BrandWorkspace({
 function RunDetail({
   run,
   onViewSource,
+  brandId,
+  canEdit,
+  onDeleted,
 }: {
   run: ResearchRun;
   onViewSource: (id: string) => void;
+  brandId: string;
+  canEdit: boolean;
+  onDeleted: () => void;
 }) {
+  const del = useDeleteResearchRun(brandId);
+
+  function onDelete() {
+    if (
+      !window.confirm(
+        `Delete the research run “${run.topic}”? Its scraped sources are removed ` +
+          "from Powabase too (unless another run or your brand materials still use them)."
+      )
+    )
+      return;
+    del.mutate(run.id, {
+      onSuccess: () => {
+        toast.success("Research run deleted");
+        onDeleted();
+      },
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+    });
+  }
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="font-display text-lg">{run.topic}</CardTitle>
-        <p className="flex items-center gap-2 text-xs text-muted-foreground">
-          <StatusBadge run={run} /> · intent: {run.intent ?? "—"} ·{" "}
-          {run.serp?.results?.length ?? 0} results · {run.competitors.length} sources
-        </p>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <CardTitle className="font-display text-lg">{run.topic}</CardTitle>
+            <p className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+              <StatusBadge run={run} /> · intent: {run.intent ?? "—"} ·{" "}
+              {run.serp?.results?.length ?? 0} results · {run.competitors.length}{" "}
+              sources
+            </p>
+          </div>
+          {canEdit && TERMINAL_RESEARCH.includes(run.status) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="shrink-0 text-muted-foreground hover:text-destructive"
+              onClick={onDelete}
+              disabled={del.isPending}
+              title="Delete this research run"
+            >
+              {del.isPending ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Trash2 />
+              )}
+              Delete
+            </Button>
+          )}
+        </div>
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
         <div>

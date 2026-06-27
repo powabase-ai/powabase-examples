@@ -15,12 +15,16 @@ def test_reconcile_resets_inflight_rows():
     assert "update public.research_runs set status = 'failed'" in sqls
     assert "update public.articles set generation_status = 'failed'" in sqls
     assert "update public.business_profiles set materials_progress" in sqls
+    # an orphaned scout run (status='running', no task behind it) is failed too, so the
+    # UI stops disabling the run buttons / polling forever
+    assert "update public.scout_runs set status = 'failed'" in sqls
+    assert "where status = 'running'" in sqls
     assert "drafting" in sqls and "searching" in sqls
-    assert db.fetch_one.call_count == 4
+    assert db.fetch_one.call_count == 5
 
 
 def test_reconcile_noop_when_nothing_inflight():
     db = MagicMock()
     db.fetch_one.return_value = {"n": 0}
     reconcile_interrupted(db)  # should not raise
-    assert db.fetch_one.call_count == 4
+    assert db.fetch_one.call_count == 5

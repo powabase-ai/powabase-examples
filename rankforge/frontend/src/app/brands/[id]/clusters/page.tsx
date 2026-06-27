@@ -9,6 +9,7 @@ import {
   Loader2,
   RefreshCw,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -20,6 +21,7 @@ import {
   useBackfillClusters,
   useCluster,
   useClusters,
+  useDeleteCluster,
   useSetPillar,
 } from "@/lib/hooks/useClusters";
 import { useAuth } from "@/lib/auth/AuthProvider";
@@ -39,6 +41,22 @@ function ClusterCard({
   const detail = useCluster(open ? cluster.id : null);
   const setPillar = useSetPillar(cluster.id);
   const analyzeGaps = useAnalyzeGaps();
+  const del = useDeleteCluster(brandId);
+
+  function onDelete() {
+    if (
+      !window.confirm(
+        `Delete the “${cluster.label}” cluster? Its ${cluster.member_count} member` +
+          `${cluster.member_count === 1 ? "" : "s"} stay as articles but become ` +
+          "unclustered (re-cluster them anytime with Backfill)."
+      )
+    )
+      return;
+    del.mutate(cluster.id, {
+      onSuccess: () => toast.success("Cluster deleted"),
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+    });
+  }
 
   return (
     <Card>
@@ -131,35 +149,53 @@ function ClusterCard({
                 )}
               </ul>
             )}
-            {canEdit && cluster.pillar_article_id && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="mt-2"
-                onClick={() =>
-                  analyzeGaps.mutate(cluster.id, {
-                    onSuccess: (r) =>
-                      toast.success(
-                        r.created
-                          ? `${r.created} gap opportunit${
-                              r.created === 1 ? "y" : "ies"
-                            } added to Scouts`
-                          : "No new coverage gaps found"
-                      ),
-                    onError: (e) =>
-                      toast.error(e instanceof Error ? e.message : "Failed"),
-                  })
-                }
-                disabled={analyzeGaps.isPending}
-                title="Suggest articles for pillar subtopics not yet covered"
-              >
-                {analyzeGaps.isPending ? (
-                  <Loader2 className="animate-spin" />
-                ) : (
-                  <Sparkles />
+            {canEdit && (
+              <div className="mt-2 flex items-center gap-1">
+                {cluster.pillar_article_id && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      analyzeGaps.mutate(cluster.id, {
+                        onSuccess: (r) =>
+                          toast.success(
+                            r.created
+                              ? `${r.created} gap opportunit${
+                                  r.created === 1 ? "y" : "ies"
+                                } added to Scouts`
+                              : "No new coverage gaps found"
+                          ),
+                        onError: (e) =>
+                          toast.error(e instanceof Error ? e.message : "Failed"),
+                      })
+                    }
+                    disabled={analyzeGaps.isPending}
+                    title="Suggest articles for pillar subtopics not yet covered"
+                  >
+                    {analyzeGaps.isPending ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Sparkles />
+                    )}
+                    Find coverage gaps
+                  </Button>
                 )}
-                Find coverage gaps
-              </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto text-muted-foreground hover:text-destructive"
+                  onClick={onDelete}
+                  disabled={del.isPending}
+                  title="Delete this cluster"
+                >
+                  {del.isPending ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <Trash2 />
+                  )}
+                  Delete
+                </Button>
+              </div>
             )}
           </div>
         )}
@@ -191,8 +227,13 @@ export default function ClustersPage({
               size="sm"
               onClick={() =>
                 backfill.mutate(undefined, {
-                  onSuccess: () =>
-                    toast.success("Clustering unassigned articles…"),
+                  onSuccess: ({ assigned, remaining }) =>
+                    toast.success(
+                      assigned > 0
+                        ? `Clustered ${assigned} article${assigned === 1 ? "" : "s"}` +
+                          (remaining ? " — more remain, run again" : "")
+                        : "All articles are already clustered"
+                    ),
                   onError: (e) =>
                     toast.error(e instanceof Error ? e.message : "Failed"),
                 })

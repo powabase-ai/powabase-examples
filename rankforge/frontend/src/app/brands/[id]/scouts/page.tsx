@@ -1,7 +1,8 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Boxes,
   Crown,
@@ -9,25 +10,34 @@ import {
   Link2,
   Loader2,
   PenLine,
+  Plus,
   Radar,
   RotateCcw,
   Sparkles,
   Trash2,
+  Wand2,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
+  useDeleteOpportunity,
   useDismissOpportunity,
   useDraftOpportunity,
+  useExecuteRun,
   useOpportunities,
+  usePlanScout,
   useRelinkConfig,
   useRestoreOpportunity,
   useRunRelink,
   useRunScout,
   useScoutConfig,
+  useScoutRun,
   useScoutRuns,
+  useUpdatePlan,
   useUpdateRelink,
   useUpdateScoutConfig,
 } from "@/lib/hooks/useScouts";
@@ -37,10 +47,212 @@ import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import {
   canApprove,
   type Opportunity,
+  type PlanSource,
   type RelinkConfig,
   type ScoutConfig,
+  type ScoutPlan,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+const PLAN_SOURCES: { value: PlanSource; label: string }[] = [
+  { value: "news", label: "News" },
+  { value: "youtube", label: "YouTube" },
+  { value: "social", label: "Social" },
+  { value: "web", label: "Web" },
+];
+
+// Editable draft of the plan: each query carries a client-only `_uid` so React can
+// key rows stably across add/remove (index keys cause focus/IME jumps). The `_uid`
+// is stripped before the plan is sent to the backend.
+type EditableQuery = ScoutPlan["queries"][number] & { _uid: string };
+type EditablePlan = Omit<ScoutPlan, "queries"> & { queries: EditableQuery[] };
+
+const newUid = () =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+
+/** The reviewable Search Plan: shows the trending queries the scout will run and lets
+ *  the user add/remove/reword them and switch sources before executing. */
+function SearchPlanPanel({
+  brandId,
+  runId,
+  onClose,
+}: {
+  brandId: string;
+  runId: string;
+  onClose: () => void;
+}) {
+  const run = useScoutRun(runId);
+  const updatePlan = useUpdatePlan(runId);
+  const execute = useExecuteRun(brandId);
+  const [draft, setDraft] = useState<EditablePlan | null>(null);
+
+  // Seed the editable draft from the generated plan once it lands — tag each
+  // query with a stable client-side uid for keying.
+  useEffect(() => {
+    if (run.data?.plan && draft === null)
+      setDraft({
+        ...run.data.plan,
+        queries: run.data.plan.queries.map((q) => ({ ...q, _uid: newUid() })),
+      });
+  }, [run.data?.plan, draft]);
+
+  const r = run.data;
+  const planning = !r || (r.status === "planned" && !r.plan);
+  const failed = r?.status === "failed";
+  const busy = updatePlan.isPending || execute.isPending;
+
+  function patchQuery(i: number, patch: Partial<ScoutPlan["queries"][number]>) {
+    setDraft((d) =>
+      d ? { ...d, queries: d.queries.map((q, j) => (j === i ? { ...q, ...patch } : q)) } : d
+    );
+  }
+  function addQuery() {
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            queries: [
+              ...d.queries,
+              { query: "", source: "web", rationale: "", _uid: newUid() },
+            ],
+          }
+        : d
+    );
+  }
+  function removeQuery(i: number) {
+    setDraft((d) => (d ? { ...d, queries: d.queries.filter((_, j) => j !== i) } : d));
+  }
+
+  async function runIt() {
+    if (!draft) return;
+    // Strip the client-only `_uid` so the PATCH payload matches the backend ScoutPlan.
+    const queries = draft.queries
+      .filter((q) => q.query.trim())
+      .map(({ _uid: _drop, ...q }) => q);
+    if (queries.length === 0) {
+      toast.error("Add at least one search query.");
+      return;
+    }
+    try {
+      await updatePlan.mutateAsync({ ...draft, queries });
+      await execute.mutateAsync(runId);
+      toast.success("Scout is running your plan…");
+      onClose();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Couldn't start the run");
+    }
+  }
+
+  return (
+    <Card className="mb-4 border-[rgb(var(--ember))]/30">
+      <CardContent className="py-4">
+        <div className="flex items-center gap-2">
+          <Wand2 className="size-4 text-[rgb(var(--ember))]" />
+          <h3 className="text-sm font-semibold">Search plan</h3>
+          <button
+            onClick={onClose}
+            className="ml-auto text-muted-foreground hover:text-foreground"
+            title="Discard this plan"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        {planning ? (
+          <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin text-[rgb(var(--ember-bright))]" />
+            Researching what’s trending in your niche to plan fresh searches…
+          </div>
+        ) : failed ? (
+          <p className="mt-3 text-sm text-destructive">
+            Couldn’t build a search plan. {r?.error ?? ""} — close and try again.
+          </p>
+        ) : draft ? (
+          <>
+            <p className="mt-2 text-xs text-muted-foreground">
+              These are the trending searches the scout will run. Edit, reword, or
+              re-source them, then run — each run explores fresh ground.
+            </p>
+            {draft.themes.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {draft.themes.map((t, i) => (
+                  <span
+                    key={i}
+                    className="rounded-full bg-secondary px-2 py-0.5 text-[11px] text-muted-foreground"
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="mt-3 space-y-2">
+              {draft.queries.map((q, i) => (
+                <div key={q._uid} className="flex items-start gap-2">
+                  <select
+                    value={q.source}
+                    onChange={(e) =>
+                      patchQuery(i, { source: e.target.value as PlanSource })
+                    }
+                    className="h-8 shrink-0 rounded-md border border-border bg-background px-1.5 text-xs"
+                  >
+                    {PLAN_SOURCES.map((s) => (
+                      <option key={s.value} value={s.value}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="min-w-0 flex-1">
+                    <Input
+                      value={q.query}
+                      onChange={(e) => patchQuery(i, { query: e.target.value })}
+                      placeholder="search query…"
+                      className="h-8 text-xs"
+                    />
+                    {q.rationale && (
+                      <p className="mt-0.5 line-clamp-1 text-[11px] text-muted-foreground">
+                        {q.rationale}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => removeQuery(i)}
+                    className="mt-1 shrink-0 text-muted-foreground hover:text-destructive"
+                    title="Remove query"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={addQuery}
+              className="mt-2 inline-flex items-center gap-1 text-xs text-[rgb(var(--ember))] hover:underline"
+            >
+              <Plus className="size-3.5" /> Add a query
+            </button>
+
+            <div className="mt-4 flex items-center gap-2">
+              <Button variant="gold" size="sm" onClick={runIt} disabled={busy}>
+                {busy ? <Loader2 className="animate-spin" /> : <Radar />}
+                Run with this plan
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onClose}
+                disabled={busy}
+              >
+                Discard
+              </Button>
+            </div>
+          </>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
 
 function scoreColor(s: number) {
   if (s >= 70) return "var(--success)";
@@ -290,7 +502,15 @@ function OpportunityCard({
   const draft = useDraftOpportunity(brandId);
   const dismiss = useDismissOpportunity(brandId);
   const restore = useRestoreOpportunity(brandId);
+  const del = useDeleteOpportunity(brandId);
   const busy = opp.status === "queued" || opp.status === "drafting";
+
+  function onDelete() {
+    if (!window.confirm(`Permanently delete “${opp.title}”?`)) return;
+    del.mutate(opp.id, {
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+    });
+  }
 
   return (
     <Card className={cn(opp.status === "dismissed" && "opacity-50")}>
@@ -392,13 +612,22 @@ function OpportunityCard({
             )}
 
             {opp.status === "dismissed" && (
-              <button
-                onClick={() => restore.mutate(opp.id)}
-                disabled={restore.isPending}
-                className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-              >
-                <RotateCcw className="size-3" /> Restore
-              </button>
+              <>
+                <button
+                  onClick={() => restore.mutate(opp.id)}
+                  disabled={restore.isPending}
+                  className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <RotateCcw className="size-3" /> Restore
+                </button>
+                <button
+                  onClick={onDelete}
+                  disabled={del.isPending}
+                  className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
+                >
+                  <Trash2 className="size-3" /> Delete
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -415,24 +644,55 @@ export default function ScoutsPage({
   const { id } = use(params);
   const { profile } = useAuth();
   const canEdit = canApprove(profile?.role);
+  const qc = useQueryClient();
   const config = useScoutConfig(id);
   const relinkConfig = useRelinkConfig(id);
   const runs = useScoutRuns(id);
   const opps = useOpportunities(id);
   const runScout = useRunScout(id);
+  const planScout = usePlanScout(id);
+  const [planRunId, setPlanRunId] = useState<string | null>(null);
   const clusters = useClusters(id);
   const clusterLabel = (cid?: string | null) =>
     cid ? clusters.data?.find((c) => c.id === cid)?.label : undefined;
 
   const lastRun = runs.data?.[0];
+
+  // The scout creates opportunity rows asynchronously, after the POST returns —
+  // so the initial invalidation on run/execute fires too early. When the latest
+  // run transitions into a terminal status, refetch the inbox so the freshly
+  // created opportunities appear.
+  const prevRunStatus = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const status = lastRun?.status;
+    const prev = prevRunStatus.current;
+    prevRunStatus.current = status;
+    if (
+      prev &&
+      prev !== status &&
+      (status === "done" || status === "failed")
+    )
+      qc.invalidateQueries({ queryKey: ["opportunities", id] });
+  }, [lastRun?.status, id, qc]);
   const active = opps.data?.filter((o) => o.status !== "dismissed") ?? [];
   const dismissed = opps.data?.filter((o) => o.status === "dismissed") ?? [];
+
+  const busyRun =
+    runScout.isPending || lastRun?.status === "running" || !!planRunId;
 
   function run() {
     runScout.mutate(undefined, {
       onSuccess: () => toast.success("Scout started — discovering opportunities…"),
       onError: (e) =>
         toast.error(e instanceof Error ? e.message : "Could not start scout"),
+    });
+  }
+
+  function startPlan() {
+    planScout.mutate(undefined, {
+      onSuccess: (r) => setPlanRunId(r.id),
+      onError: (e) =>
+        toast.error(e instanceof Error ? e.message : "Could not start planning"),
     });
   }
 
@@ -443,28 +703,50 @@ export default function ScoutsPage({
         title="Scouts"
         actions={
           canEdit && (
-            <Button
-              variant="gold"
-              size="sm"
-              onClick={run}
-              disabled={runScout.isPending || lastRun?.status === "running"}
-            >
-              {runScout.isPending || lastRun?.status === "running" ? (
-                <Loader2 className="animate-spin" />
-              ) : (
-                <Radar />
-              )}
-              Run now
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={run}
+                disabled={busyRun}
+                title="Auto-plan and run in one step"
+              >
+                {runScout.isPending ? <Loader2 className="animate-spin" /> : <Radar />}
+                Quick run
+              </Button>
+              <Button
+                variant="gold"
+                size="sm"
+                onClick={startPlan}
+                disabled={busyRun || planScout.isPending}
+              >
+                {planScout.isPending ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <Wand2 />
+                )}
+                Plan a run
+              </Button>
+            </div>
           )
         }
       />
       <PageBody>
       <p className="mb-5 text-sm text-muted-foreground">
         Scouts watch the market for timely, on-brand topics and surface scored
-        opportunities here. At the auto-draft level they push the best ones through
-        the pipeline and stage them as <span className="font-medium">in review</span>.
+        opportunities here. <span className="font-medium">Plan a run</span> to research
+        what’s trending and review the searches first; <span className="font-medium">
+        Quick run</span> auto-plans and runs in one step. Run them as often as you like —
+        each run explores fresh ground across news, YouTube, social, and the web.
       </p>
+
+      {planRunId && (
+        <SearchPlanPanel
+          brandId={id}
+          runId={planRunId}
+          onClose={() => setPlanRunId(null)}
+        />
+      )}
 
       {lastRun?.status === "running" ? (
         <div className="mb-4 flex items-start gap-2.5 rounded-md border border-[rgb(var(--ember))]/30 bg-[rgb(var(--ember))]/[0.06] px-3 py-2.5">

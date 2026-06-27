@@ -1,12 +1,13 @@
 """Articles — section parsing (unit) + async route wiring (hermetic)."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
+from rankforge_backend.models.profile import CurrentUser
 from rankforge_backend.routes.business_profiles import get_db
 from rankforge_backend.routes.research import get_powabase
 from rankforge_backend.services import generation as svc
@@ -178,6 +179,42 @@ def test_generate_article_unknown_brief_404(monkeypatch):
     assert resp.status_code == 404
 
 
+def test_delete_article_204(monkeypatch):
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: ARTICLE)
+    removed = MagicMock(return_value=True)
+    monkeypatch.setattr(svc, "delete_article", removed)
+    resp = make_client().delete(f"/api/articles/{ARTICLE['id']}")
+    assert resp.status_code == 204
+    removed.assert_called_once()
+
+
+def test_delete_article_requires_editor(monkeypatch):
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: ARTICLE)
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    resp = TestClient(with_auth(app, writer)).delete(f"/api/articles/{ARTICLE['id']}")
+    assert resp.status_code == 403
+
+
+def test_delete_article_recovers_drafted_opportunities():
+    """A 'drafted' opportunity tied to the article is returned to the inbox before the
+    row is deleted (one transaction), so it isn't left stranded with a dead link."""
+    db = MagicMock()
+    db.fetch_all.return_value = []  # no other articles cite this one
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = {"id": ARTICLE["id"]}
+    db.connection.return_value.__enter__.return_value = conn
+    assert svc.delete_article(db, ARTICLE["id"]) is True
+    opp_sql = conn.execute.call_args_list[0].args[0].lower()
+    assert "update public.opportunities" in opp_sql
+    assert "status = 'new'" in opp_sql
+    assert "where article_id = %s and status = 'drafted'" in opp_sql
+    del_sql = conn.execute.call_args_list[1].args[0].lower()
+    assert "delete from public.articles" in del_sql
+
+
 def test_update_article_patches():
     db = MagicMock()
     db.fetch_one.return_value = {**ARTICLE, "title": "Edited", "org_id": UUID(ADMIN_ORG)}
@@ -191,3 +228,37 @@ def test_update_article_patches():
     assert resp.json()["title"] == "Edited"
     sql = db.fetch_one.call_args.args[0].lower()
     assert "update public.articles" in sql
+
+
+# --- auto link-check after refine (broken/fabricated URLs surface without a manual run) ---
+async def test_refine_and_finish_revalidates_links_before_done(monkeypatch):
+    from rankforge_backend.routes import articles as art_routes
+
+    monkeypatch.setattr(art_routes.revise_svc, "refine", AsyncMock())
+    monkeypatch.setattr(
+        art_routes.svc, "get_article",
+        lambda db, aid: {"id": aid, "business_id": BID, "content_md": "the body"},
+    )
+    monkeypatch.setattr(art_routes.svc, "_update", lambda *a, **k: None)
+    chk = AsyncMock(return_value=[])
+    monkeypatch.setattr(art_routes.linkcheck_svc, "check_article", chk)
+
+    await art_routes._refine_and_finish(MagicMock(), MagicMock(), UUID(ARTICLE["id"]))
+    chk.assert_awaited_once()
+
+
+async def test_refine_and_finish_skips_link_check_when_no_content(monkeypatch):
+    # An empty/failed refine → terminal 'failed' → don't waste a link check.
+    from rankforge_backend.routes import articles as art_routes
+
+    monkeypatch.setattr(art_routes.revise_svc, "refine", AsyncMock())
+    monkeypatch.setattr(
+        art_routes.svc, "get_article",
+        lambda db, aid: {"id": aid, "business_id": BID, "content_md": ""},
+    )
+    monkeypatch.setattr(art_routes.svc, "_update", lambda *a, **k: None)
+    chk = AsyncMock()
+    monkeypatch.setattr(art_routes.linkcheck_svc, "check_article", chk)
+
+    await art_routes._refine_and_finish(MagicMock(), MagicMock(), UUID(ARTICLE["id"]))
+    chk.assert_not_awaited()
