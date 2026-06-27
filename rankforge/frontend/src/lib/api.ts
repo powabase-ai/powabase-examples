@@ -785,7 +785,9 @@ export const clustersApi = {
       { method: "POST" }
     ),
   backfill: (businessId: string) =>
-    request<{ assigned: number }>(
+    // The server bounds each sweep to a batch; `remaining` is true when more
+    // unclustered articles are left to process on a subsequent run.
+    request<{ assigned: number; remaining: boolean }>(
       `/api/business-profiles/${businessId}/clusters/backfill`,
       { method: "POST" }
     ),

@@ -227,10 +227,11 @@ export default function ClustersPage({
               size="sm"
               onClick={() =>
                 backfill.mutate(undefined, {
-                  onSuccess: ({ assigned }) =>
+                  onSuccess: ({ assigned, remaining }) =>
                     toast.success(
                       assigned > 0
-                        ? `Clustered ${assigned} article${assigned === 1 ? "" : "s"}`
+                        ? `Clustered ${assigned} article${assigned === 1 ? "" : "s"}` +
+                          (remaining ? " — more remain, run again" : "")
                         : "All articles are already clustered"
                     ),
                   onError: (e) =>

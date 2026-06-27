@@ -1,23 +1,12 @@
-import { dirname } from "path";
-import { fileURLToPath } from "url";
-import { FlatCompat } from "@eslint/eslintrc";
+// ESLint 9 flat config. eslint-config-next@16 already ships NATIVE flat-config arrays
+// at these subpaths, so import and spread them directly. (Routing them back through
+// @eslint/eslintrc's FlatCompat double-wraps the self-referential plugin objects and
+// crashes the config validator with "Converting circular structure to JSON".)
+import cwv from "eslint-config-next/core-web-vitals";
+import ts from "eslint-config-next/typescript";
 
-// ESLint 9 uses flat config. eslint-config-next ships the classic ("extends") shape,
-// so bridge it through FlatCompat — this is what `create-next-app` (Next 16 + ESLint 9)
-// emits. Without this file `npm run lint` (bare `eslint`) finds no config and lint is
-// effectively disabled even though eslint-config-next is installed.
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const compat = new FlatCompat({
-  baseDirectory: __dirname,
-});
-
-const eslintConfig = [
-  ...compat.extends("next/core-web-vitals", "next/typescript"),
-  {
-    ignores: [".next/**", "node_modules/**"],
-  },
+export default [
+  ...cwv,
+  ...ts,
+  { ignores: [".next/**", "node_modules/**"] },
 ];
-
-export default eslintConfig;

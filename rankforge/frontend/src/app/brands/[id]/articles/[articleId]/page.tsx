@@ -214,19 +214,21 @@ function GroundingBody({
       </p>
       {report.flagged && report.flagged.length > 0 ? (
         report.flagged.map((f, i) => {
-          // Key off the finding content, not the array index — the grounding
-          // report can re-fetch with a different ordering while selections are
-          // held, and an index-based id would then point at a different claim.
-          const gid = `grounding:${f.claim ?? f.quote ?? i}`;
+          // The WIRE selector must be index-based: the backend (_grounding_indices)
+          // parses the suffix with int(), so a content-derived id is silently dropped
+          // and the grounding fix never runs. Use a content-derived value ONLY for
+          // React's key (stable rendering across a re-ordered re-fetch).
+          const target = `grounding:${i}`;
+          const key = `grounding:${f.claim ?? f.quote ?? i}`;
           return (
             <label
-              key={gid}
+              key={key}
               className="flex cursor-pointer items-start gap-2.5 border-t border-border py-2.5 first:border-0"
             >
               <input
                 type="checkbox"
-                checked={selected.has(gid)}
-                onChange={() => onToggle(gid)}
+                checked={selected.has(target)}
+                onChange={() => onToggle(target)}
                 className="mt-1 size-3.5 shrink-0 cursor-pointer accent-[rgb(var(--ember))]"
               />
               <div className="min-w-0">
