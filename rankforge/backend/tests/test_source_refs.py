@@ -12,15 +12,16 @@ def test_empty_source_id_short_circuits():
     db = MagicMock()
     assert source_refs.source_reference_count(db, None) == 0
     assert source_refs.source_reference_count(db, "") == 0
-    db.fetch_all.assert_not_called()
+    db.fetch_one.assert_not_called()
 
 
 def test_counts_rows_across_all_registries():
     db = MagicMock()
-    # Three matching rows anywhere ⇒ count 3 (Source is still needed).
-    db.fetch_all.return_value = [{"?column?": 1}] * 3
+    # count(*) over the union ⇒ the scalar is returned directly (no per-row fetch).
+    db.fetch_one.return_value = {"n": 3}
     assert source_refs.source_reference_count(db, SID) == 3
-    sql, params = db.fetch_all.call_args.args
+    sql, params = db.fetch_one.call_args.args
+    assert "count(*)" in sql
     assert "public.brand_sources" in sql
     assert "public.research_sources" in sql
     assert "public.content_clusters" in sql

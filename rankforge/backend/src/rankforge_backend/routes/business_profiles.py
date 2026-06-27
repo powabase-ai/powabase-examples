@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from ..auth import get_current_user
+from ..auth import get_current_user, require_admin, require_editor
 from ..db import Database
 from ..models.business import (
     BusinessProfile,
@@ -63,7 +63,7 @@ def update_business_profile(
     profile_id: UUID,
     payload: BusinessProfileUpdate,
     db: Database = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(require_editor),
 ):
     row = svc.update_profile(db, profile_id, payload, user.org_id)
     if row is None:
@@ -76,7 +76,7 @@ async def delete_business_profile(
     profile_id: UUID,
     request: Request,
     db: Database = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(require_admin),
 ):
     brand = svc.get_profile(db, profile_id)
     if brand is None or brand.get("org_id") != user.org_id:

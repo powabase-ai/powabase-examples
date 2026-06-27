@@ -170,11 +170,14 @@ def attach_article(
     its cluster_role can never disagree with the cluster's pillar_article_id (no phantom
     second pillar)."""
     if role == "pillar":
+        # Claim the slot only if it's empty OR already held by THIS article — so an
+        # idempotent re-attach of the current pillar stays pillar; a genuinely
+        # contended slot (held by another article) matches 0 rows and demotes below.
         claimed = db.fetch_one(
             "update public.content_clusters set pillar_article_id = %s, "
-            "updated_at = now() where id = %s and pillar_article_id is null "
-            "returning id",
-            (article_id, cluster_id),
+            "updated_at = now() where id = %s and (pillar_article_id is null "
+            "or pillar_article_id = %s) returning id",
+            (article_id, cluster_id, article_id),
         )
         if claimed is None:
             role = "member"  # slot already filled → don't record a second pillar
@@ -452,19 +455,36 @@ async def delete_cluster(
     return deleted is not None
 
 
-async def backfill(client: PowabaseClient, db: Database, business_id: UUID) -> int:
+# Max articles clustered per backfill call. Each assign() can poll Powabase for tens
+# of seconds, so an unbounded sweep over a large unclustered set blows the request
+# timeout; the route runs this inline and reports whether more remain so the UI can
+# re-invoke until drained.
+BACKFILL_BATCH = 25
+
+
+async def backfill(
+    client: PowabaseClient, db: Database, business_id: UUID
+) -> tuple[int, bool]:
     """Assign any not-yet-clustered articles to clusters (one-time seed for articles
-    that pre-date clustering + ongoing maintenance). Returns how many were assigned.
+    that pre-date clustering + ongoing maintenance). Returns (assigned, remaining):
+    how many were assigned this call, and whether more unclustered articles remain.
+
+    Bounded to BACKFILL_BATCH per call (each assign() can poll for tens of seconds, so
+    an unbounded sweep would blow the request timeout) — the caller re-invokes until
+    `remaining` is False.
 
     Clusters are an editorial/topical-authority concept that applies regardless of
     publish state — new drafts are clustered at generation time, so the unclustered
     set is just pre-feature articles in any status (archived excluded)."""
+    # Fetch one past the batch so we can report whether more remain without a 2nd query.
     rows = db.fetch_all(
         "select id, title, keywords from public.articles "
         "where business_id = %s and cluster_id is null and status <> 'archived' "
-        "order by created_at",
-        (business_id,),
+        "order by created_at limit %s",
+        (business_id, BACKFILL_BATCH + 1),
     )
+    remaining = len(rows) > BACKFILL_BATCH
+    rows = rows[:BACKFILL_BATCH]
     founded: list[dict[str, Any]] = []
     n = 0
     for r in rows:
@@ -480,4 +500,4 @@ async def backfill(client: PowabaseClient, db: Database, business_id: UUID) -> i
                 founded.append(c)
         except Exception:  # noqa: BLE001 — one article shouldn't fail the backfill
             log.exception("backfill cluster failed for article %s", r["id"])
-    return n
+    return n, remaining

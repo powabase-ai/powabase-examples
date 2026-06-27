@@ -230,8 +230,6 @@ async def delete_run(client: PowabaseClient, db: Database, run_id: UUID) -> bool
     material, or a cluster doc) still references it (imports dedupe by URL project-wide,
     so a Source can be shared, and deleting a shared one would break the other
     consumer). Remote deletes are best-effort. Returns whether a run was deleted."""
-    if get_run(db, run_id) is None:
-        return False
     # Gather the run's Source ids BEFORE deleting it (the rows cascade away with the
     # run). Dedupe — two URLs in one run can dedupe to the same Powabase Source.
     sids = {

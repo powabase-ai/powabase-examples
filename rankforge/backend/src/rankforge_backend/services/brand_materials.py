@@ -803,7 +803,8 @@ async def _refresh_one(
     # Refresh works by deleting the old Source so the re-import isn't deduped back to
     # stale content — but only when this workspace is its sole owner. If another shares
     # it, leave it (the re-import returns the same content) rather than breaking them.
-    if old_sid and source_refs.source_reference_count(db, old_sid) == 0:
+    shared = bool(old_sid) and source_refs.source_reference_count(db, old_sid) != 0
+    if old_sid and not shared:
         try:
             await client.delete_source(old_sid)
         except Exception:  # noqa: BLE001 — stale Source delete is best-effort
@@ -811,6 +812,15 @@ async def _refresh_one(
     # Re-import fresh (no existing Source for this URL now → a real re-scrape), poll
     # extraction, re-index. Empty already_indexed so _import_one re-adds it to the KB.
     await _import_one(client, db, kb_id, {**row, "source_id": None}, set())
+    if shared:
+        # The old Source is shared by another workspace, so we couldn't delete it and
+        # the re-import dedupes straight back to the SAME Source — the page wasn't
+        # independently re-scraped. Mark the row so the UI can tell the user it was
+        # refreshed in place rather than silently no-op'ing.
+        await db.aexecute(
+            "update public.brand_sources set status = 'shared' where id = %s",
+            (row["id"],),
+        )
     return True
 
 

@@ -107,7 +107,21 @@ def test_attach_article_claims_pillar_slot():
     # The pillar slot is claimed atomically (compare-and-set on pillar_article_id is null).
     claim = db.fetch_one.call_args.args[0]
     assert "pillar_article_id = %s" in claim and "pillar_article_id is null" in claim
+    # The claim also accepts the slot already being held by THIS same article, and
+    # threads the article id as the second param for that idempotent re-claim.
+    assert "pillar_article_id = %s) returning id" in claim
+    assert db.fetch_one.call_args.args[1] == (AID, CID, AID)
     # The article is then attached AS pillar (the claim won).
+    role = db.execute.call_args.args[1][1]
+    assert role == "pillar"
+
+
+def test_attach_article_idempotent_reclaim_stays_pillar():
+    db = MagicMock()
+    # The slot is already held by THIS article → the OR-clause claim still matches,
+    # so a re-attach of the current pillar stays pillar (not downgraded to member).
+    db.fetch_one.return_value = {"id": CID}
+    clusters.attach_article(db, AID, CID, "pillar")
     role = db.execute.call_args.args[1][1]
     assert role == "pillar"
 
@@ -168,9 +182,29 @@ async def test_backfill_assigns_unclustered_articles(monkeypatch):
     monkeypatch.setattr(clusters, "assign", AsyncMock(return_value=(CID, "member")))
     attach = MagicMock()
     monkeypatch.setattr(clusters, "attach_article", attach)
-    n = await clusters.backfill(MagicMock(), db, BID)
-    assert n == 1
+    assigned, remaining = await clusters.backfill(MagicMock(), db, BID)
+    assert assigned == 1
+    assert remaining is False  # the single row fit in one batch — nothing left
     attach.assert_called_once_with(db, AID, CID, "member")
+    # The sweep is bounded: it asks for at most BACKFILL_BATCH+1 rows (one extra to
+    # detect a remainder without a second query).
+    sql, params = db.fetch_all.call_args.args
+    assert "limit %s" in sql
+    assert params[-1] == clusters.BACKFILL_BATCH + 1
+
+
+async def test_backfill_reports_remaining_when_batch_full(monkeypatch):
+    db = MagicMock()
+    # One past the batch → the extra row signals more remain; only BATCH are processed.
+    db.fetch_all.return_value = [
+        {"id": AID, "title": f"T{i}", "keywords": []}
+        for i in range(clusters.BACKFILL_BATCH + 1)
+    ]
+    monkeypatch.setattr(clusters, "assign", AsyncMock(return_value=(CID, "member")))
+    monkeypatch.setattr(clusters, "attach_article", MagicMock())
+    assigned, remaining = await clusters.backfill(MagicMock(), db, BID)
+    assert assigned == clusters.BACKFILL_BATCH  # the extra row is NOT processed
+    assert remaining is True
 
 
 # --- routes (hermetic) ---
@@ -217,10 +251,10 @@ def test_set_pillar_requires_editor(monkeypatch):
 
 
 def test_backfill_route_returns_count(monkeypatch):
-    monkeypatch.setattr(clusters, "backfill", AsyncMock(return_value=3))
+    monkeypatch.setattr(clusters, "backfill", AsyncMock(return_value=(3, True)))
     resp = _client().post(f"/api/business-profiles/{BID}/clusters/backfill")
     assert resp.status_code == 200
-    assert resp.json() == {"assigned": 3}
+    assert resp.json() == {"assigned": 3, "remaining": True}
 
 
 async def test_delete_cluster_deindexes_and_clears_members(monkeypatch):
@@ -248,6 +282,34 @@ async def test_delete_cluster_deindexes_and_clears_members(monkeypatch):
     client.delete_source.assert_awaited_once_with("doc1")
     # One transaction: clear article roles + opportunity roles + delete the row.
     assert conn.execute.call_count == 3
+
+
+async def test_delete_cluster_keeps_shared_index_doc(monkeypatch):
+    """If another workspace still references the cluster's index-doc Source (a content
+    collision), de-index here but DON'T delete the project-wide Source."""
+    db = MagicMock()
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = {"id": CID}  # final delete row
+    db.connection.return_value.__enter__.return_value = conn
+    monkeypatch.setattr(
+        clusters, "get_cluster",
+        lambda d, cid: {"id": CID, "business_id": BID, "index_doc_id": "doc1"},
+    )
+    monkeypatch.setattr(
+        clusters.brands, "get_profile", lambda d, bid: {"cluster_kb_id": "kb1"}
+    )
+    monkeypatch.setattr(clusters, "indexed_source_id", AsyncMock(return_value="idx1"))
+    # Source still referenced elsewhere (>0) → kept.
+    monkeypatch.setattr(
+        clusters.source_refs, "source_reference_count", lambda *a, **k: 1
+    )
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+
+    assert await clusters.delete_cluster(client, db, CID) is True
+    client.remove_source_from_kb.assert_awaited_once_with("kb1", "idx1")
+    client.delete_source.assert_not_awaited()  # shared — Source preserved
 
 
 def test_delete_cluster_route(monkeypatch):

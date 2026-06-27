@@ -30,16 +30,17 @@ def source_reference_count(db: Database, source_id: str | None) -> int:
     """
     if not source_id:
         return 0
-    return len(
-        db.fetch_all(
-            "select 1 from public.brand_sources where source_id = %s "
-            "union all "
-            "select 1 from public.research_sources where source_id = %s "
-            "union all "
-            "select 1 from public.content_clusters where index_doc_id = %s",
-            (source_id, source_id, source_id),
-        )
+    row = db.fetch_one(
+        "select count(*) as n from ("
+        "select 1 from public.brand_sources where source_id = %s "
+        "union all "
+        "select 1 from public.research_sources where source_id = %s "
+        "union all "
+        "select 1 from public.content_clusters where index_doc_id = %s"
+        ") t",
+        (source_id, source_id, source_id),
     )
+    return (row or {}).get("n", 0)
 
 
 def brand_exclusive_source_ids(db: Database, business_id: UUID) -> list[str]:

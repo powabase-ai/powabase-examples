@@ -41,12 +41,13 @@ async def backfill_clusters(
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(require_editor),
 ):
-    """Cluster any not-yet-clustered articles (any status but archived). Runs inline —
-    the unclustered set is bounded (pre-feature articles) — and returns how many were
-    assigned so the UI can report it ("Clustered 3" vs "all already clustered")."""
+    """Cluster any not-yet-clustered articles (any status but archived). Runs inline in
+    a bounded batch (each assign polls Powabase, so an unbounded sweep would blow the
+    request timeout) and returns how many were assigned plus whether more remain — the
+    UI reports the count ("Clustered 3") and re-invokes while `remaining` is true."""
     assert_brand_access(db, business_id, user)
-    assigned = await svc.backfill(pb, db, business_id)
-    return {"assigned": assigned}
+    assigned, remaining = await svc.backfill(pb, db, business_id)
+    return {"assigned": assigned, "remaining": remaining}
 
 
 def _guard_cluster(db: Database, cluster_id: UUID, user: CurrentUser) -> dict:
