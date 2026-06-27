@@ -46,7 +46,7 @@ export function PublishDialog({
   slug?: string | null;
   published: boolean;
 }) {
-  const publish = usePublish(articleId);
+  const publish = usePublish(articleId, brandId);
   const unpublish = useUnpublish(articleId, brandId);
   const pubs = usePublications(articleId);
   const { data: article } = useArticle(articleId);
@@ -76,6 +76,11 @@ export function PublishDialog({
     () => setUrlValue(article?.canonical_url || computed || ""),
     [article?.canonical_url, computed]
   );
+  // "Dirty" means the field differs from the auto-derived value, so Save is disabled
+  // when urlValue equals the brand-pattern URL — that's intentional, not a bug. The
+  // derived URL is ephemeral by design: there's no need to persist it to canonical_url
+  // because the backend re-derives it from the brand's url_pattern on export/publish.
+  // We only persist an explicit override the user typed.
   const urlDirty = urlValue.trim() !== (article?.canonical_url || computed || "");
 
   async function onExport(format: "markdown" | "html") {

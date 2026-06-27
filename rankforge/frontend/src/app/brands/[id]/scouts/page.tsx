@@ -1,7 +1,8 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Boxes,
   Crown,
@@ -60,6 +61,17 @@ const PLAN_SOURCES: { value: PlanSource; label: string }[] = [
   { value: "web", label: "Web" },
 ];
 
+// Editable draft of the plan: each query carries a client-only `_uid` so React can
+// key rows stably across add/remove (index keys cause focus/IME jumps). The `_uid`
+// is stripped before the plan is sent to the backend.
+type EditableQuery = ScoutPlan["queries"][number] & { _uid: string };
+type EditablePlan = Omit<ScoutPlan, "queries"> & { queries: EditableQuery[] };
+
+const newUid = () =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+
 /** The reviewable Search Plan: shows the trending queries the scout will run and lets
  *  the user add/remove/reword them and switch sources before executing. */
 function SearchPlanPanel({
@@ -74,11 +86,16 @@ function SearchPlanPanel({
   const run = useScoutRun(runId);
   const updatePlan = useUpdatePlan(runId);
   const execute = useExecuteRun(brandId);
-  const [draft, setDraft] = useState<ScoutPlan | null>(null);
+  const [draft, setDraft] = useState<EditablePlan | null>(null);
 
-  // Seed the editable draft from the generated plan once it lands.
+  // Seed the editable draft from the generated plan once it lands — tag each
+  // query with a stable client-side uid for keying.
   useEffect(() => {
-    if (run.data?.plan && draft === null) setDraft(run.data.plan);
+    if (run.data?.plan && draft === null)
+      setDraft({
+        ...run.data.plan,
+        queries: run.data.plan.queries.map((q) => ({ ...q, _uid: newUid() })),
+      });
   }, [run.data?.plan, draft]);
 
   const r = run.data;
@@ -93,7 +110,15 @@ function SearchPlanPanel({
   }
   function addQuery() {
     setDraft((d) =>
-      d ? { ...d, queries: [...d.queries, { query: "", source: "web", rationale: "" }] } : d
+      d
+        ? {
+            ...d,
+            queries: [
+              ...d.queries,
+              { query: "", source: "web", rationale: "", _uid: newUid() },
+            ],
+          }
+        : d
     );
   }
   function removeQuery(i: number) {
@@ -102,7 +127,10 @@ function SearchPlanPanel({
 
   async function runIt() {
     if (!draft) return;
-    const queries = draft.queries.filter((q) => q.query.trim());
+    // Strip the client-only `_uid` so the PATCH payload matches the backend ScoutPlan.
+    const queries = draft.queries
+      .filter((q) => q.query.trim())
+      .map(({ _uid: _drop, ...q }) => q);
     if (queries.length === 0) {
       toast.error("Add at least one search query.");
       return;
@@ -161,7 +189,7 @@ function SearchPlanPanel({
             )}
             <div className="mt-3 space-y-2">
               {draft.queries.map((q, i) => (
-                <div key={i} className="flex items-start gap-2">
+                <div key={q._uid} className="flex items-start gap-2">
                   <select
                     value={q.source}
                     onChange={(e) =>
@@ -616,6 +644,7 @@ export default function ScoutsPage({
   const { id } = use(params);
   const { profile } = useAuth();
   const canEdit = canApprove(profile?.role);
+  const qc = useQueryClient();
   const config = useScoutConfig(id);
   const relinkConfig = useRelinkConfig(id);
   const runs = useScoutRuns(id);
@@ -628,6 +657,23 @@ export default function ScoutsPage({
     cid ? clusters.data?.find((c) => c.id === cid)?.label : undefined;
 
   const lastRun = runs.data?.[0];
+
+  // The scout creates opportunity rows asynchronously, after the POST returns —
+  // so the initial invalidation on run/execute fires too early. When the latest
+  // run transitions into a terminal status, refetch the inbox so the freshly
+  // created opportunities appear.
+  const prevRunStatus = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const status = lastRun?.status;
+    const prev = prevRunStatus.current;
+    prevRunStatus.current = status;
+    if (
+      prev &&
+      prev !== status &&
+      (status === "done" || status === "failed")
+    )
+      qc.invalidateQueries({ queryKey: ["opportunities", id] });
+  }, [lastRun?.status, id, qc]);
   const active = opps.data?.filter((o) => o.status !== "dismissed") ?? [];
   const dismissed = opps.data?.filter((o) => o.status === "dismissed") ?? [];
 

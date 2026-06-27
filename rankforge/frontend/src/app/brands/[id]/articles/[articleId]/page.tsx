@@ -214,10 +214,13 @@ function GroundingBody({
       </p>
       {report.flagged && report.flagged.length > 0 ? (
         report.flagged.map((f, i) => {
-          const gid = `grounding:${i}`;
+          // Key off the finding content, not the array index — the grounding
+          // report can re-fetch with a different ordering while selections are
+          // held, and an index-based id would then point at a different claim.
+          const gid = `grounding:${f.claim ?? f.quote ?? i}`;
           return (
             <label
-              key={i}
+              key={gid}
               className="flex cursor-pointer items-start gap-2.5 border-t border-border py-2.5 first:border-0"
             >
               <input

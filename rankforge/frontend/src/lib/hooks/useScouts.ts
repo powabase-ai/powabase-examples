@@ -109,8 +109,12 @@ export function useScoutRun(runId: string | null) {
 }
 
 export function useUpdatePlan(runId: string) {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (plan: ScoutPlan) => scoutsApi.updatePlan(runId, plan),
+    // The backend returns the updated run — seed the detail cache so the
+    // reviewer's edited plan isn't overwritten by a stale poll.
+    onSuccess: (data) => qc.setQueryData(["scoutRun", runId], data),
   });
 }
 
@@ -118,9 +122,13 @@ export function useExecuteRun(businessId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (runId: string) => scoutsApi.execute(runId),
-    onSuccess: () => {
+    onSuccess: (_data, runId) => {
       qc.invalidateQueries({ queryKey: ["scoutRuns", businessId] });
       qc.invalidateQueries({ queryKey: ["opportunities", businessId] });
+      // The run-detail poll has already stopped (status was "planned" with a
+      // plan) — re-invalidate it so it refetches, sees the flip to "running",
+      // and resumes polling through to the terminal status.
+      qc.invalidateQueries({ queryKey: ["scoutRun", runId] });
     },
   });
 }

@@ -661,7 +661,6 @@ export interface PlanQuery {
 export interface ScoutPlan {
   themes: string[];
   queries: PlanQuery[];
-  edited: boolean;
 }
 
 export interface ScoutRun {

@@ -83,8 +83,12 @@ cp frontend/.env.example frontend/.env
 # and NEXT_PUBLIC_* in frontend/.env
 
 # 2. Apply the app schema to your Powabase project's Postgres
-#    (uses the Database URL from the Connect modal)
-psql "$POWABASE_DATABASE_URL" -f backend/schema/0001_init.sql
+#    (uses the Database URL from backend/.env). This runs ALL migrations in order
+#    and tracks them in public.schema_migrations — 0001_init.sql alone is NOT enough
+#    (the app needs organizations, content_clusters, brand_sources, scout plan, …).
+(cd backend && uv run python scripts/apply_schema.py)
+#    No uv? Apply every file in order by hand instead:
+#    for f in backend/schema/0*.sql; do psql "$POWABASE_DATABASE_URL" -f "$f"; done
 
 # 3. Run the stack
 docker compose up --build

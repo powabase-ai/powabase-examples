@@ -35,5 +35,7 @@ schema/0001_init.sql   # app tables (apply to the project's Database URL)
 
 ## Adding a migration
 
-For now, app schema is raw SQL in `schema/`. Add `schema/000N_*.sql` and apply with
-`psql "$POWABASE_DATABASE_URL" -f`. We may move to Alembic once it stabilizes.
+For now, app schema is raw SQL in `schema/`. Add `schema/000N_*.sql` and apply the
+whole set (in order, idempotently, tracked in `public.schema_migrations`) with
+`uv run python scripts/apply_schema.py` — not a single `psql -f`, which would leave a
+fresh DB missing every other migration. We may move to Alembic once it stabilizes.
