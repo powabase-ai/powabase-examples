@@ -1,0 +1,2 @@
+# Next.js static assets served at the site root. Kept so the Docker build's
+# `COPY /app/public` step succeeds even when there are no static files yet.
