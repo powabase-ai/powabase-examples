@@ -71,15 +71,25 @@ def _host_fetch_state(host: str) -> str:
       'dead'  — the hostname does NOT resolve (NXDOMAIN / no address): a broken link.
                 This is the common hallucination — a fabricated host like a made-up docs
                 subdomain — which the old "skip non-public" rule silently passed.
-      'skip'  — internal/private/loopback or an internal-only name: don't fetch (SSRF)
-                and don't flag (we genuinely can't reach it, so we can't judge it)."""
+      'skip'  — internal/private/loopback or an internal-only name, OR a transient
+                resolver failure (EAI_AGAIN): don't fetch (SSRF) and don't flag — we
+                genuinely can't reach/judge it, and a DNS hiccup isn't a broken link."""
     host = (host or "").strip().lower()
     if not host or host == "localhost" or host.endswith((".local", ".internal")):
         return "skip"
     try:
         infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        # NXDOMAIN / no-address → the host genuinely doesn't exist (a broken link).
+        # A transient resolver failure (EAI_AGAIN and friends) is NOT evidence the
+        # link is dead — skip it rather than flag a healthy link off a DNS hiccup.
+        return (
+            "dead"
+            if e.errno in (socket.EAI_NONAME, socket.EAI_NODATA)
+            else "skip"
+        )
     except OSError:
-        return "dead"  # the hostname itself doesn't resolve
+        return "skip"  # any other resolver error → can't judge, don't flag
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0])

@@ -1,5 +1,6 @@
 """Broken-link detection (M6 / Phase 12.3) — checker logic + route wiring."""
 
+import socket
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -97,6 +98,34 @@ def test_host_fetch_state_skips_internal_and_private_offline():
     assert linkcheck._host_fetch_state("svc.local") == "skip"
     assert linkcheck._host_fetch_state("10.0.0.1") == "skip"  # private IP literal
     assert linkcheck._host_fetch_state("127.0.0.1") == "skip"  # loopback literal
+
+
+def test_host_fetch_state_nxdomain_is_dead(monkeypatch):
+    # A truly-nonexistent host (NXDOMAIN / no address) → 'dead' (a broken link).
+    def _raise(host, port):
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _raise)
+    assert linkcheck._host_fetch_state("made-up-docs.example") == "dead"
+
+
+def test_host_fetch_state_transient_resolver_failure_is_skip(monkeypatch):
+    # EAI_AGAIN is a transient resolver hiccup, NOT evidence the link is dead — a
+    # momentary DNS failure must not mark a healthy external link broken.
+    def _raise(host, port):
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _raise)
+    assert linkcheck._host_fetch_state("real-but-flaky.example") == "skip"
+
+
+def test_host_fetch_state_public_ip_is_fetch(monkeypatch):
+    # Resolves to a public IP → go verify the URL.
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("8.8.8.8", 0))],
+    )
+    assert linkcheck._host_fetch_state("dns.example") == "fetch"
 
 
 async def test_external_reason_flags_unresolvable_host(monkeypatch):

@@ -87,8 +87,10 @@ def unpublish_article(
     db: Database = Depends(get_db),
     user: CurrentUser = Depends(require_editor),  # changes published status
 ):
-    """Take an article off the blog: revert it to draft and detach it from its cluster
-    (a pillar leaves its cluster pillar-less). Use when it's been removed from the blog."""
+    """Take an article off the blog: revert it to draft while KEEPING its cluster
+    membership (a pillar is demoted to a member and the cluster's pillar slot is
+    vacated), so a later republish rejoins the same cluster. Use when removed from the
+    blog."""
     article = gen_svc.get_article(db, article_id)
     if article is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")

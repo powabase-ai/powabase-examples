@@ -416,3 +416,93 @@ async def test_refine_with_a_meta_target_runs_fix_meta(monkeypatch):
         MagicMock(), MagicMock(), "aid", targets=["seo:keyword_title"]
     )
     fm.assert_awaited_once()
+
+
+def _targeted_env(monkeypatch, before, after, new_md="X" * 500):
+    """Wire _targeted_loop's collaborators against a mutable article state, mirroring
+    _objective_env. reflect/score mutate the state to `after` so the loop's post-rescore
+    keep/revert decision runs on realistic data."""
+    state = {"art": {"content_md": "body", **before}}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda db, aid: dict(state["art"]))
+    monkeypatch.setattr(
+        revise.gen_svc, "_update", lambda db, aid, **f: state["art"].update(f)
+    )
+    monkeypatch.setattr(revise, "ensure_reviser_agent", AsyncMock(return_value="rv"))
+    monkeypatch.setattr(revise, "_diverse_excerpts", AsyncMock(return_value="(none)"))
+    monkeypatch.setattr(revise, "_revise_once", AsyncMock(return_value=new_md))
+
+    async def _reflect(client, db, aid):
+        state["art"]["grounding_report"] = after["grounding_report"]
+
+    async def _score(client, db, aid):
+        state["art"]["seo_score"] = after["seo_score"]
+        state["art"]["geo_score"] = after["geo_score"]
+        state["art"]["readability_score"] = after.get("readability_score")
+
+    monkeypatch.setattr(quality, "reflect", _reflect)
+    monkeypatch.setattr(geo_optimize, "optimize_and_store", AsyncMock())
+    monkeypatch.setattr(scoring, "score_and_store", _score)
+    return state
+
+
+# Selected signal: readability em_dashes. Before = 30; after the rewrite it does NOT
+# improve (still 30), so _selected_total can't rise and the pass must be reverted.
+_TARGETED_BEFORE = {
+    "seo_score": SEO_MET, "geo_score": GEO_MET,
+    "readability_score": {"signals": [
+        {"key": "em_dashes", "label": "Em-dash restraint", "score": 30,
+         "fixes": ["Thin out em-dashes."]},
+    ]},
+    "grounding_report": GR_OK,
+}
+
+
+async def test_targeted_loop_reverts_when_selected_total_unmoved(monkeypatch):
+    """A targeted pass that doesn't raise the selected signals' combined score must
+    restore BOTH the prior content and the cached scores (no half-applied state)."""
+    after = {  # rescore shows the em-dash signal didn't move
+        "seo_score": SEO_MET, "geo_score": GEO_MET,
+        "readability_score": {"signals": [
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 30,
+             "fixes": ["Thin out em-dashes."]},
+        ]},
+        "grounding_report": GR_OK,
+    }
+    state = _targeted_env(monkeypatch, _TARGETED_BEFORE, after)
+    reverts: list = []
+    real_update = revise.gen_svc._update
+
+    def _track(db, aid, **f):
+        if f.get("content_md") == "body":
+            reverts.append(f)
+        real_update(db, aid, **f)
+
+    monkeypatch.setattr(revise.gen_svc, "_update", _track)
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["readability:em_dashes"],
+    )
+    assert state["art"]["content_md"] == "body"  # content reverted
+    # the revert call restored the snapshot (seo/geo/grounding/readability/json_ld)
+    assert reverts and "seo_score" in reverts[-1] and "grounding_report" in reverts[-1]
+
+
+async def test_targeted_loop_reverts_when_grounding_lost(monkeypatch):
+    """Even when the SELECTED (readability) signal improves, a pass that quietly weakens
+    factual grounding below target AND below prior must be reverted (the grounding
+    guard) — a readability-only target can't be allowed to degrade grounding."""
+    before = {**_TARGETED_BEFORE, "grounding_report": {"grounding_score": 80}}
+    after = {  # em_dashes 30→90 (selected total rises) but grounding 80→50 collapses
+        "seo_score": SEO_MET, "geo_score": GEO_MET,
+        "readability_score": {"signals": [
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 90, "fixes": []},
+        ]},
+        "grounding_report": {"grounding_score": 50},
+    }
+    state = _targeted_env(monkeypatch, before, after)
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["readability:em_dashes"],
+    )
+    assert state["art"]["content_md"] == "body"  # reverted despite the selected gain
+    assert state["art"]["grounding_report"]["grounding_score"] == 80

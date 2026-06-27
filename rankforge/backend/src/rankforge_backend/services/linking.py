@@ -118,9 +118,13 @@ def resolve_links(
     if not ids:
         return md
     brand = brands.get_profile(db, business_id)
+    # Scope to THIS business: canonical_url is built from this brand's profile, so a ref
+    # to another tenant's article id must NOT resolve to a wrong-brand URL — it falls
+    # through to the /p/{id} preview instead (defense-in-depth tenant isolation).
     rows = db.fetch_all(
-        f"select {_TARGET_COLS} from public.articles where id::text = any(%s)",
-        (list(ids),),
+        f"select {_TARGET_COLS} from public.articles "
+        "where id::text = any(%s) and business_id = %s",
+        (list(ids), business_id),
     )
     by_id = {str(r["id"]): r for r in rows}
 
@@ -384,6 +388,8 @@ def apply_suggestion(
     )
     if s is None or s["status"] != "pending" or not s.get("anchor_text"):
         return None  # a gap (null anchor) has nothing to apply — use generate_gap_link
+    if not s.get("target_article_id"):
+        return None  # defensive: a null target would store a `rf:article/None` ref
     art = gen_svc.get_article(db, s["article_id"])
     if not art:
         return None

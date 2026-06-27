@@ -151,7 +151,8 @@ def test_apply_inserts_link_rescores_and_accepts(monkeypatch):
 def test_apply_dismisses_a_stale_anchor(monkeypatch):
     db = MagicMock()
     db.fetch_one.side_effect = [
-        {"id": SID, "article_id": AID, "anchor_text": "headless cms",
+        {"id": SID, "article_id": AID, "target_article_id": TID,
+         "anchor_text": "headless cms",
          "target_url": "https://blog.x.com/guide", "status": "pending"},
         {"id": SID, "status": "dismissed"},
     ]
@@ -185,6 +186,22 @@ def test_resolve_links_replaces_refs_with_canonical(monkeypatch):
     ]
     out = linking.resolve_links(db, BID, f"See [the guide](rf:article/{TID}) now.")
     assert out == "See [the guide](https://blog.x.com/headless-guide) now."
+
+
+def test_resolve_links_prefers_explicit_canonical_url(monkeypatch):
+    # A target row with its OWN canonical_url override wins verbatim over the brand's
+    # url_pattern render (the override is where the article actually lives).
+    db = MagicMock()
+    monkeypatch.setattr(
+        linking.brands, "get_profile",
+        lambda d, b: {"url_pattern": "https://blog.x.com/{slug}"},
+    )
+    db.fetch_all.return_value = [
+        {"id": TID, "title": "T", "slug": "headless-guide", "keywords": [],
+         "canonical_url": "https://docs.x.com/custom-path"},
+    ]
+    out = linking.resolve_links(db, BID, f"See [the guide](rf:article/{TID}) now.")
+    assert out == "See [the guide](https://docs.x.com/custom-path) now."
 
 
 def test_resolve_links_noop_without_refs():

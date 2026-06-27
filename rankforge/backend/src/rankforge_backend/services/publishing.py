@@ -162,23 +162,18 @@ async def publish(
     public_base_url: str | None = None,
 ) -> dict[str, Any] | None:
     """Publish an article. 'export' just marks it published + crawlable; 'webhook'
-    POSTs the payload to config.url. Caches rendered HTML and sets status=published."""
+    POSTs the payload to config.url. The webhook is SSRF-validated AND delivered BEFORE
+    status is flipped to 'published', so neither an invalid URL nor a failed delivery
+    can leave the article live at /p/{id} while recording 'failed'."""
     article = gen_svc.get_article(db, article_id)
     if article is None:
         return None
     config = config or {}
 
-    # Flip to published. The public page renders fresh from content_md at read time,
-    # so there's no stale cached HTML to keep in sync.
-    db.execute(
-        "update public.articles set status = 'published', updated_at = now() "
-        "where id = %s",
-        (article_id,),
-    )
-
-    # Prefer where the article actually lives — its canonical_url override or the
-    # brand's url_pattern — falling back to RankForge's own SSR page. (`linking` is
-    # imported at module level; `business_profiles` is local to avoid an import cycle.)
+    # Resolve where the article will live — its canonical_url override or the brand's
+    # url_pattern — falling back to RankForge's own SSR page. Independent of status, so
+    # it's safe to compute before publishing. (`linking` is module-level; importing
+    # `business_profiles` locally avoids an import cycle.)
     from . import business_profiles as brands_svc
 
     brand = (
@@ -190,8 +185,20 @@ async def publish(
         f"{public_base_url.rstrip('/')}/p/{article_id}" if public_base_url else None
     )
 
+    def _go_live() -> None:
+        # The public page renders fresh from content_md at read time, so there's no
+        # stale cached HTML to invalidate.
+        db.execute(
+            "update public.articles set status = 'published', updated_at = now() "
+            "where id = %s",
+            (article_id,),
+        )
+
     if target_type == "webhook":
         url = (config.get("url") or "").strip()
+        # Validate (SSRF guard), then DELIVER, and only flip to 'published' once delivery
+        # succeeds — so a bad/SSRF URL or a failed POST records 'failed' without ever
+        # making the content public.
         try:
             validate_webhook_url(url)
         except ValueError:
@@ -217,33 +224,54 @@ async def publish(
             async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
-            return _record(db, article_id, "webhook", status="success", url=url)
-        except Exception:  # noqa: BLE001 — record the failure, don't crash
+        except Exception:  # noqa: BLE001 — record the failure, don't publish
             return _record(db, article_id, "webhook", status="failed", url=url)
+        _go_live()
+        return _record(db, article_id, "webhook", status="success", url=url)
 
-    # 'export' (and default): the article is now published + crawlable at its public URL.
+    # 'export' (and default): just mark it published + crawlable at its public URL.
+    _go_live()
     return _record(db, article_id, "export", status="success", url=public_url)
 
 
 def unpublish(db: Database, article_id: UUID) -> dict[str, Any] | None:
-    """Revert a published article to draft and detach it from its cluster — for when
-    it's been taken down from the blog. If it was the cluster's authority pillar, the
-    cluster is left pillar-less (designate a new one). Both changes commit together.
-    Returns the updated article, or None if it doesn't exist."""
+    """Revert a published article to draft — for when it's been taken down from the blog.
+
+    Cluster MEMBERSHIP is retained (cluster_id/cluster_role kept) so a later republish
+    rejoins the same cluster instead of silently dropping out. If it was the cluster's
+    authority PILLAR, only the cluster's pillar slot is vacated (so the slot can be
+    reclaimed) — the article stays a member of the cluster. All changes, plus an
+    'unpublished' audit row, commit together. Returns the updated article, or None if
+    it doesn't exist."""
     article = gen_svc.get_article(db, article_id)
     if article is None:
         return None
     with db.connection() as conn:
-        # A pillar leaving its cluster vacates the cluster's pillar slot.
+        # A pillar coming off the blog vacates the cluster's pillar slot (so a new
+        # pillar can be designated) but keeps its own cluster membership — demote it
+        # to a member rather than detaching, so republish doesn't lose the cluster.
         if article.get("cluster_role") == "pillar" and article.get("cluster_id"):
             conn.execute(
                 "update public.content_clusters set pillar_article_id = null, "
                 "pillar_locked = false where id = %s and pillar_article_id = %s",
                 (article["cluster_id"], article_id),
             )
+            conn.execute(
+                "update public.articles set status = 'draft', cluster_role = 'member', "
+                "updated_at = now() where id = %s",
+                (article_id,),
+            )
+        else:
+            conn.execute(
+                "update public.articles set status = 'draft', updated_at = now() "
+                "where id = %s",
+                (article_id,),
+            )
+        # Audit-trail symmetry with publish()'s _record() — log the takedown.
         conn.execute(
-            "update public.articles set status = 'draft', cluster_id = null, "
-            "cluster_role = null, updated_at = now() where id = %s",
+            "insert into public.publications "
+            "(article_id, target_type, status, url, external_id, published_at) "
+            "values (%s, 'unpublish', 'unpublished', null, null, null)",
             (article_id,),
         )
     return gen_svc.get_article(db, article_id)

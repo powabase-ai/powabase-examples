@@ -125,6 +125,9 @@ primary keyword once, naturally; write to entice a click, not to repeat the titl
 - Return exactly one JSON object — no prose, no code fences.
 """
 _META_KEYS = {"keyword_title", "keyword_early", "title_length", "meta_length"}
+# Targeted-refine selectors for the meta-bound SEO signals (fix_meta owns these) —
+# precomputed once rather than rebuilt per target inside refine()'s any(...).
+_SEO_META_SELECTORS = {f"seo:{k}" for k in _META_KEYS}
 
 
 async def ensure_meta_agent(client: PowabaseClient) -> str:
@@ -746,7 +749,11 @@ def _targeted_issues(article: dict, targets: list[str]) -> list[str]:
     """Concrete reviser instructions for exactly the selected signals/claims — across
     ANY axis, deterministic readability tells (em-dashes, AI vocab) included. The
     instructions are rebuilt server-side from the stored scores, never trusted from the
-    client. Meta-bound signals are skipped here (fix_meta owns those)."""
+    client. Meta-bound signals are skipped here (fix_meta owns those).
+
+    Already-maxed selections (a signal already at 100 — no headroom to rise) are
+    filtered OUT: the keep gate (_selected_total must strictly rise) could never keep a
+    pass that only targets them, so offering them would just burn a no-op refine."""
     sel = set(targets)
     issues: list[str] = []
     for axis, score_key in _AXIS_SCORE_KEY.items():
@@ -756,6 +763,8 @@ def _targeted_issues(article: dict, targets: list[str]) -> list[str]:
         for s in score.get("signals", []):
             if f"{axis}:{s.get('key')}" not in sel or s.get("key") in _META_KEYS:
                 continue
+            if (s.get("score") or 0) >= 100:
+                continue  # already maxed — no headroom for a kept pass
             fixes = s.get("fixes") or []
             if fixes:
                 issues.extend(f"[{s['label']}] {fix}" for fix in fixes)
@@ -765,13 +774,9 @@ def _targeted_issues(article: dict, targets: list[str]) -> list[str]:
                     f"{s.get('explanation', '')} Improve this aspect.".strip()
                 )
     flagged = (article.get("grounding_report") or {}).get("flagged") or []
-    for t in sel:
-        if not t.startswith("grounding:"):
-            continue
-        try:
-            idx = int(t.split(":", 1)[1])
-        except ValueError:
-            continue
+    # Sort grounding selectors by parsed index for a deterministic append order
+    # (iterating the `sel` set directly is nondeterministic).
+    for idx in sorted(_grounding_indices(sel)):
         if 0 <= idx < len(flagged):
             f = flagged[idx]
             loc = (f.get("quote") or f.get("claim") or "")[:120]
@@ -780,6 +785,19 @@ def _targeted_issues(article: dict, targets: list[str]) -> list[str]:
                 f'— {f.get("suggestion", "")}'.strip()
             )
     return issues
+
+
+def _grounding_indices(sel: set[str]) -> list[int]:
+    """Parse the `grounding:i` selectors in `sel` into their integer indices."""
+    out: list[int] = []
+    for t in sel:
+        if not t.startswith("grounding:"):
+            continue
+        try:
+            out.append(int(t.split(":", 1)[1]))
+        except ValueError:
+            continue
+    return out
 
 
 def _selected_total(article: dict, targets: list[str]) -> float:
@@ -813,8 +831,9 @@ async def _targeted_loop(
     """Drive ONLY the user-selected issues via the reviser. Unlike the objective loop,
     this WILL fix deterministic readability tells (em-dashes, AI vocabulary, formulaic
     constructions) when the user selects them — they no longer depend on the editorial
-    LLM's discretion. Each pass is kept only if the selected issues' combined score rose
-    and no met objective axis regressed badly; otherwise content + scores are reverted."""
+    LLM's discretion. Each pass is kept only if the selected issues' combined score rose,
+    no met objective axis regressed badly, and factual grounding wasn't quietly weakened
+    (the grounding guard — see _editorial_loop); otherwise content + scores are reverted."""
     from . import geo_optimize, quality, scoring  # local: avoid import cycle
 
     _SNAP = ("seo_score", "geo_score", "grounding_report", "readability_score", "json_ld")
@@ -828,20 +847,23 @@ async def _targeted_loop(
             break
 
         _step(db, article_id, i, "revising", MAX_REVISIONS)
+        cur_md = article.get("content_md") or ""
+        snap = {k: article.get(k) for k in _SNAP}
+        wrote_new = False  # did we commit new_md? (so the except can roll it back)
         try:
             if agent_id is None:
                 agent_id = await ensure_reviser_agent(client)
             excerpts = await _diverse_excerpts(
                 client, kb_id, brief, source_ids, url_by_source
             )
-            cur_md = article["content_md"] or ""
             new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
             before = _selected_total(article, targets)
             seo, geo = article.get("seo_score"), article.get("geo_score")
-            snap = {k: article.get(k) for k in _SNAP}
+            prior_gr = (article.get("grounding_report") or {}).get("grounding_score")
             gen_svc._update(db, article_id, content_md=new_md)
+            wrote_new = True
             _step(db, article_id, i, "fact-checking", MAX_REVISIONS)
             await quality.reflect(client, db, article_id)
             _step(db, article_id, i, "optimizing", MAX_REVISIONS)
@@ -850,13 +872,33 @@ async def _targeted_loop(
             await scoring.score_and_store(client, db, article_id)
             a2 = gen_svc.get_article(db, article_id) or {}
             improved = _selected_total(a2, targets) > before
-            if not improved or _met_regressed_badly(
-                [(seo, a2.get("seo_score")), (geo, a2.get("geo_score"))]
+            # Grounding guard: even a readability-only target must not silently weaken
+            # factual grounding. If new grounding fell below target AND below prior,
+            # revert — regardless of whether grounding was an explicit target.
+            new_gr = (a2.get("grounding_report") or {}).get("grounding_score")
+            grounding_lost = (
+                prior_gr is not None
+                and new_gr is not None
+                and new_gr < prior_gr
+                and new_gr < GROUNDING_TARGET
+            )
+            if (
+                not improved
+                or grounding_lost
+                or _met_regressed_badly(
+                    [(seo, a2.get("seo_score")), (geo, a2.get("geo_score"))]
+                )
             ):
-                # Didn't move the selected issues (or wrecked a met axis) — revert.
+                # Didn't move the selected issues, lost grounding, or wrecked a met
+                # axis — revert content + the cached scores.
                 gen_svc._update(db, article_id, content_md=cur_md, **snap)
                 break
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
+            # If new_md was already committed when a later step raised, the body and the
+            # cached scores are now inconsistent (un-vetted content + stale scores) —
+            # restore the prior content + snapshot before bailing.
+            if wrote_new:
+                gen_svc._update(db, article_id, content_md=cur_md, **snap)
             break
 
 
@@ -895,7 +937,7 @@ async def refine(
     # Title/meta-bound SEO signals can't be fixed by revising the body — rewrite them up
     # front when they're failing (legacy) or explicitly selected, then re-score.
     meta_selected = targets is not None and any(
-        t in {f"seo:{k}" for k in _META_KEYS} for t in targets
+        t in _SEO_META_SELECTORS for t in targets
     )
     if _meta_failing(article.get("seo_score")) or meta_selected:
         await fix_meta(client, db, article_id, article, brief)

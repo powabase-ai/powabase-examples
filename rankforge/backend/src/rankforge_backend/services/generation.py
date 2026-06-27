@@ -654,9 +654,11 @@ async def run_generation_task(
         # writer can emit a plausible-but-dead deep link even when grounded) is flagged
         # immediately, not at publish time. Never let a link-check failure fail the run.
         if business_id:
-            try:
-                from . import linkcheck
+            # Local import: linkcheck imports generation at module level, so a top-level
+            # import here would form a real generation<->linkcheck cycle.
+            from . import linkcheck
 
+            try:
                 await linkcheck.check_article(db, business_id, article_id)
             except Exception:  # noqa: BLE001
                 log.exception("post-generation link check failed for %s", article_id)
@@ -697,7 +699,26 @@ def delete_article(db: Database, article_id: UUID) -> bool:
     and broken-link findings cascade; cluster membership is FK ON DELETE SET NULL (a
     deleted pillar leaves its cluster pillar-less, not removed). Articles own no
     per-article Powabase resource, so there's nothing to clean up remotely. Returns
-    whether a row was deleted."""
+    whether a row was deleted.
+
+    LIMITATION: APPLIED internal links baked into OTHER articles' bodies as
+    `rf:article/{deleted_id}` are NOT rewritten here — after delete they resolve to a
+    dead /p/{deleted_id} preview. We log the citing articles (below) so an operator can
+    re-link/re-score them, but we deliberately do not edit other articles' content_md."""
+    # Find articles that cite this one (via staged suggestions or recorded link health)
+    # BEFORE the delete cascades those rows away, so the log names the affected pieces.
+    citing = db.fetch_all(
+        "select distinct article_id from public.link_suggestions "
+        "where target_article_id = %s and article_id <> %s",
+        (article_id, article_id),
+    )
+    citing_ids = [r["article_id"] for r in citing]
+    if citing_ids:
+        log.warning(
+            "deleting article %s leaves applied internal links dangling in %d "
+            "article(s): %s — re-link/re-score them",
+            article_id, len(citing_ids), citing_ids,
+        )
     # An opportunity drafted into this article points at it. The FK would null its
     # article_id but leave it stranded in a dead 'drafted' state (no inbox action) —
     # so return it to the inbox first, ready to re-draft or dismiss. One transaction:

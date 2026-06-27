@@ -1,5 +1,6 @@
 """Article (Stage C) endpoints — async generation + status polling."""
 
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -29,6 +30,8 @@ from ..services import revise as revise_svc
 from ..services import scoring as scoring_svc
 from ..tasks import spawn
 from .deps import get_db, get_powabase
+
+log = logging.getLogger("rankforge.routes.articles")
 
 # Every article endpoint requires an authenticated user.
 router = APIRouter(
@@ -174,7 +177,7 @@ async def _refine_and_finish(
             try:
                 await linkcheck_svc.check_article(db, final["business_id"], article_id)
             except Exception:  # noqa: BLE001 — link check is advisory
-                pass
+                log.exception("post-refine link check failed for %s", article_id)
         svc._update(
             db, article_id,
             generation_status=terminal,
@@ -205,7 +208,11 @@ async def refine_article(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "generation already in progress"
         )
-    spawn(_refine_and_finish(pb, db, article_id, body.targets if body else None))
+    # Normalize an empty selection (`{"targets": []}`) to None so it runs the legacy
+    # auto-refine instead of taking the targeted path into a guaranteed no-op (which
+    # would still burn a rate-limit token for zero work).
+    targets = (body.targets or None) if body else None
+    spawn(_refine_and_finish(pb, db, article_id, targets))
     return svc.get_article(db, article_id)
 
 

@@ -559,7 +559,7 @@ async def score_and_store(
     from . import linking
 
     md = linking.resolve_links(
-        db, article["business_id"], article.get("content_md") or ""
+        db, article.get("business_id"), article.get("content_md") or ""
     )
 
     seo = score_seo(md, article.get("meta_title") or article.get("title") or "",

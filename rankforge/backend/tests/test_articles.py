@@ -202,6 +202,7 @@ def test_delete_article_recovers_drafted_opportunities():
     """A 'drafted' opportunity tied to the article is returned to the inbox before the
     row is deleted (one transaction), so it isn't left stranded with a dead link."""
     db = MagicMock()
+    db.fetch_all.return_value = []  # no other articles cite this one
     conn = MagicMock()
     conn.execute.return_value.fetchone.return_value = {"id": ARTICLE["id"]}
     db.connection.return_value.__enter__.return_value = conn
