@@ -44,7 +44,12 @@ export function useUpdateBrand() {
       id: string;
       data: Partial<BusinessProfileInput>;
     }) => brandsApi.update(id, data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
+    // Refresh BOTH the list and the single-brand detail cache — else a url_pattern
+    // save renders stale in InternalLinksPanel/PublishDialog until staleTime elapses.
+    onSuccess: (_data, { id }) => {
+      qc.invalidateQueries({ queryKey: KEY });
+      qc.invalidateQueries({ queryKey: ["business-profile", id] });
+    },
   });
 }
 
@@ -52,6 +57,9 @@ export function useDeleteBrand() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => brandsApi.remove(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: KEY });
+      qc.removeQueries({ queryKey: ["business-profile", id] });
+    },
   });
 }

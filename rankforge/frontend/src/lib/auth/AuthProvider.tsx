@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 
-import { accountApi, type Profile } from "@/lib/api";
+import { accountApi, ApiError, type Profile } from "@/lib/api";
 import { signInWithPassword, signUp as gtSignUp, type Session } from "./gotrue";
 import {
   loadSession,
@@ -60,9 +60,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .then((me) => {
         if (!cancelled) setProfile(me);
       })
-      .catch(() => {
-        // Token invalid/expired beyond refresh — drop the session.
-        if (!cancelled) setSession(null);
+      .catch((e) => {
+        // Only a genuinely invalid/expired token (401, after api.ts already tried a
+        // refresh) should drop the session. A transient 5xx — e.g. a 503 from pool
+        // exhaustion that the backend answers with Retry-After backoff — must NOT log
+        // every client out at once under load.
+        if (!cancelled && e instanceof ApiError && e.status === 401)
+          setSession(null);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

@@ -4,6 +4,12 @@
  * Lives outside React so the plain `api.ts` fetch wrapper can read the token and
  * trigger a refresh on a 401. `AuthProvider` subscribes to keep React state in
  * sync. Persisted to localStorage so a reload keeps you signed in.
+ *
+ * SECURITY TRADEOFF: this is the standard Supabase/GoTrue SPA pattern, but it stores
+ * the long-lived `refresh_token` in localStorage — so any XSS that can read it is a
+ * *persistent* account takeover (not just a short-lived access token). For a
+ * hardened deployment, prefer holding the refresh token in an httpOnly cookie
+ * (refresh via a same-origin backend route) and keep only the access token in JS.
  */
 
 import { refreshGrant, signOutRequest, type Session } from "./gotrue";
