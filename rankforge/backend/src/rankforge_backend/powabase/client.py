@@ -13,11 +13,19 @@ Conventions baked in (see the `powabase` skill for the why):
   the canonical flow from the skill, kept thin on purpose.
 """
 
+import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+
+log = logging.getLogger("rankforge.powabase")
+
+# Transient statuses worth retrying with backoff (per CLAUDE.md: 503/429 → backoff;
+# 402 and other 4xx → never retry, they won't get better and 402 is a hard billing no).
+_RETRY_STATUSES = frozenset({429, 503})
 
 
 class PowabaseError(RuntimeError):
@@ -36,7 +44,16 @@ class PowabaseClient:
     shutdown.
     """
 
-    def __init__(self, base_url: str, service_role_key: str, *, timeout: float = 60.0):
+    def __init__(
+        self,
+        base_url: str,
+        service_role_key: str,
+        *,
+        timeout: httpx.Timeout | float | None = None,
+        max_retries: int = 3,
+        backoff_base: float = 0.5,
+        backoff_cap: float = 8.0,
+    ):
         if not base_url or not service_role_key:
             raise ValueError("base_url and service_role_key are required")
         self._base_url = base_url.rstrip("/")
@@ -48,6 +65,15 @@ class PowabaseClient:
             "apikey": service_role_key,
             "Authorization": f"Bearer {service_role_key}",
         }
+        if timeout is None:
+            # Split timeouts: connect fast, but allow long READS. The blocking /run path
+            # returns only when the model finishes, and the heaviest agents (opus +
+            # extended thinking) routinely exceed 60s — a flat 60s read would
+            # ReadTimeout mid-generation and 500/silently-disable the grounding gate.
+            timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+        self._max_retries = max_retries
+        self._backoff_base = backoff_base
+        self._backoff_cap = backoff_cap
         self._client = httpx.AsyncClient(
             base_url=self._base_url, headers=self._headers, timeout=timeout
         )
@@ -55,18 +81,44 @@ class PowabaseClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def _backoff(self, resp: httpx.Response, attempt: int) -> None:
+        """Sleep before a retry — honor Retry-After when the server sends it, else
+        exponential backoff (capped)."""
+        ra = resp.headers.get("Retry-After")
+        if ra and ra.strip().isdigit():
+            delay = float(ra)
+        else:
+            delay = min(self._backoff_base * (2**attempt), self._backoff_cap)
+        log.warning(
+            "powabase %s — retrying in %.1fs (attempt %d/%d)",
+            resp.status_code, delay, attempt + 1, self._max_retries,
+        )
+        await asyncio.sleep(delay)
+
     # --- low-level ---
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        resp = await self._client.request(method, path, **kwargs)
-        if resp.status_code >= 400:
+        attempt = 0
+        while True:
             try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise PowabaseError(resp.status_code, body)
-        if resp.content:
-            return resp.json()
-        return None
+                resp = await self._client.request(method, path, **kwargs)
+            except httpx.TimeoutException as e:
+                # Don't retry a timeout — the call may have already done paid work; map
+                # it to a 504 PowabaseError so callers handle it like any upstream error
+                # (and the brief/generation routes turn RuntimeError into a 502/failed).
+                raise PowabaseError(504, f"upstream timeout: {e}") from e
+            if resp.status_code >= 400:
+                if resp.status_code in _RETRY_STATUSES and attempt < self._max_retries:
+                    await self._backoff(resp, attempt)
+                    attempt += 1
+                    continue
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = resp.text
+                raise PowabaseError(resp.status_code, body)
+            if resp.content:
+                return resp.json()
+            return None
 
     # --- agents (research) ---
     async def get_agents(self) -> Any:
@@ -187,15 +239,29 @@ class PowabaseClient:
         payload: dict[str, Any] = {"message": message}
         if session_id:
             payload["session_id"] = session_id
-        async with self._client.stream(
-            "POST", f"/api/agents/{agent_id}/run/stream", json=payload
-        ) as resp:
-            if resp.status_code >= 400:
-                body = await resp.aread()
-                raise PowabaseError(resp.status_code, body.decode(errors="replace"))
-            async for line in resp.aiter_lines():
-                if line:
-                    yield line
+        attempt = 0
+        while True:
+            async with self._client.stream(
+                "POST", f"/api/agents/{agent_id}/run/stream", json=payload
+            ) as resp:
+                if resp.status_code >= 400:
+                    # Retry only on the INITIAL status, before any SSE data — once the
+                    # stream yields, a retry would replay a partial (paid) run.
+                    if (
+                        resp.status_code in _RETRY_STATUSES
+                        and attempt < self._max_retries
+                    ):
+                        await self._backoff(resp, attempt)
+                        attempt += 1
+                        continue
+                    body = await resp.aread()
+                    raise PowabaseError(
+                        resp.status_code, body.decode(errors="replace")
+                    )
+                async for line in resp.aiter_lines():
+                    if line:
+                        yield line
+            return
 
     async def run_agent(
         self, agent_id: str, message: str, *, session_id: str | None = None

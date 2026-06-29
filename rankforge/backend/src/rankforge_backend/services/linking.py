@@ -314,11 +314,19 @@ def _insert_suggestion(
 
 
 def suggest_links(
-    db: Database, business_id: UUID, article_id: UUID
+    db: Database,
+    business_id: UUID,
+    article_id: UUID,
+    *,
+    candidates: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Stage internal-link suggestions, cluster-aware. Structural cluster links
     (member→pillar, pillar→members) come first — with a GAP staged when there's no
-    natural anchor — then incidental cross-article mentions. Idempotent."""
+    natural anchor — then incidental cross-article mentions. Idempotent.
+
+    `candidates` lets a library-wide caller (run_relink) pass the brand's published
+    articles ONCE instead of this re-fetching the whole library per call — turning the
+    relink sweep from O(N²) into O(N). When omitted, the targets are fetched here."""
     art = gen_svc.get_article(db, article_id)
     if not art:
         return []
@@ -367,8 +375,14 @@ def suggest_links(
     # 1) Structural cluster links first (they earn the gap treatment).
     for target, kind in _structural_targets(db, art):
         _consider(target, kind)
-    # 2) Incidental cross-article mentions.
-    for target in _link_targets(db, business_id, article_id):
+    # 2) Incidental cross-article mentions. Reuse a caller-provided candidate set
+    # (excluding this article) when given, else fetch the brand's published library.
+    targets = (
+        [t for t in candidates if str(t["id"]) != str(article_id)]
+        if candidates is not None
+        else _link_targets(db, business_id, article_id)
+    )
+    for target in targets:
         _consider(target, _MENTION)
     return out
 

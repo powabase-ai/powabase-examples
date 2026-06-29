@@ -23,7 +23,8 @@ def test_run_relink_scans_library_and_reschedules(monkeypatch):
     db.fetch_all.return_value = [{"id": A1}, {"id": A2}]  # two published articles
     # each article yields one new suggestion
     monkeypatch.setattr(
-        relink.linking, "suggest_links", lambda d, bid, aid: [{"id": "x"}]
+        relink.linking, "suggest_links",
+        lambda d, bid, aid, candidates=None: [{"id": "x"}],
     )
     out = relink.run_relink(db, BID)
     assert out == {"articles_scanned": 2, "suggestions_found": 2}
@@ -37,7 +38,7 @@ def test_run_relink_reschedules_even_if_an_article_fails(monkeypatch):
     db.fetch_one.return_value = {"business_id": BID, "cadence": "monthly"}
     db.fetch_all.return_value = [{"id": A1}, {"id": A2}]
 
-    def boom(d, bid, aid):
+    def boom(d, bid, aid, candidates=None):
         if aid == A1:
             raise RuntimeError("nope")
         return [{"id": "y"}]

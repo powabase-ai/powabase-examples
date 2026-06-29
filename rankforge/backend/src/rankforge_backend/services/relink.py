@@ -105,10 +105,22 @@ def run_relink(db: Database, business_id: UUID) -> dict[str, Any]:
             f"order by updated_at desc limit {_MAX_ARTICLES_PER_RUN}",
             (business_id,),
         )
+        # Fetch the candidate link-target set ONCE and reuse it for every article, so
+        # the sweep is O(N) instead of suggest_links -> _link_targets re-fetching the
+        # whole published library per article (O(N²)).
+        candidates = db.fetch_all(
+            f"select {linking._TARGET_COLS} from public.articles "
+            "where business_id = %s and status = 'published'",
+            (business_id,),
+        )
         for row in published:
             scanned += 1
             try:
-                found += len(linking.suggest_links(db, business_id, row["id"]))
+                found += len(
+                    linking.suggest_links(
+                        db, business_id, row["id"], candidates=candidates
+                    )
+                )
             except Exception:  # noqa: BLE001 — one article shouldn't fail the whole run
                 log.exception("relink: suggest failed for article %s", row["id"])
         db.execute(

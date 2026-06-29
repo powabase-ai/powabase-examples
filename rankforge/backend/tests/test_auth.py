@@ -136,11 +136,14 @@ def test_set_role_requires_admin():
 
 def test_set_role_admin_ok():
     db = MagicMock()
-    # set_role first runs a last-admin guard query, then the UPDATE.
-    db.fetch_one.side_effect = [
-        {"cur": "editor", "admins": 2},
-        _full_profile("editor"),
-    ]
+    # Demotion runs in a locking transaction: lock+read the org's admin rows, then
+    # UPDATE ... returning.
+    cur = (
+        db.connection.return_value.__enter__.return_value
+        .cursor.return_value.__enter__.return_value
+    )
+    cur.fetchall.return_value = [{"id": UID, "role": "editor"}]  # target, not an admin
+    cur.fetchone.return_value = _full_profile("editor")
     admin = CurrentUser(id=UID, email="a@test", role="admin", org_id=ORG)
     resp = _as(db, admin).patch(f"/api/members/{UID}", json={"role": "editor"})
     assert resp.status_code == 200
