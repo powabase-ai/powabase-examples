@@ -116,7 +116,12 @@ async def _external_reason(
         if resp.status_code in (403, 405, 501):  # some servers reject HEAD
             resp = await client.get(url)
         # redirects are not followed → 3xx means the link resolves (healthy).
-        if resp.status_code >= 400:
+        # Only a definitively-GONE resource is a broken link: 404/410. Any other
+        # response means the host resolved AND the server answered — a 401/403/429
+        # (auth wall / bot-block / rate-limit) or a transient 5xx is NOT evidence the
+        # page is fabricated or dead, and flagging it just cries wolf on real links
+        # (e.g. npmjs.com / nvd.nist.gov 403 their HEAD+GET to non-browser clients).
+        if resp.status_code in (404, 410):
             return resp.status_code, f"HTTP {resp.status_code}"
         return resp.status_code, None
     except httpx.HTTPError:

@@ -137,6 +137,42 @@ async def test_external_reason_flags_unresolvable_host(monkeypatch):
     assert status is None and reason and "resolve" in reason
 
 
+class _FakeResp:
+    def __init__(self, status: int):
+        self.status_code = status
+
+
+class _FakeClient:
+    """Minimal stand-in for httpx.AsyncClient.head/get."""
+    def __init__(self, head_status: int, get_status: int | None = None):
+        self._head, self._get = head_status, get_status
+
+    async def head(self, url):
+        return _FakeResp(self._head)
+
+    async def get(self, url):
+        return _FakeResp(self._get if self._get is not None else self._head)
+
+
+async def test_external_reason_403_bot_block_is_not_broken(monkeypatch):
+    # The host resolves and the server answers — a 403 (bot-block/auth wall, e.g.
+    # npmjs.com / nvd.nist.gov) is NOT a broken link, so it must not be flagged.
+    monkeypatch.setattr(linkcheck, "_host_fetch_state", lambda h: "fetch")
+    status, reason = await linkcheck._external_reason(
+        _FakeClient(403, 403), "https://www.npmjs.com/package/x"
+    )
+    assert status == 403 and reason is None
+
+
+async def test_external_reason_404_is_broken(monkeypatch):
+    # A definitively-gone resource (404/410) IS a broken link.
+    monkeypatch.setattr(linkcheck, "_host_fetch_state", lambda h: "fetch")
+    status, reason = await linkcheck._external_reason(
+        _FakeClient(404), "https://github.com/x/blob/main/MISSING.md"
+    )
+    assert status == 404 and reason == "HTTP 404"
+
+
 # --- routes (hermetic) ---
 def _brand_db() -> MagicMock:
     db = MagicMock()
