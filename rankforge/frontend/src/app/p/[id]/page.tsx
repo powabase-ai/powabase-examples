@@ -69,7 +69,9 @@ export default async function PublicArticlePage({
       )}
       <article className="prose prose-neutral max-w-none">
         <h1>{a.title}</h1>
-        {/* content_html is sanitized server-side (nh3) before storage. */}
+        {/* content_html is rendered fresh per request from content_md and sanitized
+            server-side with nh3 — it is NOT stored. Don't "optimize" this into a
+            cached/stored value that would bypass the per-request sanitize. */}
         <div dangerouslySetInnerHTML={{ __html: a.content_html ?? "" }} />
       </article>
     </main>

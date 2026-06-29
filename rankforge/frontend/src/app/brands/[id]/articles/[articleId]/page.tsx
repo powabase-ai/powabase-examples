@@ -438,7 +438,7 @@ export default function ArticleView({
     setRefineTargets(new Set());
   }, [articleId]);
 
-  // Warn before leaving with unsaved edits.
+  // Warn before leaving with unsaved edits — full page unload (reload/close/external).
   useEffect(() => {
     if (!dirty) return;
     const handler = (e: BeforeUnloadEvent) => {
@@ -447,6 +447,42 @@ export default function ArticleView({
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
+
+  // beforeunload does NOT fire on App Router CLIENT navigation, so the in-app back
+  // link / sidebar / BrandSwitcher would silently discard the draft. Intercept
+  // internal <Link> clicks in the capture phase (before Next's handler) and confirm.
+  useEffect(() => {
+    if (!dirty) return;
+    const onClick = (e: MouseEvent) => {
+      if (
+        e.defaultPrevented ||
+        e.button !== 0 ||
+        e.metaKey ||
+        e.ctrlKey ||
+        e.shiftKey ||
+        e.altKey
+      )
+        return;
+      const anchor = (e.target as HTMLElement)?.closest?.("a");
+      const href = anchor?.getAttribute("href");
+      // Only guard in-app navigations (skip new-tab, download, external, hash-only).
+      if (
+        !anchor ||
+        !href ||
+        anchor.target === "_blank" ||
+        anchor.hasAttribute("download") ||
+        href.startsWith("#") ||
+        /^[a-z]+:\/\//i.test(href)
+      )
+        return;
+      if (!window.confirm("Discard unsaved changes?")) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
   }, [dirty]);
   const schemaTypes =
     ((a?.json_ld?.["@graph"] as Array<{ "@type"?: string }>) ?? [])
@@ -832,8 +868,18 @@ export default function ArticleView({
                 </div>
               ) : (
                 a.content_md && (
-                  <article className="mt-8">
-                    <Markdown>{resolveInternalRefs(a.content_md, id)}</Markdown>
+                  // Render the SAME server-rendered, nh3-sanitized HTML the public
+                  // page ships, so a reviewer sees exactly what publishes (embedded
+                  // HTML from a scraped source renders live here, not as inert text).
+                  // Fall back to client markdown only if content_html isn't present.
+                  <article className="prose prose-neutral max-w-none mt-8">
+                    {a.content_html != null ? (
+                      <div
+                        dangerouslySetInnerHTML={{ __html: a.content_html }}
+                      />
+                    ) : (
+                      <Markdown>{resolveInternalRefs(a.content_md, id)}</Markdown>
+                    )}
                   </article>
                 )
               )}

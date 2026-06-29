@@ -399,6 +399,9 @@ export interface Article extends ArticleSummary {
   slug?: string | null;
   generation_error?: string | null;
   content_md: string;
+  // Server-rendered, nh3-sanitized HTML identical to the public /p/{id} output —
+  // present on the single-article GET so the preview shows exactly what ships.
+  content_html?: string | null;
   meta_title?: string | null;
   meta_description?: string | null;
   seo_score?: Score | null;
