@@ -230,6 +230,42 @@ def test_update_article_patches():
     assert "update public.articles" in sql
 
 
+def _status_patch(role: str, current: str, new: str):
+    """PATCH an article in `current` status to `new` as `role`. Returns the response."""
+    db = MagicMock()
+    db.fetch_one.return_value = {**ARTICLE, "status": current, "org_id": UUID(ADMIN_ORG)}
+    user = CurrentUser(id=BID, role=role, org_id=ADMIN_ORG)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    return TestClient(with_auth(app, user)).patch(
+        f"/api/articles/{ARTICLE['id']}", json={"status": new}
+    )
+
+
+def test_writer_cannot_unpublish_via_patch():
+    # A writer reverting a published article (un-publish / take-down) is an editorial
+    # reversal — must be blocked, not just forward approve/publish.
+    assert _status_patch("writer", "published", "draft").status_code == 403
+    assert _status_patch("writer", "approved", "in_review").status_code == 403
+    assert _status_patch("writer", "published", "archived").status_code == 403
+
+
+def test_writer_cannot_publish_via_patch():
+    assert _status_patch("writer", "in_review", "published").status_code == 403
+    assert _status_patch("writer", "in_review", "approved").status_code == 403
+
+
+def test_writer_may_move_between_own_states():
+    # draft <-> in_review is the writer's own flow — allowed.
+    assert _status_patch("writer", "draft", "in_review").status_code == 200
+    assert _status_patch("writer", "in_review", "draft").status_code == 200
+
+
+def test_editor_can_unpublish_via_patch():
+    assert _status_patch("editor", "published", "draft").status_code == 200
+
+
 # --- auto link-check after refine (broken/fabricated URLs surface without a manual run) ---
 async def test_refine_and_finish_revalidates_links_before_done(monkeypatch):
     from rankforge_backend.routes import articles as art_routes

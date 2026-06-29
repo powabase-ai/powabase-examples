@@ -25,6 +25,7 @@ from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
 from ..services import linkcheck as linkcheck_svc
 from ..services import linking as linking_svc
+from ..services import publishing as pub_svc
 from ..services import quality as quality_svc
 from ..services import revise as revise_svc
 from ..services import scoring as scoring_svc
@@ -40,8 +41,10 @@ router = APIRouter(
     dependencies=[Depends(get_current_user)],
 )
 
-# Status transitions that move an article forward are gated to editors/admins.
-_GATED_STATUSES = {"approved", "published"}
+# Editor-controlled states. Entering one (approve/publish) OR leaving one
+# (un-approve / un-publish / take a live article down) is an editorial decision —
+# writers may only move between their own states (draft, in_review).
+_EDITORIAL_STATUSES = {"approved", "published"}
 
 
 def _guard_article(db: Database, article_id: UUID, user: CurrentUser) -> dict:
@@ -232,7 +235,14 @@ def get_article(
     db: Database = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    return _guard_article(db, article_id, user)
+    article = _guard_article(db, article_id, user)
+    # Render the SAME sanitized HTML the public /p/{id} page ships (resolve internal
+    # refs → markdown → nh3) so the in-app preview shows exactly what publishes — a
+    # tracking <img>/phishing <a> smuggled in via a scraped source renders live here
+    # too, instead of as inert markdown text the reviewer would never notice.
+    md = article.get("content_md") or ""
+    resolved = linking_svc.resolve_links(db, article.get("business_id"), md) if md else ""
+    return {**article, "content_html": pub_svc.render_body_html(resolved)}
 
 
 @router.patch("/{article_id}", response_model=Article)
@@ -242,16 +252,28 @@ def update_article(
     db: Database = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    _guard_article(db, article_id, user)
+    article = _guard_article(db, article_id, user)
     fields = payload.model_dump(exclude_unset=True)
-    # Approving/publishing is an editorial gate — writers may draft & submit only.
+    # Editorial gate: a status change that ENTERS or LEAVES an editor-controlled state
+    # is editor/admin only. This blocks not just approve/publish but also a writer
+    # reverting a published/approved article (un-publish / un-approve / take-down),
+    # which would silently reverse an editor's decision. Writers may still move freely
+    # between their own states (draft, in_review).
+    new_status = fields.get("status")
+    current_status = article.get("status")
     if (
-        fields.get("status") in _GATED_STATUSES
+        new_status is not None
+        and new_status != current_status
+        and (
+            new_status in _EDITORIAL_STATUSES
+            or current_status in _EDITORIAL_STATUSES
+        )
         and user.role not in ("editor", "admin")
     ):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            f"only editors or admins can set status to {fields['status']}",
+            f"only editors or admins can change status from "
+            f"'{current_status}' to '{new_status}'",
         )
     row = svc.update_article(db, article_id, fields)
     if row is None:

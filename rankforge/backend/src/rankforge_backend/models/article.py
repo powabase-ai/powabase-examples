@@ -47,6 +47,11 @@ class Article(BaseModel):
     readability_score: dict | None = None
     json_ld: dict | None = None
     grounding_report: dict | None = None
+    # Server-rendered, ref-resolved, nh3-sanitized HTML — IDENTICAL to what the public
+    # /p/{id} page ships. Populated on the single-article GET so the in-app preview
+    # shows exactly what publishes (embedded HTML from a scraped source renders live
+    # here too, not as inert markdown text the reviewer can't catch).
+    content_html: str | None = None
     canonical_url: str | None = None
     cluster_id: UUID | None = None
     cluster_role: str | None = None
