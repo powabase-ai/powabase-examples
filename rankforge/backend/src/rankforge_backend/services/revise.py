@@ -312,7 +312,12 @@ def satisfied(
     if readability is not None and not readability.get("met"):
         return False
     gs = grounding_report.get("grounding_score") if grounding_report else None
-    return gs is None or gs >= GROUNDING_TARGET
+    # Defensive: an unmeasured (None) or non-numeric grounding_score (a stray judge
+    # "N/A") is advisory — it must not block, and must never TypeError the compare and
+    # discard a finished article. (The producer also coerces it; this is the backstop.)
+    if isinstance(gs, bool) or not isinstance(gs, (int, float)):
+        return True
+    return gs >= GROUNDING_TARGET
 
 
 # A previously-met axis may dip this far below its target while we fix a FAILING one

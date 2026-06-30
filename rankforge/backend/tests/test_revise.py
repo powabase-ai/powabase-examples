@@ -48,6 +48,13 @@ def test_satisfied_when_grounding_unavailable():
     assert revise.satisfied(SEO_MET, GEO_MET, {"grounding_score": None})
 
 
+def test_satisfied_tolerates_non_numeric_grounding():
+    # A stray judge value (e.g. "N/A") must NOT TypeError the compare and discard a
+    # finished article — it's advisory, so treat it as not-blocking.
+    assert revise.satisfied(SEO_MET, GEO_MET, {"grounding_score": "N/A"})
+    assert revise.satisfied(SEO_MET, GEO_MET, {"grounding_score": True})
+
+
 def test_collect_issues_only_failing_below_floor():
     issues = revise.collect_issues(SEO_FAIL, GEO_MET, GR_LOW)
     assert any("Heading hierarchy" in i for i in issues)

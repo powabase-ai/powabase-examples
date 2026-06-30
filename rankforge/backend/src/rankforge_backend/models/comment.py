@@ -7,12 +7,12 @@ from pydantic import BaseModel, Field
 
 
 class CommentCreate(BaseModel):
-    body: str = Field(min_length=1)
-    anchor: str | None = None  # optional quoted text / section the note refers to
+    body: str = Field(min_length=1, max_length=10_000)
+    anchor: str | None = Field(default=None, max_length=2_000)
 
 
 class CommentUpdate(BaseModel):
-    body: str | None = None
+    body: str | None = Field(default=None, max_length=10_000)
     resolved: bool | None = None
 
 

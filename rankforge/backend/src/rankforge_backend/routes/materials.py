@@ -163,6 +163,8 @@ async def refresh_materials(
 @router.post(
     "/{business_id}/materials/bulk-delete",
     status_code=status.HTTP_202_ACCEPTED,
+    # Deletes do remote Powabase teardown too — rate-limit like ingest/refresh/upload.
+    dependencies=[Depends(rate_limit("materials:ingest"))],
 )
 async def bulk_delete_materials(
     business_id: UUID,
@@ -228,6 +230,7 @@ def get_materials(
 @router.delete(
     "/{business_id}/materials/{row_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit("materials:ingest"))],
 )
 async def delete_material(
     business_id: UUID,

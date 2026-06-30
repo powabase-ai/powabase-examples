@@ -43,6 +43,7 @@ async def generate_brief(
         return await svc.generate_brief(
             pb, db, research_run_id=payload.research_run_id,
             article_type=payload.article_type,
+            created_by=user.id,
         )
     except ValueError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e

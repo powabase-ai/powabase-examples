@@ -37,3 +37,15 @@ async def test_reflect_unavailable_when_no_kb(monkeypatch):
     assert rep["grounding_score"] is None and rep["error"]
     assert client.run_agent.await_count == 0  # never invoked the judge
     assert stored["grounding_report"]["error"]
+
+
+def test_normalize_grounding_coerces_judge_score():
+    # The judge prompt asks for an int but can't enforce it; coerce so a stray value
+    # can't TypeError downstream and discard a finished article.
+    assert quality._normalize_grounding({"grounding_score": "85"})["grounding_score"] == 85
+    assert quality._normalize_grounding({"grounding_score": 150})["grounding_score"] == 100
+    assert quality._normalize_grounding({"grounding_score": "N/A"})["grounding_score"] is None
+    assert quality._normalize_grounding({"grounding_score": True})["grounding_score"] is None
+    assert quality._normalize_grounding({"grounding_score": 73})["grounding_score"] == 73
+    # a non-dict reply degrades to 'unavailable'
+    assert quality._normalize_grounding(["not", "a", "dict"])["grounding_score"] is None

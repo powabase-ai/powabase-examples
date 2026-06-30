@@ -40,7 +40,11 @@ async def create_research(
     if brand is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "business profile not found")
     run = svc.create_research_run(
-        db, business_id=payload.business_id, topic=payload.topic, locale=payload.locale
+        db,
+        business_id=payload.business_id,
+        topic=payload.topic,
+        locale=payload.locale,
+        created_by=user.id,
     )
     spawn(
         svc.run_research_task(

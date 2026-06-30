@@ -187,12 +187,18 @@ def diverse_urls(urls: list[str], n: int, per_domain: int = 1) -> list[str]:
 
 # --- row helpers ---
 def create_research_run(
-    db: Database, *, business_id: UUID, topic: str, locale: str
+    db: Database,
+    *,
+    business_id: UUID,
+    topic: str,
+    locale: str,
+    created_by: UUID | None = None,
 ) -> dict[str, Any]:
     return db.fetch_one(
-        f"insert into public.research_runs (business_id, topic, locale, status) "
-        f"values (%s, %s, %s, 'searching') returning {_RESEARCH_COLUMNS}",
-        (business_id, topic, locale),
+        "insert into public.research_runs "
+        "(business_id, topic, locale, status, created_by) "
+        f"values (%s, %s, %s, 'searching', %s) returning {_RESEARCH_COLUMNS}",
+        (business_id, topic, locale, created_by),
     )
 
 
