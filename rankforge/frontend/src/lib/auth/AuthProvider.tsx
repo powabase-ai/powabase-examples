@@ -8,6 +8,8 @@ import {
   useState,
 } from "react";
 
+import { useQueryClient } from "@tanstack/react-query";
+
 import { accountApi, ApiError, type Profile } from "@/lib/api";
 import { signInWithPassword, signUp as gtSignUp, type Session } from "./gotrue";
 import {
@@ -35,15 +37,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSessionState] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  // The QueryClient lives ABOVE this provider (QueryProvider wraps AuthProvider), so
+  // it outlives a logout. We must wipe it on every logout path or the next user on a
+  // shared browser is served the previous tenant's cached lists (brands, team roster)
+  // straight from cache (global keys collide across accounts).
+  const qc = useQueryClient();
 
   // Hydrate from storage and keep React in sync with the session store.
   useEffect(() => {
     setSessionState(loadSession());
     return subscribe((ns) => {
       setSessionState(ns);
-      if (!ns) setProfile(null);
+      if (!ns) {
+        setProfile(null);
+        // Covers sign-out AND session-expiry / forced-logout (all route through
+        // setSession(null) → this subscriber).
+        qc.clear();
+      }
     });
-  }, []);
+  }, [qc]);
 
   // Resolve the caller's profile (role) whenever the access token changes.
   const token = session?.access_token;
@@ -92,7 +104,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = useCallback(async () => {
     await sessionSignOut();
-  }, []);
+    qc.clear(); // belt-and-suspenders: drop the previous tenant's cached data
+  }, [qc]);
 
   return (
     <Ctx.Provider
