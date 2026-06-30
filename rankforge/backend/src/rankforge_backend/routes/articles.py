@@ -16,7 +16,7 @@ from ..models.article import (
     RefineRequest,
 )
 from ..models.comment import Comment, CommentCreate, CommentUpdate
-from ..models.linking import BrokenLink, LinkSuggestion
+from ..models.linking import BrokenLink, LinkSuggestion, RemoveLinkRequest
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
 from ..ratelimit import rate_limit
@@ -457,6 +457,30 @@ def ignore_broken_link(
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "finding not found")
     return row
+
+
+@router.post(
+    "/{article_id}/links/health/{finding_id}/remove", response_model=Article
+)
+async def remove_broken_link(
+    article_id: UUID,
+    finding_id: UUID,
+    body: RemoveLinkRequest | None = None,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fix a broken link in the prose: unlink (keep the words, instant) or remove it and
+    let an LLM mend the sentence. Versioned + the finding closed. Returns the article."""
+    article = _guard_article(db, article_id, user)
+    _require_editor(user)
+    updated = await linkcheck_svc.remove_link(
+        pb, db, article["business_id"], article_id, finding_id,
+        keep_text=body.keep_text if body else True,
+    )
+    if updated is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "finding not found")
+    return updated
 
 
 # --- review comments ---

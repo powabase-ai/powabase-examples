@@ -106,6 +106,7 @@ Editors reject copy that reads as machine-written. Steer clear of all of these:
 
 ### Constructions to avoid
 - "It's not just X, it's Y" / "This isn't merely X, it's Y".
+- The antithesis reframe: "The way forward isn't X. It's Y" / "It isn't about X, it's about Y" — naming what something is NOT and then the "real" answer. Overused; just say what it is, directly.
 - "Whether you're a beginner or a seasoned pro, there's something for everyone".
 - "In today's fast-paced, ever-evolving world of …".
 - "Let's dive in", "Let's explore", "Buckle up".

@@ -7,6 +7,8 @@ feeds the failing signals' concrete fixes and the flagged grounding claims to a
 then re-runs fact-check → JSON-LD → scoring. Capped so it always terminates.
 """
 
+import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -19,6 +21,8 @@ from . import generation as gen_svc
 from . import grounding
 from . import research as research_svc
 from .agents import ensure_agent
+
+log = logging.getLogger("rankforge.revise")
 
 REVISER_AGENT_NAME = "rankforge-reviser"
 # The "make it satisfactory" full-article rewrite — top model. Keep a low
@@ -73,7 +77,7 @@ A draft that reads as AI-written is not "improved". As you revise, actively rewr
 - delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant, "boasts", "nestled". Replace with plain words; never several in a paragraph.
 
 ### Constructions to delete
-- "It's not just X, it's Y"; "Whether you're a beginner or a seasoned pro"; "In today's fast-paced, ever-evolving world"; "Let's dive in / Let's explore"; reflexive rule-of-three triads; "From X to Y".
+- "It's not just X, it's Y"; the antithesis reframe "X isn't A, it's B" / "The way forward isn't X. It's Y" (negate-then-reveal — just say what it is); "Whether you're a beginner or a seasoned pro"; "In today's fast-paced, ever-evolving world"; "Let's dive in / Let's explore"; reflexive rule-of-three triads; "From X to Y".
 
 ### Rhythm and punctuation
 - Thin out em-dashes (prefer commas, periods, parentheses).
@@ -470,8 +474,10 @@ to fix what reads as machine-made. You are not a proofreader and not an SEO chec
 a metronomic rhythm. Real writers vary deliberately.
 - Generic, hedged, safe phrasing where a specific number, name, version, or example \
 belongs. Vagueness is the strongest tell.
-- Formulaic constructions: "it's not just X, it's Y"; "whether you're a beginner or a \
-pro"; "in today's world"; "let's dive in"; reflexive rule-of-three triads; "from X to Y".
+- Formulaic constructions: "it's not just X, it's Y"; the antithesis reframe "X isn't \
+A, it's B" / "the way forward isn't X, it's Y" (negate-then-reveal); "whether you're a \
+beginner or a pro"; "in today's world"; "let's dive in"; reflexive rule-of-three \
+triads; "from X to Y".
 - Overused register: delve, leverage, robust, seamless, elevate, unlock, harness, \
 navigate (metaphor), foster, underscore, pivotal, crucial, vibrant, "boasts", "nestled".
 - Empty transitions (Moreover, Furthermore, Additionally, That said), both-sidesing, \
@@ -823,6 +829,125 @@ def _selected_total(article: dict, targets: list[str]) -> float:
     return total
 
 
+# --- surgical, deterministic fixes for the localized readability tells ----------------
+# These signals flag SPECIFIC text (an em-dash, a formulaic phrase, an AI-register word,
+# a filler transition) — so we fix them by rewriting ONLY the paragraphs that contain
+# them, not the whole article. That's both more reliable (the model isn't asked to
+# re-derive the entire piece) and far less collateral damage to sibling signals.
+_LOCALIZED_TELL_KEYS = frozenset(
+    {"em_dashes", "tell_phrases", "ai_vocabulary", "transitions"}
+)
+_EM_DASH_RE = re.compile(r"—")
+_TELL_INSTRUCTION = {
+    "em_dashes": "Remove every em-dash (—); use a comma, period, or parentheses "
+                 "instead. Do not leave a single em-dash.",
+    "tell_phrases": 'Rewrite formulaic AI constructions in a natural voice: "X isn\'t '
+                    'A, it\'s B" / "the way forward isn\'t…, it\'s…", "whether you\'re '
+                    'a…", "in today\'s … world", "let\'s dive in", "in conclusion", "at '
+                    'the end of the day".',
+    "ai_vocabulary": "Replace AI-register words (delve, leverage, robust, seamless, "
+                     "navigate, underscore, foster, harness, elevate, unlock, embark, "
+                     "testament, pivotal, crucial, vibrant, boasts, nestled) with "
+                     "plain, specific language.",
+    "transitions": "Cut filler transitions (Moreover, Furthermore, Additionally, That "
+                   "said); let the sentences connect directly.",
+}
+
+
+def _localized_targets(targets: list[str]) -> set[str]:
+    """Selected signal keys that are localized readability tells (surgically fixable)."""
+    keys = set()
+    for t in targets:
+        axis, _, key = t.partition(":")
+        if axis == "readability" and key in _LOCALIZED_TELL_KEYS:
+            keys.add(key)
+    return keys
+
+
+def _has_nonlocalized_target(targets: list[str]) -> bool:
+    """True if any selected target is NOT a localized readability tell (so the whole-
+    article reviser is still needed — e.g. SEO links, keyword density, grounding)."""
+    for t in targets:
+        axis, _, key = t.partition(":")
+        if t.startswith("grounding:"):
+            return True
+        if axis in _AXIS_SCORE_KEY and not (
+            axis == "readability" and key in _LOCALIZED_TELL_KEYS
+        ):
+            return True
+    return False
+
+
+def _thin_em_dashes(text: str) -> str:
+    """Deterministic backstop: replace em-dashes with commas (guarantees the em-dash
+    tell drops regardless of the model's cooperation), then tidy the punctuation."""
+    out = _EM_DASH_RE.sub(", ", text)
+    out = re.sub(r"\s*,\s*,", ",", out)  # collapse a doubled comma
+    out = re.sub(r"\s+([.,;:!?])", r"\1", out)  # no space before punctuation
+    return re.sub(r"[ \t]{2,}", " ", out)
+
+
+def _tell_instructions(keys: set[str]) -> str:
+    return "\n".join(
+        f"- {_TELL_INSTRUCTION[k]}" for k in _TELL_INSTRUCTION if k in keys
+    )
+
+
+async def _rewrite_block_for_tells(
+    client: PowabaseClient, agent_id: str, block: str, instructions: str
+) -> str:
+    """Rewrite ONE paragraph to fix the listed tells, preserving everything else."""
+    from . import linking  # local: avoid import cycle
+
+    masked, refmap = linking.mask_refs(block)
+    msg = (
+        "Rewrite the paragraph below to fix ONLY these issues, leaving everything else "
+        "(facts, links, citations, names, numbers, meaning, and roughly the length) "
+        "intact:\n"
+        f"{instructions}\n\n"
+        "Output ONLY the revised paragraph in Markdown — no preamble, no code fences.\n\n"
+        f"---PARAGRAPH---\n{masked}"
+    )
+    res = await client.run_agent(agent_id, msg)
+    out = (res.get("content") or "").strip()
+    if out.startswith("```"):
+        out = re.sub(r"^```[a-z]*\n?|\n?```$", "", out).strip()
+    return linking.restore_refs(out, refmap) if out else block
+
+
+async def _surgical_tell_rewrite(
+    client: PowabaseClient, agent_id: str, md: str, keys: set[str]
+) -> str:
+    """Fix the selected localized tells by rewriting only the offending paragraphs, with
+    a deterministic em-dash backstop so that tell is guaranteed to drop when selected."""
+    from . import scoring  # local: avoid import cycle
+
+    detectors = {
+        "em_dashes": _EM_DASH_RE,
+        "tell_phrases": scoring._TELL_RE,
+        "ai_vocabulary": scoring._AI_WORD_RE,
+        "transitions": scoring._EMPTY_TRANSITION_RE,
+    }
+    active = [detectors[k] for k in keys if k in detectors]
+    if not active:
+        return md
+    instructions = _tell_instructions(keys)
+    blocks = md.split("\n\n")
+    for i, block in enumerate(blocks):
+        if not any(rx.search(block) for rx in active):
+            continue
+        try:
+            block = await _rewrite_block_for_tells(
+                client, agent_id, block, instructions
+            )
+        except Exception:  # noqa: BLE001 — a failed block keeps its prior text
+            log.exception("surgical tell rewrite failed for a paragraph")
+        if "em_dashes" in keys:
+            block = _thin_em_dashes(block)  # guaranteed drop, even if the model balked
+        blocks[i] = block
+    return "\n\n".join(blocks)
+
+
 async def _targeted_loop(
     client: PowabaseClient,
     db: Database,
@@ -858,10 +983,21 @@ async def _targeted_loop(
         try:
             if agent_id is None:
                 agent_id = await ensure_reviser_agent(client)
-            excerpts = await _diverse_excerpts(
-                client, kb_id, brief, source_ids, url_by_source
-            )
-            new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
+            # Localized readability tells (em-dashes, formulaic phrasing, AI vocabulary,
+            # filler transitions) are fixed SURGICALLY — only the offending paragraphs
+            # are rewritten, with a deterministic em-dash backstop — so the selected
+            # signals reliably improve. Anything else (SEO/GEO/grounding) still goes
+            # through the whole-article reviser.
+            loc_keys = _localized_targets(targets)
+            if loc_keys and not _has_nonlocalized_target(targets):
+                new_md = await _surgical_tell_rewrite(
+                    client, agent_id, cur_md, loc_keys
+                )
+            else:
+                excerpts = await _diverse_excerpts(
+                    client, kb_id, brief, source_ids, url_by_source
+                )
+                new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
             before = _selected_total(article, targets)
@@ -876,10 +1012,12 @@ async def _targeted_loop(
             _step(db, article_id, i, "scoring", MAX_REVISIONS)
             await scoring.score_and_store(client, db, article_id)
             a2 = gen_svc.get_article(db, article_id) or {}
+            # Keep the pass iff the SELECTED signals improved. We deliberately do NOT
+            # veto on sibling readability signals (human_voice/flow) regressing — the
+            # user chose these issues and accepts minor collateral. Only catastrophic
+            # collateral is guarded: a grounding collapse (facts) or a met SEO/GEO axis
+            # wrecked.
             improved = _selected_total(a2, targets) > before
-            # Grounding guard: even a readability-only target must not silently weaken
-            # factual grounding. If new grounding fell below target AND below prior,
-            # revert — regardless of whether grounding was an explicit target.
             new_gr = (a2.get("grounding_report") or {}).get("grounding_score")
             grounding_lost = (
                 prior_gr is not None

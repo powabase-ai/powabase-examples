@@ -127,6 +127,22 @@ def test_readability_clean_prose_scores_well():
     assert by["tell_phrases"] == 100
 
 
+def test_readability_flags_antithesis_reframe():
+    # "X isn't A. It's B" / "isn't about A, it's about B" — the negate-then-reveal tic.
+    md = (
+        "The way forward isn't more tools. It's better process. "
+        "Success isn't about speed, it's about consistency."
+    )
+    by = {x["key"]: x["score"] for x in scoring.score_readability(md, None)["signals"]}
+    assert by["tell_phrases"] < 100  # the reframe construction was detected
+
+
+def test_antithesis_detector_ignores_plain_negation():
+    # A negation that is NOT the reframe (no "it's" payoff) must not trip the detector.
+    clean = "The build is not green. We rolled back the change and paged the on-call."
+    assert scoring._TELL_RE.search(clean) is None
+
+
 def test_readability_uses_llm_human_voice_when_present():
     s = scoring.score_readability("Some prose.", {"human_voice": 90, "flow": 80})
     by = {x["key"]: x for x in s["signals"]}

@@ -175,6 +175,10 @@ def _objective_env(monkeypatch, before, after, new_md="X" * 500):
     monkeypatch.setattr(revise, "ensure_reviser_agent", AsyncMock(return_value="rv"))
     monkeypatch.setattr(revise, "_diverse_excerpts", AsyncMock(return_value="(none)"))
     monkeypatch.setattr(revise, "_revise_once", AsyncMock(return_value=new_md))
+    # Localized readability tells route through the surgical rewriter instead.
+    monkeypatch.setattr(
+        revise, "_surgical_tell_rewrite", AsyncMock(return_value=new_md)
+    )
 
     async def _reflect(client, db, aid):
         state["art"]["grounding_report"] = after["grounding_report"]
@@ -525,3 +529,52 @@ async def test_targeted_loop_reverts_when_grounding_lost(monkeypatch):
     )
     assert state["art"]["content_md"] == "body"  # reverted despite the selected gain
     assert state["art"]["grounding_report"]["grounding_score"] == 80
+
+
+def test_thin_em_dashes_removes_every_em_dash():
+    out = revise._thin_em_dashes("A long aside — really — matters here.")
+    assert "—" not in out  # guaranteed drop
+    assert "  " not in out  # no doubled space left behind
+
+
+def test_localized_vs_nonlocalized_target_classification():
+    assert revise._localized_targets(
+        ["readability:em_dashes", "readability:tell_phrases"]
+    ) == {"em_dashes", "tell_phrases"}
+    assert revise._localized_targets(["readability:rhythm"]) == set()  # global, not local
+    assert not revise._has_nonlocalized_target(["readability:em_dashes"])
+    assert revise._has_nonlocalized_target(["seo:internal_links"])
+    assert revise._has_nonlocalized_target(["grounding:0"])
+    assert revise._has_nonlocalized_target(["readability:rhythm"])  # → whole-article
+
+
+async def test_targeted_loop_uses_surgical_rewrite_for_localized_tells(monkeypatch):
+    """A localized-tell selection (em-dashes) goes through the SURGICAL rewriter, not the
+    whole-article reviser, and is KEPT when the selected signal improves — even though a
+    sibling readability signal regressed (the user accepts minor collateral)."""
+    before = {
+        "seo_score": SEO_MET, "geo_score": GEO_MET, "grounding_report": GR_OK,
+        "readability_score": {"signals": [
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 30, "fixes": []},
+            {"key": "human_voice", "label": "Human voice", "score": 85},
+        ]},
+    }
+    after = {  # em_dashes 30→95 (selected ↑) while human_voice fell 85→60 (allowed)
+        "seo_score": SEO_MET, "geo_score": GEO_MET, "grounding_report": GR_OK,
+        "readability_score": {"signals": [
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 95, "fixes": []},
+            {"key": "human_voice", "label": "Human voice", "score": 60},
+        ]},
+    }
+    state = _targeted_env(monkeypatch, before, after)
+    surgical = AsyncMock(return_value="X" * 500)
+    monkeypatch.setattr(revise, "_surgical_tell_rewrite", surgical)
+    whole = AsyncMock(return_value="X" * 500)
+    monkeypatch.setattr(revise, "_revise_once", whole)
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["readability:em_dashes"],
+    )
+    surgical.assert_awaited()  # surgical path taken
+    whole.assert_not_awaited()  # NOT the whole-article reviser
+    assert state["art"]["content_md"] == "X" * 500  # kept despite the human_voice dip

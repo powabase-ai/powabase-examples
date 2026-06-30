@@ -37,6 +37,10 @@ _AI_WORD_RE = re.compile(r"(?<![a-z])(?:" + "|".join(_AI_WORDS) + r")(?![a-z])",
 _TELL_RE = re.compile(
     r"it'?s not (?:just|merely)\b"
     r"|\bisn'?t (?:just|merely)\b"
+    # The antithesis reframe: "X isn't A. It's B" / "isn't about A, it's about B" —
+    # negate-then-reveal-the-real-truth. A heavy AI tic ("the way forward isn't more
+    # tools. It's better process."). Bounded span so it can't run away.
+    r"|\b(?:is|are|was|were)(?:n'?t| not)\b[^.!?\n]{0,70}[,.!?—–-]\s*it'?s\b"
     r"|\bwhether you'?re an?\b"
     r"|\bin today'?s\b.{0,40}?\b(?:world|landscape|era|age)\b"
     r"|\blet'?s (?:dive in|explore|take a look|unpack)\b"
@@ -339,9 +343,11 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     tell_score = max(0.0, 100.0 - tell_hits * 25)
     sig.append(_signal(
         "tell_phrases", "Formulaic constructions", tell_score, 0.16,
-        f"{tell_hits} AI-tell construction(s) (\"it's not just X…\", \"whether "
-        "you're a…\", \"in today's… world\", \"let's dive in\", \"in conclusion\").",
-        ["Rewrite the formulaic openers/closers in a natural voice."]
+        f"{tell_hits} AI-tell construction(s) (\"it's not just X…\", the \"X isn't A, "
+        "it's B\" reframe, \"whether you're a…\", \"in today's… world\", \"let's dive "
+        "in\", \"in conclusion\").",
+        ["Rewrite the formulaic openers/closers in a natural voice; for \"X isn't A, "
+         "it's B\", just state what it is."]
         if tell_hits else []))
 
     em = content_md.count("—")

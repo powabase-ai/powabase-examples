@@ -1,7 +1,7 @@
 """Broken-link detection (M6 / Phase 12.3) — checker logic + route wiring."""
 
 import socket
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 from conftest import ADMIN_ORG, with_auth
@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
 from rankforge_backend.models.profile import CurrentUser
-from rankforge_backend.routes.deps import get_db
+from rankforge_backend.routes.deps import get_db, get_powabase
 from rankforge_backend.services import generation as gsvc
 from rankforge_backend.services import linkcheck
 
@@ -173,6 +173,88 @@ async def test_external_reason_404_is_broken(monkeypatch):
     assert status == 404 and reason == "HTTP 404"
 
 
+# --- remedy: unlink / remove a broken link ---
+def _capture_update(monkeypatch, captured: dict) -> None:
+    monkeypatch.setattr(
+        linkcheck.gen_svc, "update_article",
+        lambda d, aid, fields: captured.update(fields) or {"id": aid},
+    )
+
+
+async def test_remove_link_unlink_keeps_anchor_text(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.return_value = {**BROKEN_ROW, "url": "https://x.com/404"}
+    monkeypatch.setattr(
+        linkcheck.gen_svc, "get_article",
+        lambda d, aid: {"id": aid, "content_md": "see [the guide](https://x.com/404) now"},
+    )
+    captured: dict = {}
+    _capture_update(monkeypatch, captured)
+    # Unlink is instant + mechanical — it must NOT call the LLM editor.
+    boom = AsyncMock(side_effect=AssertionError("unlink must not call the LLM"))
+    monkeypatch.setattr(linkcheck, "ensure_link_editor_agent", boom)
+    result = await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=True)
+    assert result is not None
+    assert captured["content_md"] == "see the guide now"  # words kept, link dropped
+    assert any(
+        "status = 'resolved'" in c.args[0] for c in db.execute.call_args_list
+    )
+
+
+async def test_remove_link_rephrases_the_sentence_via_llm(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.return_value = {**BROKEN_ROW, "url": "https://x.com/404"}
+    monkeypatch.setattr(
+        linkcheck.gen_svc, "get_article",
+        lambda d, aid: {
+            "id": aid,
+            "content_md": "Read [the guide](https://x.com/404) for the setup steps.",
+        },
+    )
+    captured: dict = {}
+    _capture_update(monkeypatch, captured)
+    monkeypatch.setattr(
+        linkcheck, "ensure_link_editor_agent", AsyncMock(return_value="ed")
+    )
+
+    async def fake_rephrase(client, agent_id, block, url):
+        return "Read the setup steps."  # link gone, sentence mended
+
+    monkeypatch.setattr(linkcheck, "_rephrase_block", fake_rephrase)
+    await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=False)
+    assert captured["content_md"] == "Read the setup steps."
+    assert "x.com/404" not in captured["content_md"]
+
+
+async def test_remove_link_falls_back_to_mechanical_when_llm_keeps_the_link(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.return_value = {**BROKEN_ROW, "url": "https://x.com/404"}
+    monkeypatch.setattr(
+        linkcheck.gen_svc, "get_article",
+        lambda d, aid: {"id": aid, "content_md": "see [the guide](https://x.com/404) now."},
+    )
+    captured: dict = {}
+    _capture_update(monkeypatch, captured)
+    monkeypatch.setattr(
+        linkcheck, "ensure_link_editor_agent", AsyncMock(return_value="ed")
+    )
+
+    async def bad_rephrase(client, agent_id, block, url):
+        return block  # model didn't drop the link → must fall back to mechanical strip
+
+    monkeypatch.setattr(linkcheck, "_rephrase_block", bad_rephrase)
+    await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=False)
+    assert "x.com/404" not in captured["content_md"]  # link stripped regardless
+    assert "  " not in captured["content_md"]  # spacing tidied
+
+
+async def test_remove_link_none_when_finding_missing():
+    db = MagicMock()
+    db.fetch_one.return_value = None
+    assert await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=True) is None
+    db.execute.assert_not_called()  # nothing mutated
+
+
 # --- routes (hermetic) ---
 def _brand_db() -> MagicMock:
     db = MagicMock()
@@ -183,6 +265,7 @@ def _brand_db() -> MagicMock:
 def _client(db=None, user: CurrentUser | None = None) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_db] = lambda: db if db is not None else _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
     return TestClient(with_auth(app, user) if user else with_auth(app))
 
 
@@ -211,6 +294,41 @@ def test_check_links_requires_editor(monkeypatch):
     writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
     resp = _client(user=writer).post(f"/api/articles/{AID}/links/check")
     assert resp.status_code == 403
+
+
+_FULL_ARTICLE = {
+    "id": AID, "business_id": BID, "title": "T", "status": "draft",
+    "generation_status": "done", "content_md": "see the guide now",
+    "created_at": "2026-06-20T00:00:00Z", "updated_at": "2026-06-20T00:00:00Z",
+}
+
+
+def test_remove_broken_link_route(monkeypatch):
+    monkeypatch.setattr(gsvc, "get_article", lambda d, aid: ARTICLE)
+    monkeypatch.setattr(linkcheck, "remove_link", AsyncMock(return_value=_FULL_ARTICLE))
+    resp = _client().post(
+        f"/api/articles/{AID}/links/health/{FID}/remove", json={"keep_text": True}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == AID
+
+
+def test_remove_broken_link_requires_editor(monkeypatch):
+    monkeypatch.setattr(gsvc, "get_article", lambda d, aid: ARTICLE)
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).post(
+        f"/api/articles/{AID}/links/health/{FID}/remove", json={"keep_text": False}
+    )
+    assert resp.status_code == 403
+
+
+def test_remove_broken_link_404_when_finding_missing(monkeypatch):
+    monkeypatch.setattr(gsvc, "get_article", lambda d, aid: ARTICLE)
+    monkeypatch.setattr(linkcheck, "remove_link", AsyncMock(return_value=None))
+    resp = _client().post(
+        f"/api/articles/{AID}/links/health/{FID}/remove", json={"keep_text": True}
+    )
+    assert resp.status_code == 404
 
 
 def test_ignore_broken_link_route(monkeypatch):

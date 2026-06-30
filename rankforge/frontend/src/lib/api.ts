@@ -521,6 +521,11 @@ export const articlesApi = {
       `/api/articles/${id}/links/health/${findingId}/ignore`,
       { method: "POST" }
     ),
+  removeBrokenLink: (id: string, findingId: string, keepText: boolean) =>
+    request<Article>(
+      `/api/articles/${id}/links/health/${findingId}/remove`,
+      { method: "POST", body: JSON.stringify({ keep_text: keepText }) }
+    ),
 };
 
 /** A broken outbound link found in a published article (internal target gone /

@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
@@ -424,6 +424,16 @@ export default function ArticleView({
       return next;
     });
 
+  // Jump the preview to a linked URL (from a broken-link card). Set on click; an
+  // effect finds the anchor, scrolls to it, and flashes it.
+  const previewRef = useRef<HTMLElement>(null);
+  const [locateUrl, setLocateUrl] = useState<string | null>(null);
+  function locate(url: string) {
+    setEditing(false); // anchors only exist in the rendered preview, not the editor
+    setTab("Links");
+    setLocateUrl(url);
+  }
+
   const generating = a && !["done", "failed"].includes(a.generation_status);
   const dirty = !!a && editing && draft !== a.content_md;
 
@@ -436,7 +446,37 @@ export default function ArticleView({
     setShowHistory(false);
     setShowPublish(false);
     setRefineTargets(new Set());
+    setLocateUrl(null);
   }, [articleId]);
+
+  // Scroll the preview to a requested link and flash it (from a broken-link card).
+  useEffect(() => {
+    if (!locateUrl || !previewRef.current) return;
+    // Internal refs render as /brands/.../articles/{id}; match by the target id.
+    const idMatch = locateUrl.match(/(?:rf:article\/|\/p\/)([0-9a-fA-F-]{36})/i);
+    const target = Array.from(
+      previewRef.current.querySelectorAll("a")
+    ).find((el) => {
+      const href = el.getAttribute("href") || "";
+      return href === locateUrl || (idMatch ? href.includes(idMatch[1]) : false);
+    });
+    setLocateUrl(null);
+    if (!target) {
+      toast.message("Couldn't find that link in the preview.");
+      return;
+    }
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    const bg = target.style.backgroundColor;
+    const outline = target.style.outline;
+    target.style.backgroundColor = "rgb(var(--ember) / 0.22)";
+    target.style.outline = "2px solid rgb(var(--ember))";
+    target.style.borderRadius = "2px";
+    const t = setTimeout(() => {
+      target.style.backgroundColor = bg;
+      target.style.outline = outline;
+    }, 2200);
+    return () => clearTimeout(t);
+  }, [locateUrl]);
 
   // Warn before leaving with unsaved edits — full page unload (reload/close/external).
   useEffect(() => {
@@ -604,7 +644,11 @@ export default function ArticleView({
           </div>
         ) : tab === "Links" ? (
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
-            <InternalLinksPanel articleId={articleId} brandId={id} />
+            <InternalLinksPanel
+              articleId={articleId}
+              brandId={id}
+              onLocate={locate}
+            />
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -872,7 +916,10 @@ export default function ArticleView({
                   // page ships, so a reviewer sees exactly what publishes (embedded
                   // HTML from a scraped source renders live here, not as inert text).
                   // Fall back to client markdown only if content_html isn't present.
-                  <article className="prose prose-neutral max-w-none mt-8">
+                  <article
+                    ref={previewRef}
+                    className="prose prose-neutral max-w-none mt-8"
+                  >
                     {a.content_html != null ? (
                       <div
                         dangerouslySetInnerHTML={{ __html: a.content_html }}
