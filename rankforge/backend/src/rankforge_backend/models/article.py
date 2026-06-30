@@ -10,6 +10,15 @@ class ArticleGenerate(BaseModel):
     brief_id: UUID
 
 
+class RefineRequest(BaseModel):
+    """Which flagged issues the user picked to fix. Each selector is `axis:signal_key`
+    (e.g. `readability:em_dashes`, `seo:internal_links`) or `grounding:<index>`. When
+    omitted (None), refine drives every below-target axis automatically (legacy / the
+    post-generation auto-refine)."""
+
+    targets: list[str] | None = None
+
+
 class ArticleUpdate(BaseModel):
     title: str | None = None
     content_md: str | None = None
@@ -38,6 +47,11 @@ class Article(BaseModel):
     readability_score: dict | None = None
     json_ld: dict | None = None
     grounding_report: dict | None = None
+    # Server-rendered, ref-resolved, nh3-sanitized HTML — IDENTICAL to what the public
+    # /p/{id} page ships. Populated on the single-article GET so the in-app preview
+    # shows exactly what publishes (embedded HTML from a scraped source renders live
+    # here too, not as inert markdown text the reviewer can't catch).
+    content_html: str | None = None
     canonical_url: str | None = None
     cluster_id: UUID | None = None
     cluster_role: str | None = None

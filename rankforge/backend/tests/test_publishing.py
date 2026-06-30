@@ -54,6 +54,8 @@ def test_render_markdown_has_frontmatter():
         "https://10.0.0.1/hook",
         "https://192.168.1.5/hook",
         "https://169.254.169.254/latest/meta-data",
+        "https://100.64.0.1/hook",  # CGNAT (100.64/10) — only is_global rejects this
+        "http://api.internal/hook",  # internal name short-circuit
         "ftp://example.com/x",
         "https://",
     ],
@@ -79,6 +81,42 @@ async def test_publish_export_marks_published(monkeypatch):
     assert pub["status"] == "success"
     sql = " ".join(c.args[0].lower() for c in db.execute.call_args_list)
     assert "status = 'published'" in sql
+
+
+async def test_publish_webhook_delivery_failure_does_not_go_live(monkeypatch):
+    """A webhook that fails to DELIVER records 'failed' WITHOUT flipping the article to
+    'published' — otherwise it's publicly crawlable at /p/{id} while marked failed."""
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        "id": "p1", "article_id": AID, "target_type": "webhook",
+        "status": "failed", "created_at": "2026-06-20T00:00:00Z",
+    }
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article", lambda db, aid: {**ARTICLE, "business_id": BID}
+    )
+    monkeypatch.setattr(svc, "validate_webhook_url", lambda u: None)  # URL passes
+    monkeypatch.setattr(svc.linking, "resolve_links", lambda *a, **k: "# body")
+    monkeypatch.setattr(svc.linking, "canonical_url", lambda *a, **k: None)
+
+    class _Boom:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(svc.httpx, "AsyncClient", lambda *a, **k: _Boom())
+    pub = await svc.publish(
+        db, AID, target_type="webhook",
+        config={"url": "https://example.com/hook"}, public_base_url="http://x",
+    )
+    assert pub["status"] == "failed"
+    # _go_live() (the only db.execute) must never have run on the failure path.
+    update_sql = " ".join(c.args[0].lower() for c in db.execute.call_args_list)
+    assert "status = 'published'" not in update_sql
 
 
 def _brand_db() -> MagicMock:
@@ -110,8 +148,9 @@ def test_public_article_renders_fresh_from_markdown(monkeypatch):
     monkeypatch.setattr(
         svc, "get_published",
         lambda db, aid: {
-            "id": AID, "title": "T", "slug": "t", "meta_title": "T",
-            "meta_description": "d", "content_md": "# Live Heading\n\nbody",
+            "id": AID, "business_id": AID, "title": "T", "slug": "t",
+            "meta_title": "T", "meta_description": "d",
+            "content_md": "# Live Heading\n\nbody",
             "json_ld": {"@type": "BlogPosting"}, "updated_at": "2026-06-20T00:00:00Z",
         },
     )
@@ -134,6 +173,64 @@ def test_publish_requires_editor(monkeypatch):
     resp = TestClient(app).post(
         f"/api/articles/{AID}/publish", json={"target_type": "export"}
     )
+    assert resp.status_code == 403
+
+
+CID = "88888888-8888-8888-8888-888888888888"
+
+
+def test_unpublish_pillar_vacates_slot_but_keeps_membership(monkeypatch):
+    db = MagicMock()
+    conn = MagicMock()
+    db.connection.return_value.__enter__.return_value = conn
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        MagicMock(side_effect=[
+            {"id": AID, "business_id": BID, "cluster_id": CID, "cluster_role": "pillar"},
+            {"id": AID, "status": "draft", "cluster_id": CID, "cluster_role": "member"},
+        ]),
+    )
+    out = svc.unpublish(db, AID)
+    assert out["status"] == "draft"
+    # one transaction: vacate the cluster's pillar slot, demote to member (keep
+    # membership so republish rejoins), and record the unpublish audit row.
+    assert conn.execute.call_count == 3
+    sql = " ".join(c.args[0].lower() for c in conn.execute.call_args_list)
+    assert "content_clusters set pillar_article_id = null" in sql
+    assert "status = 'draft'" in sql and "cluster_role = 'member'" in sql
+    # membership is NOT dropped — no cluster_id = null on the article update
+    assert "cluster_id = null" not in sql
+    assert "insert into public.publications" in sql and "'unpublished'" in sql
+
+
+def test_unpublish_member_keeps_membership_without_touching_pillar(monkeypatch):
+    db = MagicMock()
+    conn = MagicMock()
+    db.connection.return_value.__enter__.return_value = conn
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        MagicMock(side_effect=[
+            {"id": AID, "business_id": BID, "cluster_id": CID, "cluster_role": "member"},
+            {"id": AID, "status": "draft", "cluster_id": CID, "cluster_role": "member"},
+        ]),
+    )
+    svc.unpublish(db, AID)
+    # no pillar clear for a member: just the draft revert + the audit row.
+    assert conn.execute.call_count == 2
+    sql = " ".join(c.args[0].lower() for c in conn.execute.call_args_list)
+    assert "content_clusters set pillar_article_id = null" not in sql
+    assert "cluster_id = null" not in sql  # membership retained
+    assert "insert into public.publications" in sql and "'unpublished'" in sql
+
+
+def test_unpublish_route_requires_editor():
+    from rankforge_backend.models.profile import CurrentUser
+
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    with_auth(app, CurrentUser(id=AID, role="writer", org_id=ADMIN_ORG))
+    resp = TestClient(app).post(f"/api/articles/{AID}/unpublish")
     assert resp.status_code == 403
 
 

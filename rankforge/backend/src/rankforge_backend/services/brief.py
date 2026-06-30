@@ -177,6 +177,7 @@ async def generate_brief(
     research_run_id: UUID,
     article_type: str | None = None,
     editorial_direction: dict[str, Any] | None = None,
+    created_by: UUID | None = None,
 ) -> dict[str, Any]:
     run = research_svc.get_run(db, research_run_id)
     if run is None:
@@ -212,8 +213,8 @@ async def generate_brief(
         insert into public.briefs
             (business_id, research_run_id, article_type, topic, primary_keyword,
              secondary_keywords, target_word_count, headings, entities, questions,
-             link_suggestions, suggested_title, suggested_meta)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             link_suggestions, suggested_title, suggested_meta, created_by)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         returning {_BRIEF_COLUMNS}
         """,
         (
@@ -230,6 +231,7 @@ async def generate_brief(
             Json(parsed.link_suggestions),
             parsed.suggested_title,
             parsed.suggested_meta,
+            created_by,
         ),
     )
 

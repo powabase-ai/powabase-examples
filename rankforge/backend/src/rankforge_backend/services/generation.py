@@ -70,6 +70,11 @@ machine-made.
 - Base every factual or statistical claim on the provided source excerpts; never \
 invent statistics or specifics.
 - Cite sources inline as Markdown links.
+- **Only ever link to a URL that appears VERBATIM in the provided source excerpts or \
+brand-materials block. Copy it exactly — character for character.** Never invent, \
+guess, shorten, or extend a URL, and never append a path you think is plausible (e.g. \
+`/docs/...`, `/blog/...`, `/SECURITY.md`). If you have no exact URL for a claim, state \
+the claim without a link rather than fabricating one. A dead link is worse than none.
 - Make each link's anchor text a natural, descriptive phrase that reads well in the \
 sentence — never the source's page title, the site name, or a bare URL.
 - Spread citations across DIFFERENT source domains. Across the whole article, don't \
@@ -471,19 +476,21 @@ async def _draft_article(
     research = await _gather_grounding(
         client, kb_id, queries, source_ids=source_ids
     )
-    brand = await _gather_grounding(
+    # NB: keep this distinct from the `brand` PROFILE param — it's the brand's
+    # materials-KB grounding excerpts (a list), used only to build brand_block.
+    brand_grounding = await _gather_grounding(
         client, materials_kb_id, queries, per_query=2, limit=30
     )
 
     cluster_block = _cluster_block(cluster)
     brand_block = ""
-    if brand:
+    if brand_grounding:
         brand_block = (
             "\n\n## Your brand's own materials (describe accurately, link as internal links)\n"
             "- Where the article genuinely calls for it, work in the brand's real "
             "capabilities and link to the relevant page with natural anchor text. "
             "Editorial, not an ad — only where it adds value.\n"
-            f"{_grounding_block(brand, materials_url_by_source or {})}"
+            f"{_grounding_block(brand_grounding, materials_url_by_source or {})}"
         )
     wc = brief.get("target_word_count") or 1800
     msg = (
@@ -642,6 +649,19 @@ async def run_generation_task(
 
         final = get_article(db, article_id)
         final_md = (final.get("content_md") if final else content_md) or content_md
+        # Best-effort, BEFORE flipping to done so the Links panel is accurate the moment
+        # the article is ready: validate outbound links so a fabricated/dead URL (the
+        # writer can emit a plausible-but-dead deep link even when grounded) is flagged
+        # immediately, not at publish time. Never let a link-check failure fail the run.
+        if business_id:
+            # Local import: linkcheck imports generation at module level, so a top-level
+            # import here would form a real generation<->linkcheck cycle.
+            from . import linkcheck
+
+            try:
+                await linkcheck.check_article(db, business_id, article_id)
+            except Exception:  # noqa: BLE001
+                log.exception("post-generation link check failed for %s", article_id)
         _update(
             db, article_id,
             generation_status="done",
@@ -672,6 +692,49 @@ def list_articles(db: Database, business_id: UUID) -> list[dict[str, Any]]:
         "where business_id = %s order by updated_at desc",
         (business_id,),
     )
+
+
+def delete_article(db: Database, article_id: UUID) -> bool:
+    """Hard-delete an article. Its versions, publications, comments, link suggestions,
+    and broken-link findings cascade; cluster membership is FK ON DELETE SET NULL (a
+    deleted pillar leaves its cluster pillar-less, not removed). Articles own no
+    per-article Powabase resource, so there's nothing to clean up remotely. Returns
+    whether a row was deleted.
+
+    LIMITATION: APPLIED internal links baked into OTHER articles' bodies as
+    `rf:article/{deleted_id}` are NOT rewritten here — after delete they resolve to a
+    dead /p/{deleted_id} preview. We log the citing articles (below) so an operator can
+    re-link/re-score them, but we deliberately do not edit other articles' content_md."""
+    # Find articles that cite this one via staged link_suggestions BEFORE the delete
+    # cascades those rows away, so the log names the affected pieces. (This catches
+    # suggested/applied internal links; it doesn't chase raw rf:article refs baked into
+    # bodies with no suggestion row — those remain the documented by-design limitation.)
+    citing = db.fetch_all(
+        "select distinct article_id from public.link_suggestions "
+        "where target_article_id = %s and article_id <> %s",
+        (article_id, article_id),
+    )
+    citing_ids = [r["article_id"] for r in citing]
+    if citing_ids:
+        log.warning(
+            "deleting article %s leaves applied internal links dangling in %d "
+            "article(s): %s — re-link/re-score them",
+            article_id, len(citing_ids), citing_ids,
+        )
+    # An opportunity drafted into this article points at it. The FK would null its
+    # article_id but leave it stranded in a dead 'drafted' state (no inbox action) —
+    # so return it to the inbox first, ready to re-draft or dismiss. One transaction:
+    # the opportunity reset and the delete commit together or not at all.
+    with db.connection() as conn:
+        conn.execute(
+            "update public.opportunities set status = 'new', article_id = null, "
+            "updated_at = now() where article_id = %s and status = 'drafted'",
+            (article_id,),
+        )
+        deleted = conn.execute(
+            "delete from public.articles where id = %s returning id", (article_id,)
+        ).fetchone()
+    return deleted is not None
 
 
 def list_versions(db: Database, article_id: UUID) -> list[dict[str, Any]]:

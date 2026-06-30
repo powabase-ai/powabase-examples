@@ -24,19 +24,20 @@ import httpx
 from psycopg.types.json import Json
 
 from ..db import Database
-from ..powabase import PowabaseClient, PowabaseError
+from ..powabase import (
+    EXTRACTION_TERMINAL,
+    PowabaseClient,
+    PowabaseError,
+    indexed_source_id,
+    wait_for_kb_index,
+)
 from . import business_profiles as brands
-from . import grounding
+from . import grounding, source_refs
 
 log = logging.getLogger("rankforge.brand_materials")
 
 # Default cap on pages discovered per ingest (the platform clamps further).
 DEFAULT_MAX_PAGES = 30
-
-# Same terminal sets as research/grounding so we stop polling once a source/index
-# can't make further progress.
-_EXTRACTION_TERMINAL = {"extracted", "attention_required", "failed", "cancelled"}
-_INDEX_TERMINAL = {"indexed", "failed", "cancelled"}
 
 # Bound import/poll concurrency like research — each page can poll for ~80s, so this
 # turns a sequential crawl (≈ sum) into ≈ the slowest single page.
@@ -164,6 +165,21 @@ def _track_source(
             "where business_id = %s and lower(url) = lower(%s)",
             (source_id, business_id, url),
         )
+
+
+def _dedup_id(body: Any) -> tuple[str | None, str | None]:
+    """From a Powabase 'duplicate' payload (the 409 body when a Source already exists
+    project-wide for this content/URL), pull (existing_source_id, extraction_status).
+
+    Powabase dedups Sources across the WHOLE project, so a second workspace uploading
+    the same file gets a 409 carrying the existing Source — reuse it instead of
+    surfacing a "duplicate source" error the user can't act on. Returns (None, None)
+    on any unexpected shape so the caller can fall back to treating it as a failure.
+    """
+    dup = body.get("duplicate") if isinstance(body, dict) else None
+    if not isinstance(dup, dict):
+        return None, None
+    return (dup.get("id") or None), (dup.get("extraction_status") or None)
 
 
 def _reason(e: Exception) -> str:
@@ -439,8 +455,8 @@ async def _import_one(
             imp = await client.import_url(row["url"])
             source_id = (imp.get("sources") or [{}])[0].get("id")
         except PowabaseError as e:
-            body = e.body if isinstance(e.body, dict) else {}
-            source_id = (body.get("duplicate") or {}).get("id")
+            # Same URL already a Source project-wide → reuse the existing one.
+            source_id, _ = _dedup_id(e.body)
         if not source_id:
             await db.aexecute(
                 "update public.brand_sources set status = 'failed' where id = %s",
@@ -458,7 +474,7 @@ async def _import_one(
         src = await client.get_source(source_id)
         status = src.get("extraction_status")
         title = title or src.get("title") or src.get("name")
-        if status in _EXTRACTION_TERMINAL:
+        if status in EXTRACTION_TERMINAL:
             break
         await asyncio.sleep(2)
 
@@ -548,13 +564,7 @@ async def ingest(
         await asyncio.gather(*[_bounded(r) for r in pending])
 
         # Wait for indexing to settle (bounded), then finish.
-        for _ in range(45):
-            listing = await client.list_kb_sources(kb_id)
-            items = listing.get("items", []) if isinstance(listing, dict) else []
-            statuses = [i.get("index_status") for i in items]
-            if statuses and all(s in _INDEX_TERMINAL for s in statuses):
-                break
-            await asyncio.sleep(2)
+        await wait_for_kb_index(client, kb_id)
 
         # New chunks landed — rebuild BM25 so hybrid's keyword half covers them.
         if total:
@@ -593,8 +603,20 @@ async def ingest_file(
         _set_progress(db, business_id, "uploading", f"Uploading {file_name}…")
         kb_id = await ensure_materials_kb(client, db, business_id)
 
-        uploaded = await client.upload_source(file_name, content, mime)
-        source_id = uploaded.get("id") or (uploaded.get("source") or {}).get("id")
+        try:
+            uploaded = await client.upload_source(file_name, content, mime)
+            source_id = uploaded.get("id") or (uploaded.get("source") or {}).get("id")
+            init_status = uploaded.get("extraction_status")
+            init_title = uploaded.get("title") or uploaded.get("name")
+        except PowabaseError as e:
+            # Another workspace already uploaded this exact file — Powabase dedups
+            # Sources project-wide and 409s with the existing one. Reuse it so this
+            # user never hits a "duplicate source" error for content they can't see.
+            source_id, init_status = _dedup_id(e.body)
+            init_title = None
+            if not source_id:
+                raise  # a genuine upload failure → outer handler marks 'failed'
+            log.info("upload dedup: reusing source %s for %s", source_id, file_name)
         if not source_id:
             _set_progress(
                 db, business_id, "failed", f"Upload failed for {file_name}."
@@ -607,12 +629,7 @@ async def ingest_file(
             "(business_id, url, origin, source_id, status) "
             "values (%s, %s, 'manual', %s, %s) "
             "on conflict do nothing returning id",
-            (
-                business_id,
-                file_name,
-                source_id,
-                uploaded.get("extraction_status") or "pending",
-            ),
+            (business_id, file_name, source_id, init_status or "pending"),
         )
         if row is None:
             # A row for this file_name already exists — adopt this source on it.
@@ -623,8 +640,8 @@ async def ingest_file(
             )
         row_id = row["id"] if row else None
 
-        status = uploaded.get("extraction_status")
-        title = uploaded.get("title") or uploaded.get("name")
+        status = init_status
+        title = init_title
         _set_progress(
             db, business_id, "scraping", f"Extracting {file_name}…"
         )
@@ -632,7 +649,7 @@ async def ingest_file(
             src = await client.get_source(source_id)
             status = src.get("extraction_status")
             title = title or src.get("title") or src.get("name")
-            if status in _EXTRACTION_TERMINAL:
+            if status in EXTRACTION_TERMINAL:
                 break
             await asyncio.sleep(2)
 
@@ -649,13 +666,7 @@ async def ingest_file(
             except Exception:  # noqa: BLE001 — indexing failure shouldn't fail the upload
                 log.exception("add_source_to_kb failed for %s", source_id)
             # Wait for indexing to settle (bounded), like `ingest`.
-            for _ in range(45):
-                listing = await client.list_kb_sources(kb_id)
-                items = listing.get("items", []) if isinstance(listing, dict) else []
-                statuses = [i.get("index_status") for i in items]
-                if statuses and all(s in _INDEX_TERMINAL for s in statuses):
-                    break
-                await asyncio.sleep(2)
+            await wait_for_kb_index(client, kb_id)
             # New chunks landed — rebuild BM25 so hybrid's keyword half covers them.
             await grounding.rebuild_bm25(client, kb_id)
 
@@ -672,27 +683,6 @@ async def ingest_file(
             db, business_id, "failed",
             f"Couldn't finish upload: {_reason(e)}",
         )
-
-
-async def _indexed_id(
-    client: PowabaseClient, kb_id: str, source_id: str
-) -> str:
-    """Resolve a raw source_id to the KB's INDEXED-source id used by the de-index
-    path (DELETE /knowledge-bases/{id}/sources/{indexed_source_id}).
-
-    The KB's source listing keys each entry by its own id; match the entry whose
-    source_id is ours and return its id. Best-effort — falls back to the raw
-    source_id (the historical behavior) if the lookup can't resolve it.
-    """
-    try:
-        listing = await client.list_kb_sources(kb_id)
-        items = listing.get("items", []) if isinstance(listing, dict) else []
-        for it in items:
-            if it.get("source_id") == source_id:
-                return it.get("id") or it.get("indexed_source_id") or source_id
-    except Exception:  # noqa: BLE001 — fall back to the raw id on any lookup failure
-        pass
-    return source_id
 
 
 async def remove_source(
@@ -720,23 +710,33 @@ async def remove_source(
             # De-index uses the KB's INDEXED-source id, which can differ from the raw
             # source_id — resolve it from the KB's source listing (fall back to the
             # raw id). Best-effort: a de-index failure must not block deletion.
-            indexed_id = await _indexed_id(client, kb_id, source_id)
+            indexed_id = await indexed_source_id(client, kb_id, source_id)
             try:
                 await client.remove_source_from_kb(kb_id, indexed_id)
             except Exception:  # noqa: BLE001 — de-index failure must not block deletion
                 log.exception(
                     "remove_source_from_kb failed for %s/%s", kb_id, indexed_id
                 )
-        try:
-            await client.delete_source(source_id)
-        except Exception:  # noqa: BLE001 — Source delete failure must not block row delete
-            log.exception("delete_source failed for %s", source_id)
 
+    # Drop this workspace's tracking row FIRST, then decide on the project-wide Source.
+    # Removing our reference before counting makes the decision orphan-safe under
+    # concurrency: two removals of rows sharing one Source can't both see the other and
+    # both skip (the worst case is a harmless double delete_source that 404s). The
+    # Source is only deleted once nothing — anywhere — still references it.
     deleted = await db.afetch_one(
         "delete from public.brand_sources where id = %s and business_id = %s "
         "returning id",
         (row_id, business_id),
     )
+    if (
+        deleted is not None
+        and source_id
+        and source_refs.source_reference_count(db, source_id) == 0
+    ):
+        try:
+            await client.delete_source(source_id)
+        except Exception:  # noqa: BLE001 — Source delete must not block the row delete
+            log.exception("delete_source failed for %s", source_id)
     return deleted is not None
 
 
@@ -793,18 +793,34 @@ async def _refresh_one(
             await client.remove_source_from_kb(kb_id, indexed_id)
         except Exception:  # noqa: BLE001 — de-index failure must not block the refresh
             log.exception("refresh de-index failed for %s", old_sid)
-        try:
-            await client.delete_source(old_sid)
-        except Exception:  # noqa: BLE001 — stale Source delete is best-effort
-            log.exception("refresh delete_source failed for %s", old_sid)
+    # Clear this row's reference up front, THEN decide on the old Source — so a refresh
+    # racing another remove/refresh of a co-referencing row can't orphan it.
     await db.aexecute(
         "update public.brand_sources set source_id = null, status = 'pending' "
         "where id = %s",
         (row["id"],),
     )
+    # Refresh works by deleting the old Source so the re-import isn't deduped back to
+    # stale content — but only when this workspace is its sole owner. If another shares
+    # it, leave it (the re-import returns the same content) rather than breaking them.
+    shared = bool(old_sid) and source_refs.source_reference_count(db, old_sid) != 0
+    if old_sid and not shared:
+        try:
+            await client.delete_source(old_sid)
+        except Exception:  # noqa: BLE001 — stale Source delete is best-effort
+            log.exception("refresh delete_source failed for %s", old_sid)
     # Re-import fresh (no existing Source for this URL now → a real re-scrape), poll
     # extraction, re-index. Empty already_indexed so _import_one re-adds it to the KB.
     await _import_one(client, db, kb_id, {**row, "source_id": None}, set())
+    if shared:
+        # The old Source is shared by another workspace, so we couldn't delete it and
+        # the re-import dedupes straight back to the SAME Source — the page wasn't
+        # independently re-scraped. Mark the row so the UI can tell the user it was
+        # refreshed in place rather than silently no-op'ing.
+        await db.aexecute(
+            "update public.brand_sources set status = 'shared' where id = %s",
+            (row["id"],),
+        )
     return True
 
 
@@ -872,13 +888,7 @@ async def refresh_sources(
         await asyncio.gather(*[_bounded(r) for r in refreshable])
 
         # Wait for indexing to settle (bounded), then rebuild BM25 over new chunks.
-        for _ in range(45):
-            listing = await client.list_kb_sources(kb_id)
-            items = listing.get("items", []) if isinstance(listing, dict) else []
-            statuses = [i.get("index_status") for i in items]
-            if statuses and all(s in _INDEX_TERMINAL for s in statuses):
-                break
-            await asyncio.sleep(2)
+        await wait_for_kb_index(client, kb_id)
         await grounding.rebuild_bm25(client, kb_id)
 
         msg = f"Refreshed {total} page{'' if total == 1 else 's'}."

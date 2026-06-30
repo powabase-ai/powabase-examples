@@ -7,6 +7,7 @@ entries deterministically from the scraped markdown. `ResearchRun` is the stored
 """
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -47,9 +48,11 @@ class CompetitorTeardown(BaseModel):
 
 class ResearchRunCreate(BaseModel):
     business_id: UUID
-    topic: str
-    locale: str = "en-US"
-    depth: str = "deep"  # quick | standard | deep
+    topic: str = Field(min_length=1, max_length=300)
+    locale: str = Field(default="en-US", max_length=20)
+    # Validate at the boundary: an invalid/stale value used to silently fall through
+    # to the most expensive preset instead of being rejected.
+    depth: Literal["quick", "standard", "deep"] = "deep"
 
 
 class ResearchRun(BaseModel):

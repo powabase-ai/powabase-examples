@@ -68,6 +68,76 @@ def canonical_url(brand: dict[str, Any] | None, article: dict[str, Any]) -> str 
 _TARGET_COLS = "id, title, slug, keywords, canonical_url"
 
 
+# --- stable internal-link references (resolved to live URLs only at render time) ---
+# Internal links are stored in the body as `rf:article/{id}`, NOT as a baked URL, so
+# editing a target's slug/url_pattern later updates EVERY citing link for free — the
+# ref is resolved to the target's current canonical URL at each export/render boundary.
+_LINK_REF_RE = re.compile(r"rf:article/([0-9a-fA-F-]{36})")
+
+
+def link_ref(target_id: Any) -> str:
+    return f"rf:article/{target_id}"
+
+
+def mask_refs(md: str) -> tuple[str, dict[str, str]]:
+    """Replace internal-link refs with opaque sentinels (`rfref:N`) so an LLM full-body
+    rewrite can't 'fix' or mangle the UUIDs (or drop the link while reformatting the
+    URL). Returns (masked_md, sentinel→ref). Pair with restore_refs around any LLM pass
+    over the body (see revise.py)."""
+    mapping: dict[str, str] = {}
+
+    def _repl(m: "re.Match[str]") -> str:
+        token = f"rfref:{len(mapping)}"
+        mapping[token] = m.group(0)
+        return token
+
+    return _LINK_REF_RE.sub(_repl, md), mapping
+
+
+def restore_refs(md: str, mapping: dict[str, str]) -> str:
+    """Put the real `rf:article/{id}` refs back after an LLM pass (see mask_refs).
+
+    Restore longest sentinel first: `rfref:1` is a textual prefix of `rfref:10`, so a
+    naive insertion-order pass would rewrite the `rfref:1` inside `rfref:10` and corrupt
+    the link (silently breaks every article with ≥11 internal links)."""
+    for token, ref in sorted(mapping.items(), key=lambda kv: len(kv[0]), reverse=True):
+        md = md.replace(token, ref)
+    return md
+
+
+def resolve_links(
+    db: Database, business_id: UUID, md: str, *, fallback_base: str | None = None
+) -> str:
+    """Replace internal-link refs (`rf:article/{id}`) with each target's LIVE canonical
+    URL. The one place stored references become real URLs — every export/render path
+    runs the body through here. A target that's gone, or whose canonical URL can't be
+    resolved (pattern removed), falls back to its RankForge preview path."""
+    if not md or "rf:article/" not in md:
+        return md
+    ids = set(_LINK_REF_RE.findall(md))
+    if not ids:
+        return md
+    brand = brands.get_profile(db, business_id)
+    # Scope to THIS business: canonical_url is built from this brand's profile, so a ref
+    # to another tenant's article id must NOT resolve to a wrong-brand URL — it falls
+    # through to the /p/{id} preview instead (defense-in-depth tenant isolation).
+    rows = db.fetch_all(
+        f"select {_TARGET_COLS} from public.articles "
+        "where id::text = any(%s) and business_id = %s",
+        (list(ids), business_id),
+    )
+    by_id = {str(r["id"]): r for r in rows}
+
+    def _url(ref_id: str) -> str:
+        target = by_id.get(ref_id)
+        if target is not None and (u := canonical_url(brand, target)):
+            return u
+        base = (fallback_base or "").rstrip("/")
+        return f"{base}/p/{ref_id}" if base else f"/p/{ref_id}"
+
+    return _LINK_REF_RE.sub(lambda m: _url(m.group(1)), md)
+
+
 def _link_targets(
     db: Database, business_id: UUID, exclude_id: UUID
 ) -> list[dict[str, Any]]:
@@ -244,11 +314,19 @@ def _insert_suggestion(
 
 
 def suggest_links(
-    db: Database, business_id: UUID, article_id: UUID
+    db: Database,
+    business_id: UUID,
+    article_id: UUID,
+    *,
+    candidates: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Stage internal-link suggestions, cluster-aware. Structural cluster links
     (member→pillar, pillar→members) come first — with a GAP staged when there's no
-    natural anchor — then incidental cross-article mentions. Idempotent."""
+    natural anchor — then incidental cross-article mentions. Idempotent.
+
+    `candidates` lets a library-wide caller (run_relink) pass the brand's published
+    articles ONCE instead of this re-fetching the whole library per call — turning the
+    relink sweep from O(N²) into O(N). When omitted, the targets are fetched here."""
     art = gen_svc.get_article(db, article_id)
     if not art:
         return []
@@ -297,8 +375,14 @@ def suggest_links(
     # 1) Structural cluster links first (they earn the gap treatment).
     for target, kind in _structural_targets(db, art):
         _consider(target, kind)
-    # 2) Incidental cross-article mentions.
-    for target in _link_targets(db, business_id, article_id):
+    # 2) Incidental cross-article mentions. Reuse a caller-provided candidate set
+    # (excluding this article) when given, else fetch the brand's published library.
+    targets = (
+        [t for t in candidates if str(t["id"]) != str(article_id)]
+        if candidates is not None
+        else _link_targets(db, business_id, article_id)
+    )
+    for target in targets:
         _consider(target, _MENTION)
     return out
 
@@ -312,12 +396,14 @@ def apply_suggestion(
     edited since), the suggestion is stale — dismiss it and return that.
     """
     s = db.fetch_one(
-        "select id, article_id, anchor_text, target_url, status "
+        "select id, article_id, target_article_id, anchor_text, target_url, status "
         "from public.link_suggestions where id = %s and business_id = %s",
         (suggestion_id, business_id),
     )
     if s is None or s["status"] != "pending" or not s.get("anchor_text"):
         return None  # a gap (null anchor) has nothing to apply — use generate_gap_link
+    if not s.get("target_article_id"):
+        return None  # defensive: a null target would store a `rf:article/None` ref
     art = gen_svc.get_article(db, s["article_id"])
     if not art:
         return None
@@ -326,7 +412,8 @@ def apply_suggestion(
     if not found:
         return _set_status(db, business_id, suggestion_id, "dismissed")
     (a, b), span_text = found
-    new_md = f"{md[:a]}[{span_text}]({s['target_url']}){md[b:]}"
+    # Store a stable REF, not the URL — so the link follows the target's slug forever.
+    new_md = f"{md[:a]}[{span_text}]({link_ref(s['target_article_id'])}){md[b:]}"
     gen_svc._update(db, s["article_id"], content_md=new_md)
     # Re-score SEO DETERMINISTICALLY (no LLM): a single internal link only moves the
     # on-page link signals, so re-judging GEO/readability with the model on every
@@ -337,8 +424,9 @@ def apply_suggestion(
     brief = (
         brief_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
     ) or {}
+    # Score the RESOLVED body so link signals see real URLs, not the ref token.
     seo = scoring.score_seo(
-        new_md,
+        resolve_links(db, business_id, new_md),
         art.get("meta_title") or art.get("title") or "",
         art.get("meta_description"),
         brief,
@@ -387,7 +475,8 @@ async def generate_gap_link(
     (SEO, deterministic), and mark accepted. None if it isn't a fillable gap or the
     model didn't produce a usable link."""
     s = db.fetch_one(
-        "select id, article_id, anchor_text, target_url, target_title, status "
+        "select id, article_id, target_article_id, anchor_text, target_url, "
+        "target_title, status "
         "from public.link_suggestions where id = %s and business_id = %s",
         (suggestion_id, business_id),
     )
@@ -413,6 +502,9 @@ async def generate_gap_link(
     # Sanity: it must actually contain the target link, else leave the gap pending.
     if not sentence or s["target_url"] not in sentence:
         return None
+    # The model writes a real URL (natural); swap it for the stable ref before storing
+    # so the link follows the target's slug forever.
+    sentence = sentence.replace(s["target_url"], link_ref(s["target_article_id"]))
     new_md = _insert_after_intro(md, sentence)
     gen_svc._update(db, s["article_id"], content_md=new_md)
     from . import brief as brief_svc
@@ -422,7 +514,8 @@ async def generate_gap_link(
         brief_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
     ) or {}
     seo = scoring.score_seo(
-        new_md, art.get("meta_title") or art.get("title") or "",
+        resolve_links(db, business_id, new_md),
+        art.get("meta_title") or art.get("title") or "",
         art.get("meta_description"), brief,
     )
     gen_svc._update(db, s["article_id"], seo_score=seo)

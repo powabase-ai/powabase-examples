@@ -10,8 +10,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
-# Install deps first (cache layer), then the package.
-COPY pyproject.toml ./
+# Install deps first (cache layer), then the package. README.md is required because
+# pyproject.toml declares `readme = "README.md"`; uv builds the local package during
+# sync and errors without it.
+COPY pyproject.toml README.md ./
 COPY src ./src
 RUN uv sync --no-dev
 

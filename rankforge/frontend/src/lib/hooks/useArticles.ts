@@ -45,6 +45,24 @@ export function useGenerateArticle(businessId: string) {
   });
 }
 
+export function useDeleteArticle(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => articlesApi.remove(id),
+    onSuccess: (_d, id) => {
+      qc.invalidateQueries({ queryKey: ["articles", businessId] });
+      qc.removeQueries({ queryKey: ["article", id] });
+      // Drop now-dangling per-article caches for the deleted article.
+      qc.removeQueries({ queryKey: ["versions", id] });
+      qc.removeQueries({ queryKey: ["publications", id] });
+      // A deleted article may have been a cluster pillar/member — refresh clusters.
+      qc.invalidateQueries({ queryKey: ["clusters", businessId] });
+      // It may have been drafted from an opportunity, which now reverts to actionable.
+      qc.invalidateQueries({ queryKey: ["opportunities", businessId] });
+    },
+  });
+}
+
 export function useScoreArticle(id: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -76,8 +94,14 @@ export function useOptimizeArticle(id: string) {
 export function useRefineArticle(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => articlesApi.refine(id),
-    onSuccess: (data) => qc.setQueryData(["article", id], data),
+    mutationFn: (targets?: string[]) => articlesApi.refine(id, targets),
+    onSuccess: (data) => {
+      qc.setQueryData(["article", id], data);
+      // Refine rewrites the body and re-validates links but doesn't move
+      // generation_status off "done" — so refresh the broken-link findings
+      // (and the ⚠ Links badge) explicitly here.
+      qc.invalidateQueries({ queryKey: ["link-health", id] });
+    },
   });
 }
 

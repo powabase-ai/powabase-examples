@@ -12,9 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from ..auth import assert_brand_access, get_current_user, require_editor
 from ..config import get_settings
 from ..db import Database
+from ..models.article import Article
 from ..models.profile import CurrentUser
 from ..models.publish import PublicArticle, Publication, PublishRequest
 from ..services import generation as gen_svc
+from ..services import linking as linking_svc
 from ..services import publishing as svc
 from .deps import get_db
 
@@ -79,6 +81,23 @@ async def publish_article(
     return pub
 
 
+@router.post("/{article_id}/unpublish", response_model=Article)
+def unpublish_article(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(require_editor),  # changes published status
+):
+    """Take an article off the blog: revert it to draft while KEEPING its cluster
+    membership (a pillar is demoted to a member and the cluster's pillar slot is
+    vacated), so a later republish rejoins the same cluster. Use when removed from the
+    blog."""
+    article = gen_svc.get_article(db, article_id)
+    if article is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    assert_brand_access(db, article["business_id"], user)
+    return svc.unpublish(db, article_id)
+
+
 @router.get("/{article_id}/publications", response_model=list[Publication])
 def list_publications(
     article_id: UUID,
@@ -97,5 +116,9 @@ def public_article(article_id: UUID, db: Database = Depends(get_db)):
     row = svc.get_published(db, article_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
-    # Render + sanitize fresh from content_md (response_model drops content_md).
-    return {**row, "content_html": svc.render_body_html(row.get("content_md") or "")}
+    # Resolve internal-link refs to live URLs, then render + sanitize fresh from
+    # content_md (response_model drops content_md).
+    resolved = linking_svc.resolve_links(
+        db, row["business_id"], row.get("content_md") or ""
+    )
+    return {**row, "content_html": svc.render_body_html(resolved)}

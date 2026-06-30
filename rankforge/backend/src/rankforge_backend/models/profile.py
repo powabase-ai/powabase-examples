@@ -6,9 +6,10 @@ editors/admins may approve or publish; only admins may change roles.
 """
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 ROLES = ("writer", "editor", "admin")
 
@@ -47,8 +48,10 @@ class Organization(BaseModel):
 
 
 class OrgInviteCreate(BaseModel):
-    email: str
-    role: str = "writer"  # writer|editor|admin
+    # Basic shape check (no email-validator dep) so a malformed value is a 422, not a
+    # row that can never sign in. role is constrained instead of a free string.
+    email: str = Field(max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    role: Literal["writer", "editor", "admin"] = "writer"
 
 
 class OrgInviteAccept(BaseModel):

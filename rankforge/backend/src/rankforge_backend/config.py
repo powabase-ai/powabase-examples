@@ -33,8 +33,10 @@ class Settings(BaseSettings):
 
     # --- Server ---
     cors_allow_origins: str = "http://localhost:3000"
-    # Public base URL of the frontend, used to build crawlable /p/{id} links.
-    public_base_url: str = "http://localhost:3007"
+    # Public base URL of the frontend, used to build crawlable /p/{id} links. Must
+    # match where the frontend actually serves (compose/Dockerfile/CORS → :3000),
+    # else out-of-the-box public/canonical/webhook URLs point at a dead port.
+    public_base_url: str = "http://localhost:3000"
     db_pool_min_size: int = 2
     db_pool_max_size: int = 20
     # Seconds a request waits for a free pooled connection before the pool raises

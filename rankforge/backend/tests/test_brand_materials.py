@@ -257,6 +257,10 @@ async def test_remove_source_cascades_kb_then_source_then_row(monkeypatch):
     monkeypatch.setattr(
         svc.brands, "get_profile", lambda d, bid: {"materials_kb_id": "kb_1"}
     )
+    # No other workspace references this Source → the project-wide Source is deleted.
+    monkeypatch.setattr(
+        svc.source_refs, "source_reference_count", lambda *a, **k: 0
+    )
     client = MagicMock()
     client.remove_source_from_kb = AsyncMock()
     client.delete_source = AsyncMock()
@@ -267,6 +271,51 @@ async def test_remove_source_cascades_kb_then_source_then_row(monkeypatch):
     # the final afetch_one is the delete...returning
     last_q = db.afetch_one.await_args_list[-1][0][0]
     assert "delete from public.brand_sources" in last_q
+
+
+async def test_remove_source_keeps_shared_source(monkeypatch):
+    """If another workspace still references the Source, de-index here but DON'T delete
+    the project-wide Source — only drop this workspace's tracking row."""
+    db = MagicMock()
+    db.afetch_one = AsyncMock(
+        side_effect=[{"id": RID, "source_id": "src_1"}, {"id": RID}]
+    )
+    monkeypatch.setattr(
+        svc.brands, "get_profile", lambda d, bid: {"materials_kb_id": "kb_1"}
+    )
+    monkeypatch.setattr(
+        svc.source_refs, "source_reference_count", lambda *a, **k: 1
+    )
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+
+    assert await svc.remove_source(client, db, BID, RID) is True
+    client.remove_source_from_kb.assert_awaited_once_with("kb_1", "src_1")
+    client.delete_source.assert_not_awaited()  # shared — Source preserved
+
+
+async def test_refresh_one_marks_shared_source_in_place(monkeypatch):
+    """When the Source is shared, refresh can't delete it and the re-import dedupes back
+    to the SAME Source — so the row is marked status='shared' to signal it was refreshed
+    in place, not independently re-scraped (otherwise the no-op looks like success)."""
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda *a, **k: 2)
+
+    async def _noop_import(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc, "_import_one", _noop_import)
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+
+    row = {"id": RID, "url": "https://example.com/page", "source_id": "src_1"}
+    assert await svc._refresh_one(client, db, "kb_1", row, {}) is True
+    client.delete_source.assert_not_awaited()  # shared — old Source preserved
+    sqls = " ".join(c.args[0].lower() for c in db.aexecute.call_args_list)
+    assert "status = 'shared'" in sqls  # row marked refreshed-in-place
 
 
 async def test_remove_source_false_when_missing():
@@ -283,6 +332,9 @@ async def test_remove_source_kb_failure_still_deletes_row(monkeypatch):
     )
     monkeypatch.setattr(
         svc.brands, "get_profile", lambda d, bid: {"materials_kb_id": "kb_1"}
+    )
+    monkeypatch.setattr(
+        svc.source_refs, "source_reference_count", lambda *a, **k: 0
     )
     client = MagicMock()
     client.remove_source_from_kb = AsyncMock(side_effect=RuntimeError("boom"))
@@ -540,6 +592,9 @@ async def test_refresh_one_reimports_a_url_row(monkeypatch):
         seen["already"] = already
 
     monkeypatch.setattr(svc, "_import_one", fake_import_one)
+    monkeypatch.setattr(
+        svc.source_refs, "source_reference_count", lambda *a, **k: 0
+    )
     row = {"id": RID, "source_id": "src_old",
            "url": "https://brand.example/x", "title": "T"}
     assert await svc._refresh_one(client, db, "kb_1", row, {"src_old": "idx_old"})
@@ -586,3 +641,55 @@ async def test_remove_sources_counts_and_finishes(monkeypatch):
     await svc.remove_sources(MagicMock(), db, BID, [UUID(RID), UUID(BID)])
     assert progress[-1][0] == "done"
     assert "Removed 2 pages" in progress[-1][1]
+
+
+# --- cross-workspace source dedup (upload) ---
+def test_dedup_id_parses_duplicate():
+    sid, status = svc._dedup_id(
+        {"duplicate": {"id": "s9", "extraction_status": "extracted"}}
+    )
+    assert sid == "s9"
+    assert status == "extracted"
+
+
+def test_dedup_id_none_on_unexpected_shape():
+    assert svc._dedup_id({"error": "x"}) == (None, None)
+    assert svc._dedup_id("not a dict") == (None, None)
+    assert svc._dedup_id({"duplicate": {"id": ""}}) == (None, None)
+
+
+async def test_ingest_file_reuses_duplicate_source(monkeypatch):
+    """A file another workspace already uploaded 409s — we reuse the existing Source
+    instead of surfacing a 'duplicate source' failure to this user."""
+    db = MagicMock()
+    db.fetch_one.return_value = {"id": RID}  # the brand_sources insert
+    db.aexecute = AsyncMock()
+    progress: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        svc, "_set_progress",
+        lambda d, b, phase, msg, **k: progress.append((phase, msg)),
+    )
+    monkeypatch.setattr(svc, "ensure_materials_kb", AsyncMock(return_value="kb_1"))
+    monkeypatch.setattr(svc, "list_sources", lambda d, b: [])
+    monkeypatch.setattr(svc.grounding, "rebuild_bm25", AsyncMock())
+    client = MagicMock()
+    client.upload_source = AsyncMock(
+        side_effect=PowabaseError(
+            409, {"duplicate": {"id": "dup_src", "extraction_status": "extracted"}}
+        )
+    )
+    client.get_source = AsyncMock(
+        return_value={"extraction_status": "extracted", "title": "T"}
+    )
+    client.add_source_to_kb = AsyncMock()
+    client.list_kb_sources = AsyncMock(
+        return_value={"items": [{"index_status": "indexed"}]}
+    )
+
+    await svc.ingest_file(
+        client, db, BID, file_name="deck.pdf", content=b"x", mime="application/pdf"
+    )
+
+    # Reused the existing Source and indexed it; never emitted a 'failed' phase.
+    client.add_source_to_kb.assert_awaited_once_with("kb_1", "dup_src")
+    assert all(phase != "failed" for phase, _ in progress)

@@ -288,5 +288,29 @@ async def reflect(
         except Exception:  # noqa: BLE001
             report = _UNAVAILABLE
 
+    report = _normalize_grounding(report)
     gen_svc._update(db, article_id, grounding_report=report)
     return report
+
+
+def _normalize_grounding(report: Any) -> dict[str, Any]:
+    """Coerce the judge's grounding_score to int|None. The prompt asks for an int but
+    can't enforce it, and a stray "N/A"/quoted value would otherwise TypeError in
+    satisfied()/_objective_total downstream — caught by the generation handler, which
+    discards the whole already-drafted article as a generic 'failed'. A non-dict reply
+    degrades to 'unavailable'."""
+    if not isinstance(report, dict):
+        return _UNAVAILABLE
+    g = report.get("grounding_score")
+    if isinstance(g, bool):  # bool is an int subclass — don't treat True as 1
+        g = None
+    elif isinstance(g, (int, float)):
+        g = max(0, min(100, int(g)))
+    elif isinstance(g, str):
+        try:
+            g = max(0, min(100, int(float(g.strip()))))
+        except ValueError:
+            g = None
+    else:
+        g = None
+    return {**report, "grounding_score": g}

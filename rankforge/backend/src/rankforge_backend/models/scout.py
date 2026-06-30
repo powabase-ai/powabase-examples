@@ -8,6 +8,23 @@ from pydantic import BaseModel, Field
 
 Cadence = Literal["twice_daily", "daily", "weekly"]
 Autonomy = Literal["suggest", "auto_draft"]
+PlanSource = Literal["news", "youtube", "social", "web"]
+
+
+class PlanQuery(BaseModel):
+    query: str
+    source: PlanSource = "web"
+    rationale: str | None = None
+
+
+class ScoutPlan(BaseModel):
+    """The trending search queries a run will execute — reviewable/editable while the
+    run is still 'planned'."""
+    # Bounded at the Pydantic layer so a hostile/buggy PATCH body is rejected before
+    # the service even parses it (these mirror the 8/12 caps _normalize_plan enforces
+    # on write — keep the two in sync).
+    themes: list[str] = Field(default_factory=list, max_length=8)
+    queries: list[PlanQuery] = Field(default_factory=list, max_length=12)
 
 
 class ScoutConfig(BaseModel):
@@ -44,6 +61,7 @@ class ScoutRun(BaseModel):
     drafted: int = 0
     error: str | None = None
     progress: dict = Field(default_factory=dict)
+    plan: ScoutPlan | None = None
     created_at: datetime
 
 

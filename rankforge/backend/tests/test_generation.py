@@ -96,3 +96,38 @@ def test_cluster_context_pillar_lists_members(monkeypatch):
 def test_cluster_context_none_without_cluster(monkeypatch):
     monkeypatch.setattr(gen, "get_article", lambda d, aid: {"id": aid})
     assert gen._cluster_context(MagicMock(), "A", None) is None
+
+
+# --- draft assembly (brand profile must not be clobbered by brand grounding) ---
+async def test_draft_article_keeps_brand_profile_distinct_from_grounding(monkeypatch):
+    """The `brand` PROFILE param and the materials-KB grounding (a list) must stay
+    separate — a name collision once overwrote the profile with the list, so the
+    brand-context line crashed with 'list has no attribute get'."""
+    captured: dict[str, str] = {}
+
+    async def fake_gather(client, kb_id, queries, **k):
+        return [{"text": "a brand capability", "source_id": "s1"}] if kb_id else []
+
+    monkeypatch.setattr(gen, "_gather_grounding", fake_gather)
+
+    client = MagicMock()
+
+    async def fake_collect(agent_id, msg):
+        captured["msg"] = msg
+        return {"content": "x" * 600}
+
+    client.run_agent_collect = fake_collect
+
+    body = await gen._draft_article(
+        client, "agent-1",
+        {"headings": ["H2: Setup"], "target_word_count": 1200, "suggested_title": "T"},
+        {"topic": "auth", "primary_keyword": "auth",
+         "secondary_keywords": [], "audience": "devs"},
+        title="Auth Guide", kb_id="kb1", source_ids=None, url_by_source={},
+        materials_kb_id="mkb", materials_url_by_source={},
+        brand={"name": "Acme", "description": "AI BaaS."},
+        cluster=None,
+    )
+    assert len(body) >= 500
+    # The brand PROFILE drove the brand-context line (not the grounding list).
+    assert "**Acme**'s own blog" in captured["msg"]

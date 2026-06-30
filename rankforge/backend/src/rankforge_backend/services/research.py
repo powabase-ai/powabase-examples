@@ -19,16 +19,16 @@ from psycopg.types.json import Json
 
 from ..db import Database
 from ..models.research import CompetitorTeardown, SearchResult
-from ..powabase import PowabaseClient, PowabaseError
+from ..powabase import EXTRACTION_TERMINAL, PowabaseClient, PowabaseError
 from ..util import extract_json
 from . import business_profiles as brands
+from . import source_refs
 from .agents import ensure_agent
 
 log = logging.getLogger("rankforge.research")
 
 SERP_AGENT_NAME = "rankforge-serp"
 SERP_MODEL = "claude-sonnet-4-6"
-TERMINAL = {"extracted", "attention_required", "failed", "cancelled"}
 
 # depth → (serp results to analyze, competitor pages to scrape). Generous counts so,
 # after the trust/quality gate drops thin or failed pages, the article still has many
@@ -187,12 +187,18 @@ def diverse_urls(urls: list[str], n: int, per_domain: int = 1) -> list[str]:
 
 # --- row helpers ---
 def create_research_run(
-    db: Database, *, business_id: UUID, topic: str, locale: str
+    db: Database,
+    *,
+    business_id: UUID,
+    topic: str,
+    locale: str,
+    created_by: UUID | None = None,
 ) -> dict[str, Any]:
     return db.fetch_one(
-        f"insert into public.research_runs (business_id, topic, locale, status) "
-        f"values (%s, %s, %s, 'searching') returning {_RESEARCH_COLUMNS}",
-        (business_id, topic, locale),
+        "insert into public.research_runs "
+        "(business_id, topic, locale, status, created_by) "
+        f"values (%s, %s, %s, 'searching', %s) returning {_RESEARCH_COLUMNS}",
+        (business_id, topic, locale, created_by),
     )
 
 
@@ -222,6 +228,38 @@ def list_runs(db: Database, business_id: UUID) -> list[dict[str, Any]]:
         "where business_id = %s order by created_at desc",
         (business_id,),
     )
+
+
+async def delete_run(client: PowabaseClient, db: Database, run_id: UUID) -> bool:
+    """Delete a research run; its source rows cascade. Each scraped page's Powabase
+    Source is deleted too — but only when no OTHER workspace (another run, a brand
+    material, or a cluster doc) still references it (imports dedupe by URL project-wide,
+    so a Source can be shared, and deleting a shared one would break the other
+    consumer). Remote deletes are best-effort. Returns whether a run was deleted."""
+    # Gather the run's Source ids BEFORE deleting it (the rows cascade away with the
+    # run). Dedupe — two URLs in one run can dedupe to the same Powabase Source.
+    sids = {
+        s["source_id"]
+        for s in db.fetch_all(
+            "select source_id from public.research_sources where research_run_id = %s",
+            (run_id,),
+        )
+        if s.get("source_id")
+    }
+    deleted = db.fetch_one(
+        "delete from public.research_runs where id = %s returning id", (run_id,)
+    )
+    if deleted is None:
+        return False
+    # Run (and its source rows) are gone — now delete each Source nothing else uses.
+    # Counting AFTER the rows are gone is orphan-safe under concurrent deletes.
+    for sid in sids:
+        if source_refs.source_reference_count(db, sid) == 0:
+            try:
+                await client.delete_source(sid)
+            except Exception:  # noqa: BLE001 — remote cleanup is best-effort
+                log.exception("delete_source failed for research source %s", sid)
+    return True
 
 
 def source_in_org(db: Database, source_id: str, org_id: UUID) -> bool:
@@ -277,7 +315,7 @@ async def _scrape_one(
     for _ in range(40):  # poll up to ~80s
         src = await client.get_source(source_id)
         status = src.get("extraction_status")
-        if status in TERMINAL:
+        if status in EXTRACTION_TERMINAL:
             break
         await asyncio.sleep(2)
 
