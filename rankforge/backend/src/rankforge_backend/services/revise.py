@@ -74,7 +74,7 @@ no exact URL, leave it unlinked rather than fabricating one.
 A draft that reads as AI-written is not "improved". As you revise, actively rewrite out every one of these:
 
 ### Overused words (worst when stacked)
-- delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant, "boasts", "nestled". Replace with plain words; never several in a paragraph.
+- delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant, "boasts", "nestled", "genuinely" (as an intensifier). Replace with plain words; never several in a paragraph.
 
 ### Constructions to delete
 - "It's not just X, it's Y"; the antithesis reframe "X isn't A, it's B" / "The way forward isn't X. It's Y" (negate-then-reveal — just say what it is); "Whether you're a beginner or a seasoned pro"; "In today's fast-paced, ever-evolving world"; "Let's dive in / Let's explore"; reflexive rule-of-three triads; "From X to Y".
@@ -479,7 +479,8 @@ A, it's B" / "the way forward isn't X, it's Y" (negate-then-reveal); "whether yo
 beginner or a pro"; "in today's world"; "let's dive in"; reflexive rule-of-three \
 triads; "from X to Y".
 - Overused register: delve, leverage, robust, seamless, elevate, unlock, harness, \
-navigate (metaphor), foster, underscore, pivotal, crucial, vibrant, "boasts", "nestled".
+navigate (metaphor), foster, underscore, pivotal, crucial, vibrant, "boasts", "nestled", \
+"genuinely" (as an intensifier).
 - Empty transitions (Moreover, Furthermore, Additionally, That said), both-sidesing, \
 stating the obvious as insight, over-hedging, bolded bullet lead-ins, "In conclusion" \
 restatements.
@@ -847,8 +848,8 @@ _TELL_INSTRUCTION = {
                     'the end of the day".',
     "ai_vocabulary": "Replace AI-register words (delve, leverage, robust, seamless, "
                      "navigate, underscore, foster, harness, elevate, unlock, embark, "
-                     "testament, pivotal, crucial, vibrant, boasts, nestled) with "
-                     "plain, specific language.",
+                     "testament, pivotal, crucial, vibrant, boasts, nestled, genuinely) "
+                     "with plain, specific language.",
     "transitions": "Cut filler transitions (Moreover, Furthermore, Additionally, That "
                    "said); let the sentences connect directly.",
 }

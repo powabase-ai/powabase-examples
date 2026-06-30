@@ -137,6 +137,13 @@ def test_readability_flags_antithesis_reframe():
     assert by["tell_phrases"] < 100  # the reframe construction was detected
 
 
+def test_readability_flags_genuinely_intensifier():
+    # "genuinely" as an intensifier is an AI-register tell → dings ai_vocabulary.
+    md = "This is genuinely useful, genuinely matters, and genuinely helps you ship."
+    by = {x["key"]: x["score"] for x in scoring.score_readability(md, None)["signals"]}
+    assert by["ai_vocabulary"] < 100
+
+
 def test_antithesis_detector_ignores_plain_negation():
     # A negation that is NOT the reframe (no "it's" payoff) must not trip the detector.
     clean = "The build is not green. We rolled back the change and paged the on-call."

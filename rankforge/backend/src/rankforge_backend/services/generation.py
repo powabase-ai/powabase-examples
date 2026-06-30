@@ -101,7 +101,7 @@ sources are available, cite sparingly rather than linking the same page again an
 Editors reject copy that reads as machine-written. Steer clear of all of these:
 
 ### Overused words (worst when stacked)
-- Avoid this register: delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant; "boasts" for a feature; "nestled" for a place.
+- Avoid this register: delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant; "boasts" for a feature; "nestled" for a place; "genuinely" as an intensifier ("genuinely useful").
 - Any one can be fine in isolation; never reach for several in a paragraph. Prefer plain, concrete words.
 
 ### Constructions to avoid

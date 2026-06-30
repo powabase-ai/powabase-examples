@@ -31,7 +31,7 @@ _AI_WORDS = (
     "underscoring", "foster", "fosters", "fostering", "harness", "harnessing",
     "elevate", "elevates", "elevating", "unlock", "unlocks", "unlocking",
     "embark", "embarking", "testament", "pivotal", "crucial", "vibrant",
-    "boasts", "boasting", "nestled",
+    "boasts", "boasting", "nestled", "genuinely",
 )
 _AI_WORD_RE = re.compile(r"(?<![a-z])(?:" + "|".join(_AI_WORDS) + r")(?![a-z])", re.I)
 _TELL_RE = re.compile(
