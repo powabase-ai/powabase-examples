@@ -991,9 +991,11 @@ async def _targeted_loop(
     """Drive ONLY the user-selected issues via the reviser. Unlike the objective loop,
     this WILL fix deterministic readability tells (em-dashes, AI vocabulary, formulaic
     constructions) when the user selects them — they no longer depend on the editorial
-    LLM's discretion. Each pass is kept only if the selected issues' combined score rose,
-    no met objective axis regressed badly, and factual grounding wasn't quietly weakened
-    (the grounding guard — see _editorial_loop); otherwise content + scores are reverted."""
+    LLM's discretion. A pass is kept unless it made the SELECTED issues worse; collateral
+    changes to unselected axes (SEO/GEO/grounding) are NOT vetoed — they're surfaced in
+    the scores and grounding report for the user to fix, per the user's choice to trade
+    them for the fixes they asked for. (The fact-checker still flags any newly-unsupported
+    claim; and grounding, when selected, is protected via _selected_total.)"""
     from . import geo_optimize, linking, quality, scoring  # local: avoid import cycle
 
     _SNAP = ("seo_score", "geo_score", "grounding_report", "readability_score", "json_ld")
@@ -1047,8 +1049,6 @@ async def _targeted_loop(
             if comp_selected and comp_hosts:
                 new_md = linking.strip_competitor_links(new_md, comp_hosts)
             before = _selected_total(article, targets)
-            seo, geo = article.get("seo_score"), article.get("geo_score")
-            prior_gr = (article.get("grounding_report") or {}).get("grounding_score")
             gen_svc._update(db, article_id, content_md=new_md)
             wrote_new = True
             _step(db, article_id, i, "fact-checking", MAX_REVISIONS)
@@ -1058,22 +1058,15 @@ async def _targeted_loop(
             _step(db, article_id, i, "scoring", MAX_REVISIONS)
             await scoring.score_and_store(client, db, article_id)
             a2 = gen_svc.get_article(db, article_id) or {}
-            # Keep the pass iff the SELECTED signals improved. We deliberately do NOT
-            # veto on sibling readability signals (human_voice/flow) regressing — the
-            # user chose these issues and accepts minor collateral. Only catastrophic
-            # collateral is guarded: a grounding collapse (facts) or a met SEO/GEO axis
-            # wrecked.
-            improved = _selected_total(a2, targets) > before
-            new_gr = (a2.get("grounding_report") or {}).get("grounding_score")
-            if (
-                not improved
-                or _grounding_collapsed(prior_gr, new_gr)
-                or _met_regressed_badly(
-                    [(seo, a2.get("seo_score")), (geo, a2.get("geo_score"))]
-                )
-            ):
-                # Didn't move the selected issues, lost grounding, or wrecked a met
-                # axis — revert content + the cached scores.
+            # Keep the pass unless it made the issues YOU SELECTED worse. Targeted refine
+            # fixes exactly what you checked, so collateral changes to OTHER axes are NOT
+            # vetoed here — an SEO/GEO/grounding regression on an unselected axis is
+            # surfaced in the scores and the grounding report (the fact-checker flags any
+            # new unsupported claim regardless) for you to fix, not silently reverted. A
+            # flat pass is kept too, so you always see the attempt. (When grounding IS one
+            # of your selected targets it's part of _selected_total, so this same check
+            # protects it.)
+            if _selected_total(a2, targets) < before:
                 gen_svc._update(db, article_id, content_md=cur_md, **snap)
                 break
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft

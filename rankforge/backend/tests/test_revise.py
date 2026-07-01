@@ -480,18 +480,20 @@ _TARGETED_BEFORE = {
 }
 
 
-async def test_targeted_loop_reverts_when_selected_total_unmoved(monkeypatch):
-    """A targeted pass that doesn't raise the selected signals' combined score must
-    restore BOTH the prior content and the cached scores (no half-applied state)."""
-    after = {  # rescore shows the em-dash signal didn't move
+async def test_targeted_loop_reverts_only_when_selected_gets_worse(monkeypatch):
+    """A pass that makes the SELECTED signal WORSE restores BOTH the prior content and
+    the cached scores (no half-applied state). A flat/unmoved pass, by contrast, is now
+    KEPT (see the next test) — only active harm to your checked items reverts."""
+    after = {  # rescore shows the selected em-dash signal got WORSE (30 → 15)
         "seo_score": SEO_MET, "geo_score": GEO_MET,
         "readability_score": {"signals": [
-            {"key": "em_dashes", "label": "Em-dash restraint", "score": 30,
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 15,
              "fixes": ["Thin out em-dashes."]},
         ]},
         "grounding_report": GR_OK,
     }
     state = _targeted_env(monkeypatch, _TARGETED_BEFORE, after)
+    monkeypatch.setattr(revise, "_surgical_tell_rewrite", AsyncMock(return_value="X" * 500))
     reverts: list = []
     real_update = revise.gen_svc._update
 
@@ -505,17 +507,36 @@ async def test_targeted_loop_reverts_when_selected_total_unmoved(monkeypatch):
         MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
         ["readability:em_dashes"],
     )
-    assert state["art"]["content_md"] == "body"  # content reverted
+    assert state["art"]["content_md"] == "body"  # content reverted (selected got worse)
     # the revert call restored the snapshot (seo/geo/grounding/readability/json_ld)
     assert reverts and "seo_score" in reverts[-1] and "grounding_report" in reverts[-1]
 
 
-async def test_targeted_loop_reverts_when_grounding_lost(monkeypatch):
-    """Even when the SELECTED (readability) signal improves, a pass that quietly weakens
-    factual grounding below target AND below prior must be reverted (the grounding
-    guard) — a readability-only target can't be allowed to degrade grounding."""
+async def test_targeted_loop_keeps_a_flat_pass(monkeypatch):
+    """A pass that leaves the selected signal unchanged (didn't help, didn't hurt) is now
+    KEPT — the user sees the attempt rather than a silent no-op revert."""
+    after = {  # em_dashes unchanged at 30 (flat)
+        "seo_score": SEO_MET, "geo_score": GEO_MET,
+        "readability_score": {"signals": [
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 30, "fixes": []},
+        ]},
+        "grounding_report": GR_OK,
+    }
+    state = _targeted_env(monkeypatch, _TARGETED_BEFORE, after)
+    monkeypatch.setattr(revise, "_surgical_tell_rewrite", AsyncMock(return_value="X" * 500))
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["readability:em_dashes"],
+    )
+    assert state["art"]["content_md"] == "X" * 500  # flat pass kept, not reverted
+
+
+async def test_targeted_loop_keeps_pass_when_unselected_axis_regresses(monkeypatch):
+    """Targeted refine fixes exactly what's checked. A pass that improves the SELECTED
+    signal is KEPT even if an UNSELECTED axis (here grounding) regresses — the regression
+    is surfaced in the scores/grounding report for the user to fix, not auto-reverted."""
     before = {**_TARGETED_BEFORE, "grounding_report": {"grounding_score": 80}}
-    after = {  # em_dashes 30→90 (selected total rises) but grounding 80→50 collapses
+    after = {  # em_dashes 30→90 (selected ↑); grounding 80→50 (unselected) — allowed
         "seo_score": SEO_MET, "geo_score": GEO_MET,
         "readability_score": {"signals": [
             {"key": "em_dashes", "label": "Em-dash restraint", "score": 90, "fixes": []},
@@ -523,12 +544,13 @@ async def test_targeted_loop_reverts_when_grounding_lost(monkeypatch):
         "grounding_report": {"grounding_score": 50},
     }
     state = _targeted_env(monkeypatch, before, after)
+    monkeypatch.setattr(revise, "_surgical_tell_rewrite", AsyncMock(return_value="X" * 500))
     await revise._targeted_loop(
         MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
         ["readability:em_dashes"],
     )
-    assert state["art"]["content_md"] == "body"  # reverted despite the selected gain
-    assert state["art"]["grounding_report"]["grounding_score"] == 80
+    assert state["art"]["content_md"] == "X" * 500  # kept: the selected fix landed
+    assert state["art"]["grounding_report"]["grounding_score"] == 50  # regression persists
 
 
 def test_grounding_collapsed_tolerates_noise_but_catches_real_drops():
@@ -538,10 +560,10 @@ def test_grounding_collapsed_tolerates_noise_but_catches_real_drops():
     assert not revise._grounding_collapsed(None, 50)  # unmeasured prior → not a collapse
 
 
-async def test_targeted_loop_tolerates_small_grounding_dip(monkeypatch):
-    """A selected SEO signal improves while grounding dips only a couple of points (below
-    target but within fact-checker noise) — the pass is KEPT. The old strict guard
-    reverted on ANY dip below target, discarding good fixes when grounding was sub-target."""
+async def test_targeted_loop_keeps_pass_despite_grounding_dip(monkeypatch):
+    """A selected SEO signal improves while grounding (unselected) dips — the pass is
+    KEPT. Targeted refine no longer vetoes on grounding at all; the fact-checker still
+    flags any new unsupported claim in the report for the user to address."""
     def _seo(score, fixes):
         return {"total": 82, "target": 80, "met": True, "signals": [
             {"key": "secondary_coverage", "label": "Secondary keyword coverage",
