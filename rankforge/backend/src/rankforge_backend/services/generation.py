@@ -93,6 +93,8 @@ sources are available, cite sparingly rather than linking the same page again an
 - Use them for what only the brand can provide: its specific approach, feature names, concrete examples, and its own data/results. Prefer the brand's own example or number over a generic one when the materials supply it.
 - When the topic is something the brand actually does or solves, present the brand as one concrete, credible option — name the specific capability and link to the exact page that goes deeper (an internal link with natural anchor text). Earn the mention by being useful, not by selling.
 - **This is the brand's own blog — when the article weighs the brand against competitors (named in the brief), write from the brand's side.** Be accurate and fair, but lead with the brand's genuine strengths and don't undersell it or hand a competitor an edge the evidence doesn't justify. A reader on the brand's blog should come away understanding where the brand is the stronger choice. Ground every comparative claim in the sources or brand materials — never invent superiority, and where the brand is honestly weaker, say less rather than something false. Real, supported strengths advocate for the brand; puffery the fact-checker will flag does not.
+- **Name competitors, but NEVER hyperlink them.** You may mention a competitor by name where a comparison genuinely helps the reader, but do not create an outbound link to a competitor's website — linking a rival hands them SEO authority from the brand's own blog. Link only to the brand's own pages, the cluster pillar, and neutral third-party evidence (never a direct competitor's domain).
+- **No competitor showcase.** Do not devote a section to describing or praising competitors (no "Where the alternatives land", "Other tools worth considering", etc.). Comparisons stay woven into the brand's argument, brief and brand-favorable where the facts allow.
 - Keep it proportional: a mention or two woven into the argument where it genuinely helps — not a section-ending plug, not in every section.
 - Use the brand's own terminology accurately (don't rename its products or features), and never claim a capability the materials don't support.
 - Never write marketing slogans, CTAs, or "sign up today" copy.
@@ -134,6 +136,23 @@ Editors reject copy that reads as machine-written. Steer clear of all of these:
 ### Specificity (the strongest signal)
 - Use real specifics from the grounding: concrete numbers, names, dates, versions, and examples.
 - Generic, safe, specificity-free prose is the clearest AI tell. Choose the precise detail over the smooth generality every time.
+
+## Formatting (the article is published as MDX — it MUST render cleanly)
+- **Separate every block with a blank line.** A heading, paragraph, list, table, or \
+code block each needs a blank line before and after it. Strict MDX parsers won't render \
+blocks that are jammed onto adjacent lines.
+- **FAQ / Q&A:** put each question on its OWN line as a `###` subheading, then the \
+answer as a separate paragraph on the next line. NEVER put the answer on the same line \
+as the question (`**Is it safe?**It is…` renders as one unreadable blob).
+- **Tables:** use real GitHub-flavored Markdown pipe tables — a header row, then a \
+`|---|---|` separator row, then one row per line — with a blank line before and after. \
+Never collapse a table onto a single run-on line, and never describe tabular data as \
+prose when the outline calls for a table.
+- **Links:** anchor text must be a clean, complete phrase that reads naturally inside \
+the sentence. Never start a link mid-word, never wrap a whole clause, and never leave \
+stray `[` or `]` brackets around it. `See our [RLS guide](url) for details.`, not \
+`See our[ RLS guide ](url)…`.
+- Use `##`/`###` for section/subsection headings exactly as the outline specifies.
 
 ## Output
 - Output the full article body in Markdown: the intro, every section (`##` with its \
@@ -636,6 +655,14 @@ async def run_generation_task(
         # article with two titles). H2/H3 (`## `, `### `) are untouched.
         body = re.sub(r"(?m)^[ \t]*#[ \t]+[^\n]*\n?", "", body).strip()
         content_md = f"# {title}\n\n{body}".strip()
+        # The brand's own blog must never pass link authority to a rival: unwrap any
+        # outbound link to a competitor domain (keep the anchor text, drop the URL). The
+        # writer is told not to link competitors; this enforces it deterministically.
+        from . import linking as _linking
+
+        content_md = _linking.strip_competitor_links(
+            content_md, _linking.competitor_hosts(brand_profile)
+        )
         _update(
             db, article_id,
             content_md=content_md,

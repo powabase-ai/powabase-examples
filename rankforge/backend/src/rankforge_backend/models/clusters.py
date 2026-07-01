@@ -32,5 +32,19 @@ class ClusterDetail(ContentCluster):
     members: list[ClusterMember] = Field(default_factory=list)
 
 
+class NewCluster(BaseModel):
+    """Manually found a cluster: a human label + a one-paragraph theme (which subtopics
+    belong in it) that future topics get matched against."""
+
+    label: str = Field(min_length=1, max_length=120)
+    theme: str | None = Field(default=None, max_length=2000)
+
+
 class SetPillar(BaseModel):
+    article_id: UUID
+
+
+class MoveMember(BaseModel):
+    """Move an article into a cluster as a member (from wherever it currently sits)."""
+
     article_id: UUID

@@ -10,6 +10,7 @@ time it is needed (public SSR page, webhook payload, export) and is never persis
 import html as _html
 import ipaddress
 import json
+import re
 import socket
 from datetime import UTC, datetime
 from typing import Any
@@ -25,6 +26,20 @@ from . import generation as gen_svc
 from . import linking
 
 _MD_EXTENSIONS = ["extra", "sane_lists", "toc"]
+
+# A single leading '# H1' line (generation prepends the title to content_md). Not '## '/
+# '### ' — the '[ \t]+' after '#' can't match a second '#'. Used where the renderer emits
+# the title ITSELF (MDX frontmatter, standalone <h1>) so the body H1 doesn't duplicate it.
+_LEADING_H1_RE = re.compile(r"\A\s*#[ \t]+[^\n]*(?:\n+|\Z)")
+# Article statuses whose export should go live immediately (draft: false). Genuine
+# drafts / in-review pieces stay hidden (draft: true).
+_PUBLISHABLE_STATUSES = frozenset({"approved", "published"})
+
+
+def _strip_leading_h1(content_md: str) -> str:
+    """Drop the single leading '# Title' line from a body when the title is rendered
+    separately, so exports don't show two H1s (bad for SEO, visually redundant)."""
+    return _LEADING_H1_RE.sub("", content_md or "", count=1)
 
 _PUBLICATION_COLUMNS = (
     "id, article_id, target_type, target_id, external_id, url, status, "
@@ -68,7 +83,9 @@ def _jsonld_script(article: dict[str, Any]) -> str:
 def render_standalone_html(article: dict[str, Any]) -> str:
     """A complete, self-contained HTML document with JSON-LD + meta in <head> —
     crawlable as-is when exported or served."""
-    body = render_body_html(article.get("content_md") or "")
+    # Strip the body's leading '# Title' — this document renders <h1>{title}</h1> itself,
+    # so keeping it would emit two H1s.
+    body = render_body_html(_strip_leading_h1(article.get("content_md") or ""))
     title = _html.escape(article.get("title") or "")
     return f"""<!doctype html>
 <html lang="en">
@@ -100,8 +117,12 @@ def render_markdown(article: dict[str, Any]) -> str:
 
     Matches the target blog's `content/blog/<slug>.mdx` shape — title, description,
     publishedDate, author, tags, draft — followed by a blank line and the body. Strings
-    are JSON-quoted so a title/description containing a colon, `#`, etc. stays valid
-    YAML. `draft: true` for anything not yet published (hides it on the live site)."""
+    are JSON-quoted so a title/description containing a colon, `#`, etc. stays valid YAML.
+
+    The title is the frontmatter `title` (the blog renders it as the page <h1>), so the
+    body's own leading '# Title' is stripped — otherwise the page shows two H1s. `draft`
+    is false once the article is approved/published (so an export actually seeds the live
+    blog), true only for genuine drafts/in-review pieces."""
     fm = [
         "---",
         f"title: {json.dumps(article.get('title') or '')}",
@@ -120,9 +141,11 @@ def render_markdown(article: dict[str, Any]) -> str:
     if tags:
         fm.append("tags:")
         fm.extend(f"  - {json.dumps(t)}" for t in tags)
-    fm.append(f"draft: {'false' if article.get('status') == 'published' else 'true'}")
+    is_draft = article.get("status") not in _PUBLISHABLE_STATUSES
+    fm.append(f"draft: {'true' if is_draft else 'false'}")
     fm.append("---")
-    return "\n".join(fm) + "\n\n" + (article.get("content_md") or "")
+    body = _strip_leading_h1(article.get("content_md") or "")
+    return "\n".join(fm) + "\n\n" + body
 
 
 # --- publishing ---
@@ -229,11 +252,14 @@ async def publish(
             validate_webhook_url(url)
         except ValueError:
             return _record(db, article_id, "webhook", status="failed", url=url or None)
-        resolved_md = linking.resolve_links(
-            db,
-            article["business_id"],
-            article.get("content_md") or "",
-            fallback_base=public_base_url,
+        resolved_md = linking.strip_competitor_links(
+            linking.resolve_links(
+                db,
+                article["business_id"],
+                article.get("content_md") or "",
+                fallback_base=public_base_url,
+            ),
+            linking.competitor_hosts(brand),
         )
         payload = {
             "id": str(article_id),
@@ -344,8 +370,11 @@ def export(db: Database, article_id: UUID, fmt: str) -> tuple[str, str] | None:
     )
     article = {
         **article,
-        "content_md": linking.resolve_links(
-            db, article["business_id"], article.get("content_md") or ""
+        "content_md": linking.strip_competitor_links(
+            linking.resolve_links(
+                db, article["business_id"], article.get("content_md") or ""
+            ),
+            linking.competitor_hosts(brand),
         ),
         "keywords": (kw_row or {}).get("keywords") or [],
         "author": author,

@@ -88,7 +88,8 @@ export function PublishDialog({
     try {
       const text = await exportArticle(articleId, format);
       download(
-        `${slug || "article"}.${format === "markdown" ? "md" : "html"}`,
+        // `.mdx`, not `.md`: the blog's loader only reads `content/blog/<slug>.mdx`.
+        `${slug || "article"}.${format === "markdown" ? "mdx" : "html"}`,
         text,
         format === "markdown" ? "text/markdown" : "text/html"
       );

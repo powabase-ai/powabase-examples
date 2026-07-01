@@ -2,11 +2,14 @@
 
 import { use, useState } from "react";
 import Link from "next/link";
+import * as Select from "@radix-ui/react-select";
 import {
   Boxes,
   ChevronDown,
   Crown,
+  FolderInput,
   Loader2,
+  Plus,
   RefreshCw,
   Sparkles,
   Trash2,
@@ -15,26 +18,113 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import {
   useAnalyzeGaps,
   useBackfillClusters,
   useCluster,
   useClusters,
+  useCreateCluster,
   useDeleteCluster,
+  useMoveArticle,
   useSetPillar,
 } from "@/lib/hooks/useClusters";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { canApprove, type ContentCluster } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+/** A compact "move this article to another cluster" picker (Radix Select used as an
+ *  action menu). Lists every cluster except the one the article is already in. */
+function MoveMenu({
+  brandId,
+  currentClusterId,
+  articleId,
+  clusters,
+}: {
+  brandId: string;
+  currentClusterId: string;
+  articleId: string;
+  clusters: ContentCluster[];
+}) {
+  const move = useMoveArticle(brandId);
+  const targets = clusters.filter((c) => c.id !== currentClusterId);
+  if (targets.length === 0) return null;
+
+  return (
+    <Select.Root
+      value=""
+      onValueChange={(toClusterId) =>
+        move.mutate(
+          { toClusterId, articleId },
+          {
+            onSuccess: () => toast.success("Article moved"),
+            onError: (e) =>
+              toast.error(e instanceof Error ? e.message : "Move failed"),
+          }
+        )
+      }
+      disabled={move.isPending}
+    >
+      <Select.Trigger
+        aria-label="Move to another cluster"
+        title="Move to another cluster"
+        className="inline-flex shrink-0 items-center gap-1 rounded px-1 text-xs text-muted-foreground outline-none hover:text-foreground data-[state=open]:text-foreground disabled:opacity-50"
+      >
+        {move.isPending ? (
+          <Loader2 className="size-3 animate-spin" />
+        ) : (
+          <FolderInput className="size-3.5" />
+        )}
+        Move
+      </Select.Trigger>
+      <Select.Portal>
+        <Select.Content
+          position="popper"
+          sideOffset={4}
+          align="end"
+          className="z-50 max-h-[50vh] w-56 overflow-hidden rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-lg"
+        >
+          <Select.Viewport>
+            <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Move to cluster
+            </div>
+            {targets.map((c) => (
+              <Select.Item
+                key={c.id}
+                value={c.id}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-secondary"
+              >
+                <Boxes className="size-3.5 shrink-0 text-[rgb(var(--ember))]" />
+                <Select.ItemText>{c.label}</Select.ItemText>
+              </Select.Item>
+            ))}
+          </Select.Viewport>
+        </Select.Content>
+      </Select.Portal>
+    </Select.Root>
+  );
+}
+
 function ClusterCard({
   brandId,
   cluster,
+  clusters,
   canEdit,
 }: {
   brandId: string;
   cluster: ContentCluster;
+  clusters: ContentCluster[];
   canEdit: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -140,6 +230,14 @@ function ClusterCard({
                         Make pillar
                       </button>
                     )}
+                    {canEdit && (
+                      <MoveMenu
+                        brandId={brandId}
+                        currentClusterId={cluster.id}
+                        articleId={m.id}
+                        clusters={clusters}
+                      />
+                    )}
                   </li>
                 ))}
                 {(detail.data?.members ?? []).length === 0 && (
@@ -204,6 +302,100 @@ function ClusterCard({
   );
 }
 
+/** Found a new empty cluster (label + theme). It starts pillar-less; the user then
+ *  moves articles in and designates a pillar. */
+function NewClusterDialog({
+  brandId,
+  open,
+  onOpenChange,
+}: {
+  brandId: string;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const create = useCreateCluster(brandId);
+  const [label, setLabel] = useState("");
+  const [theme, setTheme] = useState("");
+
+  function reset() {
+    setLabel("");
+    setTheme("");
+  }
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!label.trim()) return;
+    create.mutate(
+      { label: label.trim(), theme: theme.trim() || undefined },
+      {
+        onSuccess: () => {
+          toast.success("Cluster created");
+          reset();
+          onOpenChange(false);
+        },
+        onError: (err) =>
+          toast.error(err instanceof Error ? err.message : "Create failed"),
+      }
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="font-display">New cluster</DialogTitle>
+          <DialogDescription>
+            A cluster groups articles around one theme with a single authority pillar.
+            It starts empty — move articles in and make one the pillar.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="grid gap-4">
+          <div className="grid gap-1.5">
+            <Label htmlFor="cluster-label">Label</Label>
+            <Input
+              id="cluster-label"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="e.g. Authentication"
+              maxLength={120}
+              autoFocus
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="cluster-theme">
+              Theme <span className="text-muted-foreground">(optional)</span>
+            </Label>
+            <Textarea
+              id="cluster-theme"
+              value={theme}
+              onChange={(e) => setTheme(e.target.value)}
+              placeholder="Which subtopics belong in this cluster — used to match future articles to it."
+              rows={3}
+              maxLength={2000}
+            />
+          </div>
+          <DialogFooter className="mt-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="gold"
+              disabled={create.isPending || !label.trim()}
+            >
+              {create.isPending ? "Creating…" : "Create cluster"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function ClustersPage({
   params,
 }: {
@@ -214,6 +406,7 @@ export default function ClustersPage({
   const canEdit = canApprove(profile?.role);
   const { data, isLoading } = useClusters(id);
   const backfill = useBackfillClusters(id);
+  const [newOpen, setNewOpen] = useState(false);
 
   return (
     <Page>
@@ -222,31 +415,36 @@ export default function ClustersPage({
         title="Content clusters"
         actions={
           canEdit && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                backfill.mutate(undefined, {
-                  onSuccess: ({ assigned, remaining }) =>
-                    toast.success(
-                      assigned > 0
-                        ? `Clustered ${assigned} article${assigned === 1 ? "" : "s"}` +
-                          (remaining ? " — more remain, run again" : "")
-                        : "All articles are already clustered"
-                    ),
-                  onError: (e) =>
-                    toast.error(e instanceof Error ? e.message : "Failed"),
-                })
-              }
-              disabled={backfill.isPending}
-            >
-              {backfill.isPending ? (
-                <Loader2 className="animate-spin" />
-              ) : (
-                <RefreshCw />
-              )}
-              Backfill
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  backfill.mutate(undefined, {
+                    onSuccess: ({ assigned, remaining }) =>
+                      toast.success(
+                        assigned > 0
+                          ? `Clustered ${assigned} article${assigned === 1 ? "" : "s"}` +
+                            (remaining ? " — more remain, run again" : "")
+                          : "All articles are already clustered"
+                      ),
+                    onError: (e) =>
+                      toast.error(e instanceof Error ? e.message : "Failed"),
+                  })
+                }
+                disabled={backfill.isPending}
+              >
+                {backfill.isPending ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <RefreshCw />
+                )}
+                Backfill
+              </Button>
+              <Button variant="gold" size="sm" onClick={() => setNewOpen(true)}>
+                <Plus /> New cluster
+              </Button>
+            </div>
           )
         }
       />
@@ -267,7 +465,17 @@ export default function ClustersPage({
           <Card className="border-dashed">
             <CardContent className="py-10 text-center text-sm text-muted-foreground">
               No clusters yet. They form as you scout opportunities and publish
-              articles{canEdit ? " — or hit Backfill to cluster existing ones." : "."}
+              articles{canEdit ? " — or hit Backfill to cluster existing ones, or " : "."}
+              {canEdit && (
+                <button
+                  type="button"
+                  onClick={() => setNewOpen(true)}
+                  className="font-medium text-foreground underline underline-offset-2 hover:text-[rgb(var(--ember))]"
+                >
+                  create one manually
+                </button>
+              )}
+              {canEdit && "."}
             </CardContent>
           </Card>
         ) : (
@@ -277,12 +485,15 @@ export default function ClustersPage({
                 key={c.id}
                 brandId={id}
                 cluster={c}
+                clusters={data}
                 canEdit={canEdit}
               />
             ))}
           </div>
         )}
       </PageBody>
+
+      <NewClusterDialog brandId={id} open={newOpen} onOpenChange={setNewOpen} />
     </Page>
   );
 }

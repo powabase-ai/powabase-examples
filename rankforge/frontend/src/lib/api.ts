@@ -182,6 +182,7 @@ export type ResearchStatus =
   | "queued"
   | "searching"
   | "scraping"
+  | "evaluating"
   | "analyzing"
   | "done"
   | "failed";
@@ -210,7 +211,13 @@ export const researchApi = {
   listByBrand: (businessId: string) =>
     request<ResearchRun[]>(`/api/research?business_id=${businessId}`),
   get: (id: string) => request<ResearchRun>(`/api/research/${id}`),
-  run: (data: { business_id: string; topic: string; locale?: string; depth?: string }) =>
+  run: (data: {
+    business_id: string;
+    topic: string;
+    locale?: string;
+    depth?: string;
+    evaluate_sources?: boolean;
+  }) =>
     request<ResearchRun>("/api/research", {
       method: "POST",
       body: JSON.stringify(data),
@@ -229,6 +236,8 @@ export interface BrandSource {
   title?: string | null;
   word_count?: number | null;
   status?: string | null;
+  trust_score?: number | null;
+  trust_reason?: string | null;
   created_at: string;
   research_run_id: string;
   run_topic?: string | null;
@@ -819,10 +828,21 @@ export const clustersApi = {
     request<ContentCluster[]>(
       `/api/business-profiles/${businessId}/clusters`
     ),
+  create: (businessId: string, data: { label: string; theme?: string }) =>
+    request<ContentCluster>(`/api/business-profiles/${businessId}/clusters`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   get: (clusterId: string) =>
     request<ClusterDetail>(`/api/clusters/${clusterId}`),
   setPillar: (clusterId: string, articleId: string) =>
     request<ClusterDetail>(`/api/clusters/${clusterId}/pillar`, {
+      method: "POST",
+      body: JSON.stringify({ article_id: articleId }),
+    }),
+  // Move an article into `clusterId` as a member (from whatever cluster it's in now).
+  moveArticle: (clusterId: string, articleId: string) =>
+    request<ClusterDetail>(`/api/clusters/${clusterId}/members`, {
       method: "POST",
       body: JSON.stringify({ article_id: articleId }),
     }),

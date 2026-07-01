@@ -44,8 +44,11 @@ export function useResearchRuns(businessId: string) {
 export function useRunResearch(businessId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (vars: { topic: string; depth: string }) =>
-      researchApi.run({ business_id: businessId, ...vars }),
+    mutationFn: (vars: {
+      topic: string;
+      depth: string;
+      evaluate_sources?: boolean;
+    }) => researchApi.run({ business_id: businessId, ...vars }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["research", businessId] }),
   });
 }

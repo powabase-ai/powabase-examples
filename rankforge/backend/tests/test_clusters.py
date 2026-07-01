@@ -62,6 +62,33 @@ async def test_assign_founds_new_cluster_and_indexes_it(monkeypatch):
     )
 
 
+async def test_create_cluster_inserts_and_indexes(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.return_value = {"id": NEWID, "label": "Billing", "index_doc_id": None}
+    monkeypatch.setattr(clusters, "ensure_cluster_kb", AsyncMock(return_value="kb1"))
+    idx = AsyncMock(return_value="doc1")
+    monkeypatch.setattr(clusters, "_index_doc", idx)
+    out = await clusters.create_cluster(
+        MagicMock(), db, BID, label="Billing", theme="invoicing & payments"
+    )
+    # The row is inserted, then its one-doc index entry is built and stored back.
+    assert "insert into public.content_clusters" in db.fetch_one.call_args.args[0]
+    idx.assert_awaited_once()
+    assert any("set index_doc_id" in c.args[0] for c in db.execute.call_args_list)
+    assert out["index_doc_id"] == "doc1"
+
+
+async def test_create_cluster_survives_index_doc_failure(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.return_value = {"id": NEWID, "label": "Billing", "index_doc_id": None}
+    monkeypatch.setattr(clusters, "ensure_cluster_kb", AsyncMock(return_value="kb1"))
+    # Index-doc upload failed → cluster is still created (retrieval degrades gracefully).
+    monkeypatch.setattr(clusters, "_index_doc", AsyncMock(return_value=None))
+    out = await clusters.create_cluster(MagicMock(), db, BID, label="Billing")
+    db.execute.assert_not_called()  # no index_doc_id to write back
+    assert out["id"] == NEWID
+
+
 async def test_assign_join_with_bad_id_falls_back_to_nearest(monkeypatch):
     db = MagicMock()
     monkeypatch.setattr(clusters.brands, "get_profile", lambda d, bid: {})
@@ -152,6 +179,36 @@ def test_set_pillar_demotes_old_promotes_new_and_locks():
     assert any("cluster_role = 'member'" in q for q in qs)  # demote previous pillar
     assert any("cluster_role = 'pillar'" in q for q in qs)  # promote the new one
     assert out["pillar_locked"] is True
+
+
+def test_move_article_rehomes_as_member_and_vacates_old_pillar():
+    db = MagicMock()
+    conn = MagicMock()
+    db.connection.return_value.__enter__.return_value = conn
+    # target-cluster-in-brand check, article-in-brand check
+    db.fetch_one.side_effect = [{"id": NEWID}, {"id": AID}, {"id": NEWID}]
+    out = clusters.move_article(db, BID, AID, NEWID)
+    qs = [c.args[0] for c in conn.execute.call_args_list]
+    # Any cluster this article anchored as pillar is vacated first...
+    assert any("set pillar_article_id = null" in q for q in qs)
+    # ...then the article is re-homed into the target cluster as a member.
+    rehome = next(q for q in qs if "update public.articles set cluster_id" in q)
+    assert "cluster_role = 'member'" in rehome
+    assert out == {"id": NEWID}
+
+
+def test_move_article_none_when_target_not_in_brand():
+    db = MagicMock()
+    db.fetch_one.return_value = None  # target cluster not in this brand
+    assert clusters.move_article(db, BID, AID, NEWID) is None
+    db.connection.assert_not_called()  # nothing mutated
+
+
+def test_move_article_rejects_article_from_another_brand():
+    db = MagicMock()
+    db.fetch_one.side_effect = [{"id": NEWID}, None]  # target ok, article not in brand
+    assert clusters.move_article(db, BID, AID, NEWID) is None
+    db.connection.assert_not_called()
 
 
 def test_set_pillar_none_when_cluster_missing():
@@ -246,6 +303,70 @@ def test_set_pillar_requires_editor(monkeypatch):
     writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
     resp = _client(user=writer).post(
         f"/api/clusters/{CID}/pillar", json={"article_id": AID}
+    )
+    assert resp.status_code == 403
+
+
+def test_move_member_route(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    move = MagicMock(return_value={"id": CID})
+    monkeypatch.setattr(clusters, "move_article", move)
+    monkeypatch.setattr(clusters, "get_cluster_detail", lambda d, cid: CLUSTER_DETAIL)
+    resp = _client().post(f"/api/clusters/{CID}/members", json={"article_id": AID})
+    assert resp.status_code == 200
+    assert resp.json()["label"] == "Auth"
+    # The move is scoped to the guarded cluster's brand, moving the given article here.
+    assert move.call_args.args[1:] == (BID, UUID(AID), UUID(CID))
+
+
+def test_move_member_404_when_article_not_in_brand(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    monkeypatch.setattr(clusters, "move_article", lambda *a: None)
+    resp = _client().post(f"/api/clusters/{CID}/members", json={"article_id": AID})
+    assert resp.status_code == 404
+
+
+def test_move_member_requires_editor(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).post(
+        f"/api/clusters/{CID}/members", json={"article_id": AID}
+    )
+    assert resp.status_code == 403
+
+
+def test_create_cluster_route(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "create_cluster",
+        AsyncMock(return_value={"id": NEWID, "business_id": BID, "label": "Billing",
+                               "pillar_locked": False}),
+    )
+    resp = _client().post(
+        f"/api/business-profiles/{BID}/clusters",
+        json={"label": "Billing", "theme": "invoicing"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["label"] == "Billing"
+    assert resp.json()["member_count"] == 0  # a fresh cluster is empty
+
+
+def test_create_cluster_requires_label(monkeypatch):
+    resp = _client().post(
+        f"/api/business-profiles/{BID}/clusters", json={"label": ""}
+    )
+    assert resp.status_code == 422  # empty label rejected by the schema
+
+
+def test_create_cluster_requires_editor(monkeypatch):
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).post(
+        f"/api/business-profiles/{BID}/clusters", json={"label": "Billing"}
     )
     assert resp.status_code == 403
 

@@ -82,6 +82,7 @@ export default function BrandWorkspace({
 
   const [topic, setTopic] = React.useState("");
   const [depth, setDepth] = React.useState("standard");
+  const [evaluateSources, setEvaluateSources] = React.useState(true);
   const [selectedRun, setSelectedRun] = React.useState<string | null>(null);
   const [sourceForMd, setSourceForMd] = React.useState<string | null>(null);
   const [articleType, setArticleType] = React.useState("general");
@@ -96,7 +97,11 @@ export default function BrandWorkspace({
     e.preventDefault();
     if (!topic.trim()) return;
     try {
-      const run = await runResearch.mutateAsync({ topic: topic.trim(), depth });
+      const run = await runResearch.mutateAsync({
+        topic: topic.trim(),
+        depth,
+        evaluate_sources: evaluateSources,
+      });
       setSelectedRun(run.id);
       setTopic("");
       toast.success("Research started — watch the progress");
@@ -163,6 +168,21 @@ export default function BrandWorkspace({
                     <option value="deep">Deep (20, 10)</option>
                   </select>
                 </div>
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={evaluateSources}
+                    onChange={(e) => setEvaluateSources(e.target.checked)}
+                    className="mt-0.5 size-4 shrink-0 rounded border-input accent-[rgb(var(--gold))]"
+                  />
+                  <span>
+                    Evaluate &amp; prune source quality
+                    <span className="block text-xs text-muted-foreground">
+                      Scores each source for authority, drops weak SEO blogs, and
+                      backfills stronger ones. Uses extra credits.
+                    </span>
+                  </span>
+                </label>
                 <Button type="submit" variant="gold" disabled={runResearch.isPending || !topic.trim()}>
                   <Search /> Run research
                 </Button>

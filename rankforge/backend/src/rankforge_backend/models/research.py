@@ -53,6 +53,10 @@ class ResearchRunCreate(BaseModel):
     # Validate at the boundary: an invalid/stale value used to silently fall through
     # to the most expensive preset instead of being rejected.
     depth: Literal["quick", "standard", "deep"] = "deep"
+    # Score every scraped source for authority/trust, prune weak ones, and backfill
+    # higher-authority replacements. Costs extra credits (an LLM judge pass + extra
+    # scrapes); opt out for a cheaper, unfiltered run.
+    evaluate_sources: bool = True
 
 
 class ResearchRun(BaseModel):
@@ -80,6 +84,8 @@ class ResearchSource(BaseModel):
     title: str | None = None
     word_count: int | None = None
     status: str | None = None
+    trust_score: int | None = None
+    trust_reason: str | None = None
     created_at: datetime
 
 
@@ -92,6 +98,8 @@ class BrandSource(BaseModel):
     title: str | None = None
     word_count: int | None = None
     status: str | None = None
+    trust_score: int | None = None
+    trust_reason: str | None = None
     created_at: datetime
     research_run_id: UUID
     run_topic: str | None = None

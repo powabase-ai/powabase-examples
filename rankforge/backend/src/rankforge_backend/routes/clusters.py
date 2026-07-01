@@ -10,7 +10,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
-from ..models.clusters import ClusterDetail, ContentCluster, SetPillar
+from ..models.clusters import (
+    ClusterDetail,
+    ContentCluster,
+    MoveMember,
+    NewCluster,
+    SetPillar,
+)
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
 from ..services import clusters as svc
@@ -32,6 +38,26 @@ def list_clusters(
 ):
     assert_brand_access(db, business_id, user)
     return svc.list_clusters_view(db, business_id)
+
+
+@router.post(
+    "/business-profiles/{business_id}/clusters",
+    response_model=ContentCluster,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_cluster(
+    business_id: UUID,
+    payload: NewCluster,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Manually found a new (empty) cluster with a label + theme. It starts pillar-less;
+    move articles in and designate a pillar to populate it."""
+    assert_brand_access(db, business_id, user)
+    return await svc.create_cluster(
+        pb, db, business_id, label=payload.label, theme=payload.theme or ""
+    )
 
 
 @router.post("/business-profiles/{business_id}/clusters/backfill")
@@ -92,6 +118,23 @@ async def delete_cluster(
     Backfill); the cluster's index doc is removed from Powabase."""
     _guard_cluster(db, cluster_id, user)
     await svc.delete_cluster(pb, db, cluster_id)
+
+
+@router.post("/clusters/{cluster_id}/members", response_model=ClusterDetail)
+def move_member(
+    cluster_id: UUID,
+    payload: MoveMember,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Move an article into this cluster as a member (from whatever cluster it's in now).
+    If it was another cluster's pillar, that slot is vacated. Pair with the pillar
+    endpoint to then designate it this cluster's pillar."""
+    cluster = _guard_cluster(db, cluster_id, user)
+    row = svc.move_article(db, cluster["business_id"], payload.article_id, cluster_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article or cluster not found")
+    return svc.get_cluster_detail(db, cluster_id)
 
 
 @router.post("/clusters/{cluster_id}/pillar", response_model=ClusterDetail)
