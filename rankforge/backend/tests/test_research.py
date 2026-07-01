@@ -193,7 +193,7 @@ async def test_evaluate_prunes_low_and_backfills(monkeypatch):
     )
     # A confirmed replacement (fresh, 80) was scraped BEFORE the weak source was dropped.
     assert dropped == ["s_weak"]  # weak swapped out only once its replacement landed
-    assert stats == {"scored": 2, "dropped": 1, "added": 1}
+    assert stats == {"scorable": 2, "scored": 2, "dropped": 1, "added": 1}
     assert "https://weak.blog/b" not in by_url
     assert "https://fresh.org/c" in by_url  # replacement kept
     assert {t["title"] for t in teardowns} == {"Good", "Fresh"}
@@ -230,7 +230,7 @@ async def test_evaluate_no_net_loss_when_backfill_fails(monkeypatch):
         backfill_pool=["https://fresh.org/c"], title_by_url={},
     )
     assert dropped == []  # nothing deleted without a confirmed replacement
-    assert stats == {"scored": 2, "dropped": 0, "added": 0}
+    assert stats == {"scorable": 2, "scored": 2, "dropped": 0, "added": 0}
     assert "https://weak.blog/b" in by_url  # weak source kept — no net loss
 
 
@@ -277,11 +277,11 @@ async def test_evaluate_drops_replacement_that_is_also_weak(monkeypatch):
         backfill_pool=["https://fresh.org/c"], title_by_url={},
     )
     assert dropped == ["s_fresh"]  # only the also-weak replacement is discarded
-    assert stats == {"scored": 2, "dropped": 0, "added": 0}
+    assert stats == {"scorable": 2, "scored": 2, "dropped": 0, "added": 0}
     assert "https://weak.blog/b" in by_url  # original weak source retained
 
 
-async def test_evaluate_keeps_all_when_scoring_unavailable(monkeypatch):
+async def test_evaluate_keeps_all_when_scoring_unavailable(monkeypatch, caplog):
     # No scores (judge degraded) → nothing pruned, no backfill, every source survives.
     db = MagicMock()
     db.aexecute = AsyncMock()
@@ -291,12 +291,18 @@ async def test_evaluate_keeps_all_when_scoring_unavailable(monkeypatch):
         },
     }
     monkeypatch.setattr(svc, "score_sources", AsyncMock(return_value={}))
-    teardowns, stats = await svc.evaluate_and_prune(
-        db=db, client=MagicMock(), run_id=RID, by_url=by_url,
-        backfill_pool=["https://b.com/y"], title_by_url={},
-    )
-    assert stats == {"scored": 0, "dropped": 0, "added": 0}
+    with caplog.at_level("WARNING", logger="rankforge.research"):
+        teardowns, stats = await svc.evaluate_and_prune(
+            db=db, client=MagicMock(), run_id=RID, by_url=by_url,
+            backfill_pool=["https://b.com/y"], title_by_url={},
+        )
+    # scorable=1 but scored=0 → the paid-for evaluation did NOT run; distinct from
+    # "nothing to prune" and surfaced at WARNING (not a silent INFO "kept all").
+    assert stats == {"scorable": 1, "scored": 0, "dropped": 0, "added": 0}
     assert len(teardowns) == 1  # unscored source is kept, never pruned blind
+    assert any(
+        "UNEVALUATED" in r.message and r.levelname == "WARNING" for r in caplog.records
+    )
 
 
 def make_client() -> TestClient:

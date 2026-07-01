@@ -214,7 +214,7 @@ export function useRemoveBrokenLink(id: string) {
   return useMutation({
     mutationFn: (vars: { findingId: string; keepText: boolean }) =>
       articlesApi.removeBrokenLink(id, vars.findingId, vars.keepText),
-    onSuccess: (article) => {
+    onSuccess: ({ article }) => {
       qc.setQueryData(["article", id], article); // body changed → refresh the preview
       qc.invalidateQueries({ queryKey: ["link-health", id] });
     },

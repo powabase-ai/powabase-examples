@@ -193,8 +193,11 @@ async def test_remove_link_unlink_keeps_anchor_text(monkeypatch):
     # Unlink is instant + mechanical — it must NOT call the LLM editor.
     boom = AsyncMock(side_effect=AssertionError("unlink must not call the LLM"))
     monkeypatch.setattr(linkcheck, "ensure_link_editor_agent", boom)
-    result = await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=True)
-    assert result is not None
+    article, repaired = await linkcheck.remove_link(
+        MagicMock(), db, BID, AID, FID, keep_text=True
+    )
+    assert article is not None
+    assert repaired == "unlinked"  # instant unlink — no LLM mend involved
     assert captured["content_md"] == "see the guide now"  # words kept, link dropped
     assert any(
         "status = 'resolved'" in c.args[0] for c in db.execute.call_args_list
@@ -221,7 +224,10 @@ async def test_remove_link_rephrases_the_sentence_via_llm(monkeypatch):
         return "Read the setup steps."  # link gone, sentence mended
 
     monkeypatch.setattr(linkcheck, "_rephrase_block", fake_rephrase)
-    await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=False)
+    _, repaired = await linkcheck.remove_link(
+        MagicMock(), db, BID, AID, FID, keep_text=False
+    )
+    assert repaired == "llm"  # the copy-editor mended the paragraph cleanly
     assert captured["content_md"] == "Read the setup steps."
     assert "x.com/404" not in captured["content_md"]
 
@@ -243,7 +249,10 @@ async def test_remove_link_falls_back_to_mechanical_when_llm_keeps_the_link(monk
         return block  # model didn't drop the link → must fall back to mechanical strip
 
     monkeypatch.setattr(linkcheck, "_rephrase_block", bad_rephrase)
-    await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=False)
+    _, repaired = await linkcheck.remove_link(
+        MagicMock(), db, BID, AID, FID, keep_text=False
+    )
+    assert repaired == "mechanical"  # LLM left the link → raw strip, flag it for a human
     assert "x.com/404" not in captured["content_md"]  # link stripped regardless
     assert "  " not in captured["content_md"]  # spacing tidied
 
@@ -259,7 +268,10 @@ async def test_remove_link_leaves_finding_open_when_url_absent(monkeypatch):
     )
     upd = MagicMock()
     monkeypatch.setattr(linkcheck.gen_svc, "update_article", upd)
-    await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=True)
+    _, repaired = await linkcheck.remove_link(
+        MagicMock(), db, BID, AID, FID, keep_text=True
+    )
+    assert repaired == "none"  # URL absent → nothing removed
     upd.assert_not_called()  # body untouched
     assert not any(
         "status = 'resolved'" in c.args[0] for c in db.execute.call_args_list
@@ -269,7 +281,10 @@ async def test_remove_link_leaves_finding_open_when_url_absent(monkeypatch):
 async def test_remove_link_none_when_finding_missing():
     db = MagicMock()
     db.fetch_one.return_value = None
-    assert await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=True) is None
+    article, repaired = await linkcheck.remove_link(
+        MagicMock(), db, BID, AID, FID, keep_text=True
+    )
+    assert article is None and repaired == "none"
     db.execute.assert_not_called()  # nothing mutated
 
 
@@ -323,12 +338,17 @@ _FULL_ARTICLE = {
 
 def test_remove_broken_link_route(monkeypatch):
     monkeypatch.setattr(gsvc, "get_article", lambda d, aid: ARTICLE)
-    monkeypatch.setattr(linkcheck, "remove_link", AsyncMock(return_value=_FULL_ARTICLE))
+    monkeypatch.setattr(
+        linkcheck, "remove_link",
+        AsyncMock(return_value=(_FULL_ARTICLE, "mechanical")),
+    )
     resp = _client().post(
-        f"/api/articles/{AID}/links/health/{FID}/remove", json={"keep_text": True}
+        f"/api/articles/{AID}/links/health/{FID}/remove", json={"keep_text": False}
     )
     assert resp.status_code == 200
-    assert resp.json()["id"] == AID
+    body = resp.json()
+    assert body["article"]["id"] == AID
+    assert body["repaired"] == "mechanical"  # surfaced so the UI can prompt a human
 
 
 def test_remove_broken_link_requires_editor(monkeypatch):
@@ -342,7 +362,9 @@ def test_remove_broken_link_requires_editor(monkeypatch):
 
 def test_remove_broken_link_404_when_finding_missing(monkeypatch):
     monkeypatch.setattr(gsvc, "get_article", lambda d, aid: ARTICLE)
-    monkeypatch.setattr(linkcheck, "remove_link", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        linkcheck, "remove_link", AsyncMock(return_value=(None, "none"))
+    )
     resp = _client().post(
         f"/api/articles/{AID}/links/health/{FID}/remove", json={"keep_text": True}
     )

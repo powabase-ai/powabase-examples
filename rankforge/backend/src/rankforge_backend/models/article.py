@@ -1,6 +1,7 @@
 """Article (Stage C) schemas."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -75,3 +76,16 @@ class ArticleVersion(BaseModel):
     article_id: UUID
     created_at: datetime
     word_count: int | None = None
+
+
+class RemoveLinkResult(BaseModel):
+    """Result of a one-click broken-link removal. `repaired` tells the UI HOW the prose
+    was mended, so a mechanical strip can be flagged for a human to eyeball:
+      'unlinked'   — anchor words kept, URL dropped (keep_text); nothing to mend.
+      'llm'        — the copy-editor rewrote the affected paragraph(s) cleanly.
+      'mechanical' — the LLM was unavailable/failed on >=1 block, so a regex strip
+                     removed the link; it can leave a rough seam worth a human read.
+      'none'       — the URL wasn't in the body (stale finding); article unchanged."""
+
+    article: Article
+    repaired: Literal["unlinked", "llm", "mechanical", "none"]

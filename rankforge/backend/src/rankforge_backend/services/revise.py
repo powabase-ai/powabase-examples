@@ -25,11 +25,11 @@ from .agents import ensure_agent
 log = logging.getLogger("rankforge.revise")
 
 REVISER_AGENT_NAME = "rankforge-reviser"
-# The "make it satisfactory" full-article rewrite. Gemini 3.1 Pro (the `gemini/`
-# AI-Studio path — the bare id routes to Vertex, which needs the GCP SDK). Low
-# temperature + low reasoning: faithful edits over heavy thinking on a large streamed
-# output where thinking would add the most latency.
-REVISER_MODEL = "gemini/gemini-3.1-pro-preview"
+# The "make it satisfactory" full-article rewrite. Opus 4.7 at low reasoning: matches
+# the writer model so revisions hold the same length/voice, and Opus respects the word
+# count better than Gemini 3.1 Pro did. Low temperature + low reasoning: faithful edits
+# over heavy thinking on a large streamed output where thinking would add most latency.
+REVISER_MODEL = "claude-opus-4-7"
 # Metadata is a trivial one-liner — a fast capable model is plenty.
 META_MODEL = "claude-sonnet-4-6"
 
@@ -656,6 +656,7 @@ async def _editorial_loop(
     comp_hosts = _competitor_hosts_for(db, article_id)
     editor_id: str | None = None
     reviser_id: str | None = None
+    did_work = False  # True once the reviser has responded (see _objective_loop)
     for i in range(MAX_EDITORIAL_PASSES):
         article = gen_svc.get_article(db, article_id)
         cur_md = (article.get("content_md") if article else "") or ""
@@ -691,6 +692,7 @@ async def _editorial_loop(
             new_md = await _revise_for_voice(
                 client, reviser_id, cur_md, notes, excerpts
             )
+            did_work = True  # the reviser agent responded (not an infra failure)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
             if comp_hosts:
@@ -717,6 +719,11 @@ async def _editorial_loop(
             await geo_optimize.optimize_and_store(client, db, article_id)
             await scoring.score_and_store(client, db, article_id)
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
+            # A first-pass reviser failure (it never responded) means the editorial pass
+            # did nothing — surface it instead of a silent "done". Later failures (and an
+            # editor-review failure, which raises before the try) fall through / break.
+            if not did_work:
+                raise
             break
 
 

@@ -191,7 +191,7 @@ function BrandLogoCard({ brand }: { brand?: BusinessProfile }) {
                   : "Upload"}
               <input
                 type="file"
-                accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                accept="image/png,image/jpeg,image/webp"
                 className="hidden"
                 onChange={onPick}
                 disabled={upload.isPending}
@@ -220,7 +220,7 @@ function BrandLogoCard({ brand }: { brand?: BusinessProfile }) {
             )}
           </div>
           <p className="text-xs text-muted-foreground">
-            PNG, JPG, SVG, or WebP, up to 5 MB. Shown in the brand switcher.
+            PNG, JPG, or WebP, up to 5 MB. Shown in the brand switcher.
           </p>
         </div>
       </CardContent>

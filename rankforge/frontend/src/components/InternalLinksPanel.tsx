@@ -453,10 +453,14 @@ function BrokenLinksSection({
     remove.mutate(
       { findingId, keepText },
       {
-        onSuccess: () =>
-          toast.success(
-            keepText ? "Unlinked — text kept" : "Removed — sentence rephrased"
-          ),
+        onSuccess: ({ repaired }) =>
+          repaired === "mechanical"
+            ? toast.warning(
+                "Removed — automatic rephrasing was unavailable, please review the paragraph"
+              )
+            : toast.success(
+                keepText ? "Unlinked — text kept" : "Removed — sentence rephrased"
+              ),
         onError: (e) =>
           toast.error(e instanceof Error ? e.message : "Could not edit the link"),
         onSettled: () => setActing(null),

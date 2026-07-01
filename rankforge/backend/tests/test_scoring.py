@@ -39,6 +39,13 @@ def test_seo_signal_weights_sum_to_one():
     assert round(sum(sig["weight"] for sig in s["signals"]), 6) == 1.0
 
 
+def test_readability_signal_weights_sum_to_one():
+    # Same invariant for readability — a new signal (e.g. brand_voice) must shave a
+    # sibling, not push the denominator past 1.0 and silently dilute every other signal.
+    s = scoring.score_readability(MD, {"human_voice": 80, "flow": 80})
+    assert round(sum(sig["weight"] for sig in s["signals"]), 6) == 1.0
+
+
 def test_low_keyword_density_scores_low_and_names_the_keyword():
     # A primary keyword that appears ~once in a long article is genuinely under-used;
     # the recalibrated band must score that low (the old 1.5 slack scored it ~77).
@@ -199,18 +206,39 @@ def test_antithesis_detector_ignores_possessive_its():
 
 
 def test_readability_flags_detached_brand_voice():
-    # The brand's own blog talking about itself as a third party / hedging its own
-    # capabilities (the exact phrasing that shipped uncaught).
+    # The brand's own blog referring to itself in the third person / hedging its own
+    # docs — the two narrowed, low-false-positive tells that survive.
     md = (
-        "According to Powabase's own vendor documentation, each project is isolated. "
-        "The vendor asserts its runtime has hard safeguards. "
-        "The platform documents specific pitfalls so the model can be primed."
+        "Powabase isolates every project. "
+        "The vendor asserts that each runtime enforces hard, non-negotiable step "
+        "limits across the whole execution path, even under sustained concurrent load. "
+        "It works. "
+        "According to Powabase's own internal docs, the safeguards always hold. "
+        "The vendor claims strong, sensible defaults. "
+        "Setup takes minutes, not days, and those defaults suit most teams out of "
+        "the box. "
+        "Try it."
     )
     sigs = {s["key"]: s for s in scoring.score_readability(md, None)["signals"]}
     assert sigs["brand_voice"]["score"] < 40  # 3 detached refs → dinged hard
     assert sigs["brand_voice"]["fixes"]  # actionable fix offered
-    # A gate key: egregious detached voice keeps the axis from silently "meeting" target.
-    assert not scoring.score_readability(md, {"human_voice": 95, "flow": 95})["met"]
+    # ADVISORY, not a gate: even a badly-dinged brand_voice must NOT force the axis to
+    # miss target when the prose is otherwise strong (this drove needless refines).
+    res = scoring.score_readability(md, {"human_voice": 95, "flow": 95})
+    assert res["total"] >= scoring.READABILITY_TARGET
+    assert res["met"] is True
+
+
+def test_brand_voice_ignores_competitor_comparisons():
+    # Third-person attribution + hedging is EXACTLY what the writer prompt wants for
+    # competitor comparisons — the narrowed regex must not false-positive on it.
+    comp = (
+        "Acme claims to be the fastest option on the market. "
+        "Supabase allegedly caps row size. The platform states its pricing publicly, "
+        "and the company asserts 99.9% uptime across all regions."
+    )
+    sigs = {s["key"]: s for s in scoring.score_readability(comp, None)["signals"]}
+    assert sigs["brand_voice"]["score"] == 100  # no false positive on rival claims
 
 
 def test_detached_voice_ignores_first_person_and_neutral_verbs():

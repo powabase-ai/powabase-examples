@@ -35,10 +35,11 @@ _ACTIVE_GEN_STATUSES = (
 )
 
 WRITER_AGENT_NAME = "rankforge-writer"
-# Long-form prose IS the product. Gemini 3.1 Pro (the `gemini/` AI-Studio path — the
-# bare id routes to Vertex, which needs the GCP SDK). Low reasoning + temperature for
-# natural variety on one big streamed draft; heavy thinking mostly adds latency here.
-WRITER_MODEL = "gemini/gemini-3.1-pro-preview"
+# Long-form prose IS the product. Opus 4.7 at low reasoning: Gemini 3.1 Pro drafted
+# fluently but under-respected the target word count, so we trade its speed for Opus's
+# tighter adherence to the length brief. Low reasoning + temperature for natural
+# variety on one big streamed draft; heavy thinking mostly adds latency here.
+WRITER_MODEL = "claude-opus-4-7"
 
 _SYSTEM_PROMPT = """\
 You are RankForge's **senior content writer**. You write a complete long-form \

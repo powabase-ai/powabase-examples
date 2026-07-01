@@ -26,10 +26,13 @@ from ..services import business_profiles as svc
 from ..services import source_refs
 from .deps import get_db, get_powabase  # re-exported for callers/tests
 
+# Raster only. SVG is deliberately excluded: it lands in a PUBLIC bucket with a stable,
+# guessable URL, and an SVG opened directly (not via <img>) executes its embedded script
+# in the storage origin — a stored-XSS vector that, given the shared .powabase.ai cookie
+# scope, could reach session state. PNG/JPG/WebP cover every real logo.
 _LOGO_EXT = {
     "image/png": "png",
     "image/jpeg": "jpg",
-    "image/svg+xml": "svg",
     "image/webp": "webp",
 }
 _MAX_LOGO_BYTES = 5 * 1024 * 1024
@@ -101,7 +104,7 @@ async def upload_business_logo(
     ext = _LOGO_EXT.get(file.content_type or "")
     if ext is None:
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "logo must be a PNG, JPG, SVG, or WebP image"
+            status.HTTP_400_BAD_REQUEST, "logo must be a PNG, JPG, or WebP image"
         )
     content = await file.read()
     if not content or len(content) > _MAX_LOGO_BYTES:

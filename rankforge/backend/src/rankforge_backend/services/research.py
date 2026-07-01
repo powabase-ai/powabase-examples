@@ -519,7 +519,19 @@ async def evaluate_and_prune(
     url → {teardown, source_id, status, excerpt} and is mutated in place to the final set.
     Returns (final teardown dicts, stats). Scoring failure is non-fatal: with no scores
     nothing changes and every source is kept."""
-    scores = await score_sources(client, _usable_for_scoring(by_url))
+    scorable = _usable_for_scoring(by_url)
+    scores = await score_sources(client, scorable)
+    if scorable and not scores:
+        # We HAD sources to rate but got zero usable scores back — the judge errored or
+        # returned malformed output (score_sources logged the cause). Keeping all sources
+        # is the safe behavior, but the user opted into (and was billed extra credits for)
+        # evaluation that effectively didn't run, so this must NOT look like "ran fine,
+        # kept all". Surface it distinctly from the nothing-to-prune case below.
+        log.warning(
+            "research %s: source evaluation requested but the judge returned no usable "
+            "scores for %d source(s) — all kept, UNEVALUATED",
+            run_id, len(scorable),
+        )
     for u, (score, reason) in scores.items():
         await db.aexecute(
             "update public.research_sources set trust_score = %s, trust_reason = %s "
@@ -589,7 +601,10 @@ async def evaluate_and_prune(
             added += 1
 
     teardowns = [v["teardown"].model_dump() for v in by_url.values()]
-    return teardowns, {"scored": len(scores), "dropped": dropped, "added": added}
+    return teardowns, {
+        "scorable": len(scorable), "scored": len(scores),
+        "dropped": dropped, "added": added,
+    }
 
 
 # --- the background worker ---

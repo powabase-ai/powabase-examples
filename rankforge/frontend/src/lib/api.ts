@@ -570,11 +570,20 @@ export const articlesApi = {
       { method: "POST" }
     ),
   removeBrokenLink: (id: string, findingId: string, keepText: boolean) =>
-    request<Article>(
+    request<RemoveLinkResult>(
       `/api/articles/${id}/links/health/${findingId}/remove`,
       { method: "POST", body: JSON.stringify({ keep_text: keepText }) }
     ),
 };
+
+/** How a broken link was mended. 'mechanical' = the LLM copy-edit failed and a raw
+ *  strip was used, which can leave a rough seam worth a human read. */
+export type LinkRepair = "unlinked" | "llm" | "mechanical" | "none";
+
+export interface RemoveLinkResult {
+  article: Article;
+  repaired: LinkRepair;
+}
 
 /** A broken outbound link found in a published article (internal target gone /
  *  external 4xx-5xx / unreachable), surfaced for an editor to fix or ignore. */

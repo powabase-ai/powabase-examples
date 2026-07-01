@@ -55,17 +55,17 @@ _EMPTY_TRANSITION_RE = re.compile(
     r"(?<![a-z])(?:moreover|furthermore|additionally|that said)(?![a-z])", re.I
 )
 # Detached brand voice: the brand's OWN blog referring to itself as a third party
-# ("the vendor asserts…", "the platform documents…") or hedging its own capabilities
-# ("according to <Brand>'s own docs…", "allegedly"). High-precision phrases that read
-# impersonal on a champion blog; third-person + attribution belongs to competitors only.
-# ("our own …" is first-person and fine — excluded from the "according to … own" case.)
+# ("the vendor asserts…") or hedging its own docs ("according to <Brand>'s own docs…").
+# ADVISORY only (not a gate): this signal can't see the brand/competitor names, and
+# third-person attribution + hedging is exactly what the writer prompt WANTS for
+# competitor comparisons ("Acme claims to be the fastest…"). So the broad patterns that
+# tripped on rivals — the generic "the {platform,company,…} {asserts,claims,…}"
+# attribution, the "allegedly/supposedly" hedges, and bare "claims to" — are dropped;
+# only the two lowest-false-positive self-reference tells remain. ("our own …" is
+# first-person and fine — excluded from the "according to … own" case.)
 _DETACHED_VOICE_RE = re.compile(
     r"\bthe vendor\b"
-    r"|\bthe (?:vendor|platform|company|tool|product|service|framework)\s+"
-    r"(?:asserts|claims|purports|maintains|contends|alleges|documents|states|reportedly)\b"
-    r"|\baccording to\s+(?!(?:our|my|we|us)\b)[^.\n]{0,40}\bown\b"
-    r"|\b(?:allegedly|supposedly|purportedly)\b"
-    r"|\bclaims to\b",
+    r"|\baccording to\s+(?!(?:our|my|we|us)\b)[^.\n]{0,40}\bown\b",
     re.I,
 )
 _BOLD_BULLET_RE = re.compile(r"^\s*[-*]\s+\*\*[^*]+\*\*\s*[:\-—]", re.MULTILINE)
@@ -384,7 +384,7 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     ai_density = ai_hits / wc * 1000
     ai_score = max(0.0, 100.0 * (1 - max(0.0, ai_density - 1.5) / 7.5))
     sig.append(_signal(
-        "ai_vocabulary", "AI-tell vocabulary", ai_score, 0.18,
+        "ai_vocabulary", "AI-tell vocabulary", ai_score, 0.16,
         f"{ai_hits} flagged word(s) (~{ai_density:.1f}/1k) from the "
         "delve/leverage/robust/seamless/elevate register.",
         ["Swap the flagged words for plain language; never stack several in a "
@@ -393,7 +393,7 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     tell_hits = len(_TELL_RE.findall(content_md))
     tell_score = max(0.0, 100.0 - tell_hits * 25)
     sig.append(_signal(
-        "tell_phrases", "Formulaic constructions", tell_score, 0.16,
+        "tell_phrases", "Formulaic constructions", tell_score, 0.14,
         f"{tell_hits} AI-tell construction(s) (\"it's not just X…\", the \"X isn't A, "
         "it's B\" reframe, \"whether you're a…\", \"in today's… world\", \"let's dive "
         "in\", \"in conclusion\").",
@@ -421,9 +421,9 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     sig.append(_signal(
         "brand_voice", "First-person brand voice",
         max(0.0, 100.0 - detached * 25), 0.10,
-        f"{detached} detached self-reference(s) (\"the vendor asserts…\", \"the "
-        "platform documents…\", \"according to <brand>'s own docs…\") — the brand's "
-        "own blog should speak AS the brand, not about it.",
+        f"{detached} detached self-reference(s) (\"the vendor asserts…\", \"according "
+        "to <brand>'s own docs…\") — the brand's own blog should speak AS the brand, "
+        "not about it. (Advisory: third-person is fine for competitors.)",
         ["Rewrite detached self-reference in the brand's first-person champion voice "
          "(its name or \"we\"/\"our\", stated as fact); keep third-person for "
          "competitors only."]
@@ -437,7 +437,7 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     else:
         cv = 0.0
     sig.append(_signal(
-        "rhythm", "Sentence-length variety", _band(cv, 0.5, 2.0, 0.5), 0.12,
+        "rhythm", "Sentence-length variety", _band(cv, 0.5, 2.0, 0.5), 0.10,
         f"Sentence length varies with CV ~{cv:.2f}; mechanical evenness reads "
         "as machine-made.",
         ["Mix short and long sentences; avoid uniform sentence/paragraph length."]
@@ -459,13 +459,13 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     _NEUTRAL = "Not evaluated (LLM judge unavailable)."
     sig.append(_signal(
         "human_voice", "Human voice",
-        llm.get("human_voice", 0) if llm else 50, 0.18,
+        llm.get("human_voice", 0) if llm else 50, 0.16,
         llm.get("human_voice_note", "LLM judgment of how human the writing reads.")
         if llm else _NEUTRAL,
         llm.get("human_voice_fixes", []) if llm else [], method="llm"))
     sig.append(_signal(
         "flow", "Flow & specificity",
-        llm.get("flow", 0) if llm else 50, 0.12,
+        llm.get("flow", 0) if llm else 50, 0.10,
         llm.get("flow_note", "LLM judgment of smoothness, rhythm, and specificity.")
         if llm else _NEUTRAL,
         llm.get("flow_fixes", []) if llm else [], method="llm"))
@@ -476,7 +476,10 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     # If any is egregious, the article can't be "met" — otherwise collect_issues
     # skips the whole (passing) readability axis and the reviser never hears about
     # it. Cap just below target so the gap-to-target stays small.
-    _GATE_KEYS = {"em_dashes", "ai_vocabulary", "tell_phrases", "brand_voice"}
+    # brand_voice is deliberately NOT a gate key: it can't distinguish the brand's own
+    # detached self-reference from an encouraged competitor comparison, so a false
+    # positive must never force a whole-axis refine. It stays scored/advisory.
+    _GATE_KEYS = {"em_dashes", "ai_vocabulary", "tell_phrases"}
     worst = min((s["score"] for s in sig if s["key"] in _GATE_KEYS), default=100)
     if worst < 40 and result["total"] >= READABILITY_TARGET:
         result["total"] = READABILITY_TARGET - 1
