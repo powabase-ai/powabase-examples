@@ -113,6 +113,11 @@ def _links(md: str) -> list[str]:
     return re.findall(r"\[[^\]]+\]\((https?://[^)]+)\)", md)
 
 
+def _link_host(url: str) -> str:
+    """Bare, www-stripped host of an outbound URL (for competitor matching)."""
+    return (urlparse(url).hostname or "").lower().removeprefix("www.")
+
+
 def _signal(key, label, score, weight, explanation, fixes, method="deterministic"):
     return {
         "key": key,
@@ -140,7 +145,13 @@ def _band(value: float, lo: float, hi: float, slack: float) -> float:
 
 
 # ---------- SEO ----------
-def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dict:
+def score_seo(
+    content_md: str,
+    title: str,
+    meta: str | None,
+    brief: dict,
+    competitor_hosts: set[str] | None = None,
+) -> dict:
     text = _clean(content_md)
     words = _words(text)
     wc = len(words)
@@ -236,9 +247,33 @@ def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dic
 
     ext = len(links)
     sig.append(_signal(
-        "external_links", "Outbound citations", _band(ext, 3, 60, 6), 0.09,
+        "external_links", "Outbound citations", _band(ext, 3, 60, 6), 0.04,
         f"{ext} outbound link(s).",
         ["Cite a few authoritative sources."] if ext < 3 else []))
+
+    # Competitor links — the brand's own blog must never dofollow-link a rival (free
+    # authority to a competitor). Auto-stripped at generation/export, but the revise loop
+    # or a manual edit can reintroduce one, so this is a scored, refinable guardrail. When
+    # the brand has no competitors configured (or none is passed) it's a clean 100 no-op.
+    comp_hosts = competitor_hosts or set()
+
+    def _is_competitor(url: str) -> bool:
+        h = _link_host(url)
+        return bool(h) and any(h == d or h.endswith(f".{d}") for d in comp_hosts)
+
+    comp_links = [u for u in links if _is_competitor(u)]
+    comp_domains = sorted({_link_host(u) for u in comp_links})
+    n_comp = len(comp_links)
+    sig.append(_signal(
+        "competitor_links", "No competitor links",
+        100 if n_comp == 0 else max(0, 100 - n_comp * 50), 0.05,
+        "No outbound links to competitor domains."
+        if n_comp == 0 else
+        f"{n_comp} outbound link(s) to competitor domain(s) "
+        f"({', '.join(comp_domains)}) — passes link authority to a rival.",
+        [f"Unlink the competitor domain(s) ({', '.join(comp_domains)}): keep the anchor "
+         "text but remove the URL. Never dofollow-link a direct competitor."]
+        if n_comp else []))
 
     fl = _flesch(text)
     sig.append(_signal(
@@ -588,14 +623,22 @@ async def score_and_store(
     brief = brief or {}
     # Resolve internal-link refs to real URLs so link signals are counted (and the LLM
     # judges see real links, not `rf:article/{id}` tokens). Local import avoids a cycle.
+    from . import business_profiles as brands_svc
     from . import linking
 
     md = linking.resolve_links(
         db, article.get("business_id"), article.get("content_md") or ""
     )
-
+    # The brand's competitors → hosts, so the competitor-link signal can flag any
+    # outbound link to a rival's domain.
+    brand = (
+        brands_svc.get_profile(db, article["business_id"])
+        if article.get("business_id")
+        else None
+    )
     seo = score_seo(md, article.get("meta_title") or article.get("title") or "",
-                    article.get("meta_description"), brief)
+                    article.get("meta_description"), brief,
+                    competitor_hosts=linking.competitor_hosts(brand))
     llm = await judge_geo(client, md)
     template = templates_svc.get_template(db, brief.get("article_type"))
     geo = score_geo(

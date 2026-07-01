@@ -58,6 +58,39 @@ def test_secondary_coverage_fix_lists_the_missing_keywords():
     assert "alpha term" not in sc["fixes"][0]  # already covered → not asked for again
 
 
+def test_competitor_links_flags_rival_and_names_it():
+    # A dofollow link to a configured competitor domain scores the signal down and the
+    # fix names the exact domain to unlink; the brand's own + neutral links are ignored.
+    body = (
+        "# Guide\n\nWe compare options. See [Rival](https://www.rival.com/pricing) "
+        "and [our docs](https://mybrand.com/docs) and [a study](https://research.org/x)."
+    )
+    s = scoring.score_seo(
+        body, "Guide", "x" * 140, {"primary_keyword": "guide"},
+        competitor_hosts={"rival.com"},
+    )
+    cl = next(x for x in s["signals"] if x["key"] == "competitor_links")
+    assert cl["score"] == 50  # one competitor link → 100 - 1*50
+    assert cl["fixes"] and "rival.com" in cl["fixes"][0]
+
+
+def test_competitor_links_matches_subdomains():
+    body = "# G\n\n[Rival blog](https://blog.rival.com/post)."
+    s = scoring.score_seo(
+        body, "G", "x" * 140, {"primary_keyword": "g"}, competitor_hosts={"rival.com"}
+    )
+    cl = next(x for x in s["signals"] if x["key"] == "competitor_links")
+    assert cl["score"] == 50  # blog.rival.com matches the rival.com competitor
+
+
+def test_competitor_links_clean_when_no_hosts():
+    # No competitors configured (or none passed) → the guardrail is a clean 100 no-op.
+    body = "# Guide\n\n[Rival](https://rival.com/x) is one option."
+    s = scoring.score_seo(body, "Guide", "x" * 140, {"primary_keyword": "guide"})
+    cl = next(x for x in s["signals"] if x["key"] == "competitor_links")
+    assert cl["score"] == 100 and cl["fixes"] == []
+
+
 def test_geo_deterministic_signals():
     g = scoring.score_geo(MD, BRIEF, None)
     by = {x["key"]: x for x in g["signals"]}
