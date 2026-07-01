@@ -531,6 +531,63 @@ async def test_targeted_loop_reverts_when_grounding_lost(monkeypatch):
     assert state["art"]["grounding_report"]["grounding_score"] == 80
 
 
+def test_grounding_collapsed_tolerates_noise_but_catches_real_drops():
+    assert not revise._grounding_collapsed(68, 65)  # 3-pt dip = fact-checker noise
+    assert not revise._grounding_collapsed(80, 78)  # still above target
+    assert revise._grounding_collapsed(64, 55)  # 9-pt drop below target → real collapse
+    assert not revise._grounding_collapsed(None, 50)  # unmeasured prior → not a collapse
+
+
+async def test_targeted_loop_tolerates_small_grounding_dip(monkeypatch):
+    """A selected SEO signal improves while grounding dips only a couple of points (below
+    target but within fact-checker noise) — the pass is KEPT. The old strict guard
+    reverted on ANY dip below target, discarding good fixes when grounding was sub-target."""
+    def _seo(score, fixes):
+        return {"total": 82, "target": 80, "met": True, "signals": [
+            {"key": "secondary_coverage", "label": "Secondary keyword coverage",
+             "score": score, "fixes": fixes}]}
+
+    before = {"seo_score": _seo(30, ["Add the missing keywords."]), "geo_score": GEO_MET,
+              "readability_score": {"signals": []},
+              "grounding_report": {"grounding_score": 68}}
+    after = {"seo_score": _seo(80, []), "geo_score": GEO_MET,
+             "readability_score": {"signals": []},
+             "grounding_report": {"grounding_score": 65}}  # 3-pt dip, both below 70
+    state = _targeted_env(monkeypatch, before, after)
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["seo:secondary_coverage"],
+    )
+    assert state["art"]["content_md"] == "X" * 500  # kept despite the small grounding dip
+
+
+async def test_targeted_loop_deterministically_unlinks_competitors(monkeypatch):
+    """Selecting the competitor-links issue strips rival links DETERMINISTICALLY (the LLM
+    reviser can't be trusted to), so the signal reliably improves and the pass is kept."""
+    body = "Intro. See [Rival](https://rival.com/pricing) for contrast. " + "word " * 200
+
+    def _seo(score):
+        return {"total": 82, "target": 80, "met": True, "signals": [
+            {"key": "competitor_links", "label": "No competitor links",
+             "score": score, "fixes": ["Unlink rival.com."]}]}
+
+    before = {"seo_score": _seo(50), "geo_score": GEO_MET, "grounding_report": GR_OK,
+              "readability_score": {"signals": []}, "business_id": "b1"}
+    after = {"seo_score": _seo(100), "geo_score": GEO_MET, "grounding_report": GR_OK,
+             "readability_score": {"signals": []}}
+    state = _targeted_env(monkeypatch, before, after, new_md=body)
+    monkeypatch.setattr(
+        revise.brands, "get_profile",
+        lambda d, bid: {"competitors": [{"domain": "rival.com"}]},
+    )
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["seo:competitor_links"],
+    )
+    assert "rival.com" not in state["art"]["content_md"]  # rival link stripped
+    assert "Rival" in state["art"]["content_md"]  # anchor text preserved
+
+
 def test_thin_em_dashes_removes_every_em_dash():
     out = revise._thin_em_dashes("A long aside — really — matters here.")
     assert "—" not in out  # guaranteed drop

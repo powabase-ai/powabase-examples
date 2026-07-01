@@ -41,6 +41,23 @@ _SIGNAL_FLOOR = 70  # on a FAILING axis, surface fixes for signals below this
 # 88). Matches scoring.py's readability "egregious tell" gate, so "critical" means the
 # same thing everywhere.
 _CRITICAL_FLOOR = 40
+# The fact-checker re-runs on every rewrite and its grounding_score wobbles a few points
+# run to run. Only revert a pass for a MEANINGFUL grounding drop, so ordinary judge noise
+# doesn't discard an otherwise-good revision — crucial when grounding already sits below
+# target, where a strict "any dip below target" guard would revert essentially every pass.
+_GROUNDING_SLACK = 6
+
+
+def _grounding_collapsed(prior_gr: Any, new_gr: Any) -> bool:
+    """True only if a rewrite MEANINGFULLY weakened factual grounding: it dropped more
+    than the fact-checker's run-to-run noise (_GROUNDING_SLACK) AND landed below target.
+    A small dip is tolerated so noise can't revert a pass that fixed the selected issues."""
+    return (
+        isinstance(prior_gr, (int, float))
+        and isinstance(new_gr, (int, float))
+        and new_gr < prior_gr - _GROUNDING_SLACK
+        and new_gr < GROUNDING_TARGET
+    )
 
 _SYSTEM = """\
 You are RankForge's **revising editor**. You take a full SEO/GEO blog article plus a \
@@ -677,12 +694,7 @@ async def _editorial_loop(
             new_gr = ((refreshed or {}).get("grounding_report") or {}).get(
                 "grounding_score"
             )
-            if (
-                prior_gr is not None
-                and new_gr is not None
-                and new_gr < prior_gr
-                and new_gr < GROUNDING_TARGET
-            ):
+            if _grounding_collapsed(prior_gr, new_gr):
                 gen_svc._update(db, article_id, content_md=cur_md)  # revert
                 await quality.reflect(client, db, article_id)  # restore grounding
                 break
@@ -982,9 +994,20 @@ async def _targeted_loop(
     LLM's discretion. Each pass is kept only if the selected issues' combined score rose,
     no met objective axis regressed badly, and factual grounding wasn't quietly weakened
     (the grounding guard — see _editorial_loop); otherwise content + scores are reverted."""
-    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+    from . import geo_optimize, linking, quality, scoring  # local: avoid import cycle
 
     _SNAP = ("seo_score", "geo_score", "grounding_report", "readability_score", "json_ld")
+    # competitor_links is fixed DETERMINISTICALLY (unlink rivals) — the whole-article
+    # reviser can't be trusted to remove a competitor link, so when the user selects that
+    # issue we strip it ourselves, guaranteeing the signal improves. Resolve hosts once.
+    comp_selected = "seo:competitor_links" in targets
+    comp_hosts: set[str] = set()
+    if comp_selected:
+        _first = gen_svc.get_article(db, article_id)
+        if _first and _first.get("business_id"):
+            comp_hosts = linking.competitor_hosts(
+                brands.get_profile(db, _first["business_id"])
+            )
     agent_id: str | None = None
     for i in range(MAX_REVISIONS):
         article = gen_svc.get_article(db, article_id)
@@ -1018,6 +1041,11 @@ async def _targeted_loop(
                 new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
+            # Guaranteed competitor-link removal when that issue is selected — enforced
+            # deterministically on top of whatever the reviser did, so the signal (and
+            # thus the selected-total) reliably improves instead of depending on the LLM.
+            if comp_selected and comp_hosts:
+                new_md = linking.strip_competitor_links(new_md, comp_hosts)
             before = _selected_total(article, targets)
             seo, geo = article.get("seo_score"), article.get("geo_score")
             prior_gr = (article.get("grounding_report") or {}).get("grounding_score")
@@ -1037,15 +1065,9 @@ async def _targeted_loop(
             # wrecked.
             improved = _selected_total(a2, targets) > before
             new_gr = (a2.get("grounding_report") or {}).get("grounding_score")
-            grounding_lost = (
-                prior_gr is not None
-                and new_gr is not None
-                and new_gr < prior_gr
-                and new_gr < GROUNDING_TARGET
-            )
             if (
                 not improved
-                or grounding_lost
+                or _grounding_collapsed(prior_gr, new_gr)
                 or _met_regressed_badly(
                     [(seo, a2.get("seo_score")), (geo, a2.get("geo_score"))]
                 )
