@@ -39,11 +39,6 @@ MIN_TRUST = 50
 # Cap backfill scrapes so a run that prunes many weak sources can't balloon into an
 # unbounded scrape (each page still polls up to ~80s).
 MAX_BACKFILL = 12
-# Never prune below this many usable sources, even if the judge scored them low — a
-# harsh judge plus a thin SERP must not starve the writer of grounding (which would tank
-# citation density + grounding). We keep the HIGHEST-trust sub-threshold sources to fill
-# the floor rather than deleting blind.
-SOURCE_FLOOR = 5
 
 # depth → (serp results to analyze, competitor pages to scrape). Generous counts so,
 # after the trust/quality gate drops thin or failed pages, the article still has many
@@ -514,12 +509,16 @@ async def evaluate_and_prune(
     backfill_pool: list[str],
     title_by_url: dict[str, str],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Score the run's sources for authority/trust, prune those below MIN_TRUST, and
-    backfill higher-authority replacements from spare SERP pages (one bounded round).
+    """Score the run's sources for authority/trust and SWAP each weak source for a
+    higher-authority replacement scraped from spare SERP pages (one bounded round).
 
-    `by_url` maps url → {teardown, source_id, status} for every currently-kept source; it
-    is mutated in place to the final set. Returns (final teardown dicts, stats). Scoring
-    failure is non-fatal: with no scores nothing is pruned and every source is kept."""
+    Non-regressive by construction: the destructive delete of a weak source is deferred
+    until a stronger replacement is CONFIRMED in hand, so a failed or also-weak backfill
+    can never leave the article with fewer usable sources than skipping evaluation (a
+    45-score source still beats no source). `dropped == added` always. `by_url` maps
+    url → {teardown, source_id, status, excerpt} and is mutated in place to the final set.
+    Returns (final teardown dicts, stats). Scoring failure is non-fatal: with no scores
+    nothing changes and every source is kept."""
     scores = await score_sources(client, _usable_for_scoring(by_url))
     for u, (score, reason) in scores.items():
         await db.aexecute(
@@ -527,34 +526,21 @@ async def evaluate_and_prune(
             "where research_run_id = %s and url = %s",
             (score, reason, run_id, u),
         )
-    # Prune sub-threshold sources WORST-FIRST, but never below SOURCE_FLOOR usable ones —
-    # a harsh judge plus a thin SERP must not starve the writer of grounding. Only scored
-    # sources are candidates (all scored sources are usable; an unscored one is kept, never
-    # dropped blind); when the floor bites we keep the HIGHEST-trust sub-threshold ones.
     used_domains = {_domain(u) for u in by_url}
-    usable_count = len(_usable_for_scoring(by_url))
-    sub_threshold = sorted(
+    # Weakest-first sub-threshold sources are candidates for replacement (only scored
+    # sources qualify — an unscored source is kept, never dropped blind).
+    weak = sorted(
         (u for u in by_url if (sc := scores.get(u)) and sc[0] < MIN_TRUST),
-        key=lambda u: scores[u][0],  # worst score first
+        key=lambda u: scores[u][0],
     )
-    max_drop = max(0, usable_count - SOURCE_FLOOR)
-    dropped = 0
-    for u in sub_threshold[:max_drop]:
-        await _drop_source(client, db, run_id, by_url[u]["source_id"])
-        used_domains.discard(_domain(u))
-        del by_url[u]
-        dropped += 1
-
-    added = 0
-    if dropped:
-        # Backfill from spare SERP pages on NEW domains (don't re-scrape a used domain),
-        # capped so pruning a lot can't trigger an unbounded scrape.
+    dropped = added = 0
+    if weak:
+        # 1) Scrape + score replacements FIRST — nothing is deleted yet. New domains only,
+        #    bounded so a harsh judge can't trigger an unbounded scrape.
         candidates = diverse_urls(
-            [
-                u for u in backfill_pool
-                if u not in by_url and _domain(u) not in used_domains
-            ],
-            min(dropped, MAX_BACKFILL),
+            [u for u in backfill_pool
+             if u not in by_url and _domain(u) not in used_domains],
+            min(len(weak), MAX_BACKFILL),
         )
         fresh: list[dict[str, Any]] = []
         for u in candidates:
@@ -572,22 +558,31 @@ async def evaluate_and_prune(
                 {"url": u, "teardown": t, "source_id": res["source_id"],
                  "status": res["status"], "excerpt": res.get("excerpt", "")}
             )
-        # Score the replacements too; keep the good ones, prune any that are also weak.
-        fresh_by_url = {b["url"]: b for b in fresh}
-        new_scores = await score_sources(client, _usable_for_scoring(fresh_by_url))
+        new_scores = await score_sources(
+            client, _usable_for_scoring({b["url"]: b for b in fresh})
+        )
+        confirmed: list[dict[str, Any]] = []
         for b in fresh:
-            u = b["url"]
-            sc = new_scores.get(u)
+            sc = new_scores.get(b["url"])
             if sc:
                 await db.aexecute(
                     "update public.research_sources set trust_score = %s, "
                     "trust_reason = %s where research_run_id = %s and url = %s",
-                    (sc[0], sc[1], run_id, u),
+                    (sc[0], sc[1], run_id, b["url"]),
                 )
-            if sc and sc[0] < MIN_TRUST:
+            if sc and sc[0] >= MIN_TRUST:
+                confirmed.append(b)
+            else:
+                # The replacement is itself weak/unusable — drop it, don't hoard junk.
                 await _drop_source(client, db, run_id, b["source_id"])
-                continue
-            by_url[u] = {
+        # 2) SWAP: only NOW drop the worst weak originals, one per confirmed replacement,
+        #    so the usable-source count never decreases.
+        for u in weak[: len(confirmed)]:
+            await _drop_source(client, db, run_id, by_url[u]["source_id"])
+            del by_url[u]
+            dropped += 1
+        for b in confirmed:
+            by_url[b["url"]] = {
                 "teardown": b["teardown"], "source_id": b["source_id"],
                 "status": b["status"], "excerpt": b.get("excerpt", ""),
             }

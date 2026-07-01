@@ -610,6 +610,26 @@ async def test_targeted_loop_deterministically_unlinks_competitors(monkeypatch):
     assert "Rival" in state["art"]["content_md"]  # anchor text preserved
 
 
+async def test_targeted_loop_reraises_on_first_pass_infra_failure(monkeypatch):
+    # If the reviser never responds on the FIRST pass (e.g. a misconfigured agent), the
+    # loop re-raises so the caller marks the run failed — not a silent no-op "done".
+    state = _targeted_env(monkeypatch, _TARGETED_BEFORE, _TARGETED_BEFORE)
+    monkeypatch.setattr(
+        revise, "_surgical_tell_rewrite",
+        AsyncMock(side_effect=RuntimeError("no agent")),
+    )
+    raised = False
+    try:
+        await revise._targeted_loop(
+            MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+            ["readability:em_dashes"],
+        )
+    except RuntimeError:
+        raised = True
+    assert raised  # infra failure propagates
+    assert state["art"]["content_md"] == "body"  # nothing committed
+
+
 def test_thin_em_dashes_removes_every_em_dash():
     out = revise._thin_em_dashes("A long aside — really — matters here.")
     assert "—" not in out  # guaranteed drop

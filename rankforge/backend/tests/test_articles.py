@@ -298,3 +298,29 @@ async def test_refine_and_finish_skips_link_check_when_no_content(monkeypatch):
 
     await art_routes._refine_and_finish(MagicMock(), MagicMock(), UUID(ARTICLE["id"]))
     chk.assert_not_awaited()
+
+
+async def test_refine_and_finish_marks_failed_when_refine_raises(monkeypatch):
+    # refine() only propagates on an infra failure (reviser agent never responded). Even
+    # with content present, the run must be marked 'failed' with an error — not a silent
+    # no-op "done" over an unchanged draft.
+    from rankforge_backend.routes import articles as art_routes
+
+    monkeypatch.setattr(
+        art_routes.revise_svc, "refine", AsyncMock(side_effect=RuntimeError("no agent"))
+    )
+    monkeypatch.setattr(
+        art_routes.svc, "get_article",
+        lambda db, aid: {"id": aid, "business_id": BID, "content_md": "the body"},
+    )
+    updates: list = []
+    monkeypatch.setattr(
+        art_routes.svc, "_update", lambda db, aid, **f: updates.append(f)
+    )
+    chk = AsyncMock()
+    monkeypatch.setattr(art_routes.linkcheck_svc, "check_article", chk)
+
+    await art_routes._refine_and_finish(MagicMock(), MagicMock(), UUID(ARTICLE["id"]))
+    chk.assert_not_awaited()  # no link check on a failed refine
+    assert updates[-1]["generation_status"] == "failed"
+    assert updates[-1].get("generation_error")

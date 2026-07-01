@@ -204,7 +204,13 @@ function BrandLogoCard({ brand }: { brand?: BusinessProfile }) {
                 onClick={() =>
                   update.mutate(
                     { id: brand.id, data: { logo_url: null } },
-                    { onSuccess: () => toast.success("Logo removed") }
+                    {
+                      onSuccess: () => toast.success("Logo removed"),
+                      onError: (err) =>
+                        toast.error(
+                          err instanceof Error ? err.message : "Remove failed"
+                        ),
+                    }
                   )
                 }
                 disabled={update.isPending}

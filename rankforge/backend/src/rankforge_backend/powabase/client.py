@@ -290,21 +290,28 @@ class PowabaseClient:
     ) -> str:
         """Upload bytes to a PUBLIC storage bucket (creating it if absent) and return
         the object's public URL. For small brand assets like the workspace logo."""
-        # Ensure the bucket exists; a repeat call 4xxs with "already exists" — ignore it.
-        await self._client.post(
+        def _body(r: httpx.Response) -> Any:
+            try:
+                return r.json()
+            except Exception:  # noqa: BLE001 — non-JSON error body
+                return r.text
+
+        # Ensure the bucket exists. A repeat create returns "already exists" (409, or 400
+        # on some storage versions) — ignore ONLY that. Any other failure (402 billing —
+        # which CLAUDE.md says must never be silently swallowed, 403, 5xx) must surface,
+        # not be discarded and mis-attributed to the object PUT below.
+        mk = await self._client.post(
             "/storage/v1/bucket", json={"id": bucket, "name": bucket, "public": True}
         )
+        if mk.status_code >= 400 and mk.status_code not in (400, 409):
+            raise PowabaseError(mk.status_code, _body(mk))
         resp = await self._client.post(
             f"/storage/v1/object/{bucket}/{path}",
             content=content,
             headers={**self._headers, "Content-Type": mime, "x-upsert": "true"},
         )
         if resp.status_code >= 400:
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise PowabaseError(resp.status_code, body)
+            raise PowabaseError(resp.status_code, _body(resp))
         return f"{self._base_url}/storage/v1/object/public/{bucket}/{path}"
 
     # --- knowledge bases / sources (brand grounding) ---

@@ -343,6 +343,20 @@ def get_published(db: Database, article_id: UUID) -> dict[str, Any] | None:
     )
 
 
+def _export_published_date(db: Database, article_id: UUID, status: str | None) -> str:
+    """The date to stamp on the export. For a PUBLISHED article, the first successful
+    publication's date (stable across re-exports); otherwise today (first export)."""
+    if status == "published":
+        first = db.fetch_one(
+            "select min(published_at) as first from public.publications "
+            "where article_id = %s and published_at is not null",
+            (article_id,),
+        )
+        if first and first.get("first"):
+            return _fm_date(first["first"])
+    return datetime.now(UTC).date().isoformat()
+
+
 def export(db: Database, article_id: UUID, fmt: str) -> tuple[str, str] | None:
     """Return (content, media_type) for a download, or None if the article is gone.
     Internal-link refs are resolved to live canonical URLs in the exported file."""
@@ -378,8 +392,10 @@ def export(db: Database, article_id: UUID, fmt: str) -> tuple[str, str] | None:
         ),
         "keywords": (kw_row or {}).get("keywords") or [],
         "author": author,
-        # publishedDate defaults to the export date.
-        "published_date": datetime.now(UTC).date().isoformat(),
+        # publishedDate: for a live post, keep it STABLE across re-exports — use the first
+        # successful publication's date so re-exporting to update a post doesn't churn its
+        # date. Only a not-yet-published article (first export) defaults to today.
+        "published_date": _export_published_date(db, article_id, article.get("status")),
     }
     if fmt == "markdown":
         return render_markdown(article), "text/markdown"

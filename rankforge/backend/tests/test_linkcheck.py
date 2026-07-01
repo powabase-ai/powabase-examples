@@ -248,6 +248,24 @@ async def test_remove_link_falls_back_to_mechanical_when_llm_keeps_the_link(monk
     assert "  " not in captured["content_md"]  # spacing tidied
 
 
+async def test_remove_link_leaves_finding_open_when_url_absent(monkeypatch):
+    # The URL isn't in the body (stale finding / out-of-band edit) → nothing is removed,
+    # so the finding must NOT be marked resolved (else a still-broken link vanishes).
+    db = MagicMock()
+    db.fetch_one.return_value = {**BROKEN_ROW, "url": "https://x.com/404"}
+    monkeypatch.setattr(
+        linkcheck.gen_svc, "get_article",
+        lambda d, aid: {"id": aid, "content_md": "no such link in this body"},
+    )
+    upd = MagicMock()
+    monkeypatch.setattr(linkcheck.gen_svc, "update_article", upd)
+    await linkcheck.remove_link(MagicMock(), db, BID, AID, FID, keep_text=True)
+    upd.assert_not_called()  # body untouched
+    assert not any(
+        "status = 'resolved'" in c.args[0] for c in db.execute.call_args_list
+    )  # finding stays open
+
+
 async def test_remove_link_none_when_finding_missing():
     db = MagicMock()
     db.fetch_one.return_value = None

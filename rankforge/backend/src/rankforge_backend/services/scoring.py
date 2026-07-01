@@ -35,12 +35,14 @@ _AI_WORDS = (
 )
 _AI_WORD_RE = re.compile(r"(?<![a-z])(?:" + "|".join(_AI_WORDS) + r")(?![a-z])", re.I)
 _TELL_RE = re.compile(
-    r"it'?s not (?:just|merely)\b"
+    r"it['’]s not (?:just|merely)\b"
     r"|\bisn'?t (?:just|merely)\b"
     # The antithesis reframe: "X isn't A. It's B" / "isn't about A, it's about B" —
     # negate-then-reveal-the-real-truth. A heavy AI tic ("the way forward isn't more
-    # tools. It's better process."). Bounded span so it can't run away.
-    r"|\b(?:is|are|was|were)(?:n'?t| not)\b[^.!?\n]{0,70}[,.!?—–-]\s*it'?s\b"
+    # tools. It's better process."). Bounded span so it can't run away. REQUIRE the
+    # contraction apostrophe in the payoff so possessive "its" ("…isn't down, but its
+    # replacement is") isn't a false positive.
+    r"|\b(?:is|are|was|were)(?:n'?t| not)\b[^.!?\n]{0,70}[,.!?—–-]\s*it['’]s\b"
     r"|\bwhether you'?re an?\b"
     r"|\bin today'?s\b.{0,40}?\b(?:world|landscape|era|age)\b"
     r"|\blet'?s (?:dive in|explore|take a look|unpack)\b"

@@ -105,9 +105,31 @@ def test_export_markdown_fills_author_and_tags_and_export_date(monkeypatch):
     assert 'author: "Acme Team"' in content  # no override / default → "<Brand> Team"
     assert '"auth"' in content and '"sso"' in content  # keywords → tags
     assert "draft: false" in content
-    # publishedDate defaults to the EXPORT date (today), not the article's updated_at.
+    # A published article with NO publication record yet (first export) → today.
     today = datetime.now(UTC).date().isoformat()
     assert f"publishedDate: {today}" in content
+
+
+def test_export_reuses_first_publication_date_for_published(monkeypatch):
+    # Re-exporting a live post must NOT churn its date — it uses the first successful
+    # publication's date, stable across re-exports.
+    from rankforge_backend.services import business_profiles as brands
+
+    db = MagicMock()
+    # 1st fetch_one = keywords select; 2nd = min(published_at) for the publish date.
+    db.fetch_one.side_effect = [
+        {"keywords": []},
+        {"first": "2026-06-01T09:00:00Z"},
+    ]
+    monkeypatch.setattr(svc.linking, "resolve_links", lambda d, bid, md: md)
+    monkeypatch.setattr(brands, "get_profile", lambda d, bid: {"name": "Acme"})
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        lambda d, aid: {**ARTICLE, "business_id": BID, "status": "published",
+                        "author": "A"},
+    )
+    content, _ = svc.export(db, AID, "markdown")
+    assert "publishedDate: 2026-06-01" in content  # stable, not today
 
 
 def test_export_author_override_beats_brand_default(monkeypatch):

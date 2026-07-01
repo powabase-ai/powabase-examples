@@ -112,8 +112,13 @@ async def upload_business_logo(
     brand = svc.get_profile(db, profile_id)
     if brand is None or brand.get("org_id") != user.org_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "business profile not found")
+    # Namespace the object by org so a brand-id-guessable path in the shared public bucket
+    # can't let an editor of another org overwrite (x-upsert) this org's logo.
     url = await pb.upload_public_object(
-        "brand-logos", f"{profile_id}.{ext}", content, file.content_type or "image/png"
+        "brand-logos",
+        f"{user.org_id}/{profile_id}.{ext}",
+        content,
+        file.content_type or "image/png",
     )
     # Cache-bust: the object path is stable (brand id), so a fresh ?v refreshes the img.
     row = svc.update_profile(

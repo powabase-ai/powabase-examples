@@ -164,28 +164,40 @@ async def _refine_and_finish(
     pb: PowabaseClient, db: Database, article_id: UUID,
     targets: list[str] | None = None,
 ) -> None:
+    failed = False
     try:
         await revise_svc.refine(pb, db, article_id, targets=targets)
-    finally:
-        # Always return the article to a terminal status, even if a pass failed.
-        # If there's no content (refine bailed on a failed/empty article), mark it
-        # failed rather than falsely reporting "done".
-        final = svc.get_article(db, article_id)
-        words = ((final or {}).get("content_md") or "").split()
-        terminal = "done" if words else "failed"
-        # Best-effort, BEFORE flipping to done: a refine pass rewrites the body and can
-        # introduce (or fix) links, so re-validate outbound links — dead URLs surface in
-        # the Links panel without a manual check. Never let it disturb the status.
-        if terminal == "done" and final and final.get("business_id"):
-            try:
-                await linkcheck_svc.check_article(db, final["business_id"], article_id)
-            except Exception:  # noqa: BLE001 — link check is advisory
-                log.exception("post-refine link check failed for %s", article_id)
+    except Exception:  # noqa: BLE001 — surface an infra failure, don't report a no-op
+        # refine() only propagates when a pass raised before doing ANY work (e.g. the
+        # reviser agent is misconfigured / unreachable). That's a real failure — mark it
+        # so the user sees an error instead of "refine complete" over an unchanged draft.
+        log.exception("refine pipeline failed for %s", article_id)
+        failed = True
+    # Return the article to a terminal status. Empty content (bailed on a broken article)
+    # or a propagated infra failure → 'failed'; otherwise 'done'.
+    final = svc.get_article(db, article_id)
+    words = ((final or {}).get("content_md") or "").split()
+    if failed or not words:
         svc._update(
             db, article_id,
-            generation_status=terminal,
-            progress={"phase": terminal, "word_count": len(words)},
+            generation_status="failed",
+            generation_error="refine failed — see server logs",
+            progress={"phase": "failed", "word_count": len(words)},
         )
+        return
+    # Best-effort, BEFORE flipping to done: a refine pass rewrites the body and can
+    # introduce (or fix) links, so re-validate outbound links — dead URLs surface in the
+    # Links panel without a manual check. Never let it disturb the status.
+    if final and final.get("business_id"):
+        try:
+            await linkcheck_svc.check_article(db, final["business_id"], article_id)
+        except Exception:  # noqa: BLE001 — link check is advisory
+            log.exception("post-refine link check failed for %s", article_id)
+    svc._update(
+        db, article_id,
+        generation_status="done",
+        progress={"phase": "done", "word_count": len(words)},
+    )
 
 
 @router.post(

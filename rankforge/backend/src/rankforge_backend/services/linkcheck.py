@@ -270,12 +270,21 @@ async def remove_link(
         new_md, n = await _excise_link(client, md, url, link_re)  # LLM rephrase
     if n:
         gen_svc.update_article(db, article_id, {"content_md": new_md})
-    # The link is gone (or already absent) → close the finding either way.
-    db.execute(
-        "update public.link_health set status = 'resolved', updated_at = now() "
-        "where id = %s and business_id = %s",
-        (finding_id, business_id),
-    )
+        # The link was actually removed → close the finding.
+        db.execute(
+            "update public.link_health set status = 'resolved', updated_at = now() "
+            "where id = %s and business_id = %s",
+            (finding_id, business_id),
+        )
+    else:
+        # The URL isn't in the body (a stale finding, an out-of-band edit, or a URL-form
+        # mismatch after ref resolution). Do NOT close it — marking a still-broken link
+        # 'resolved' would drop it from the flagged list without fixing anything. Leave it
+        # open so it stays visible, and log the desync so it's discoverable.
+        log.warning(
+            "remove_link: no occurrence of %s in article %s — finding %s left open",
+            url, article_id, finding_id,
+        )
     return gen_svc.get_article(db, article_id)
 
 

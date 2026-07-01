@@ -183,6 +183,21 @@ def test_antithesis_detector_ignores_plain_negation():
     assert scoring._TELL_RE.search(clean) is None
 
 
+def test_antithesis_detector_ignores_possessive_its():
+    # Possessive "its" after a negation must NOT trip the reframe detector (it requires
+    # the contraction apostrophe in the payoff, not the possessive).
+    assert scoring._TELL_RE.search(
+        "The API isn't deprecated, but its replacement is faster."
+    ) is None
+    assert scoring._TELL_RE.search(
+        "The library wasn't slow, and its footprint stayed small."
+    ) is None
+    # The genuine contraction "it's" still trips it.
+    assert scoring._TELL_RE.search(
+        "The API isn't deprecated, it's just renamed."
+    ) is not None
+
+
 def test_readability_flags_detached_brand_voice():
     # The brand's own blog talking about itself as a third party / hedging its own
     # capabilities (the exact phrasing that shipped uncaught).

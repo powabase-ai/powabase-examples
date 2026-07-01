@@ -746,6 +746,7 @@ async def _objective_loop(
     # the public page/preview — never carries a rival link.
     comp_hosts = _competitor_hosts_for(db, article_id)
     agent_id: str | None = None
+    did_work = False  # True once the reviser has responded (see _targeted_loop)
     for i in range(MAX_REVISIONS):
         article = gen_svc.get_article(db, article_id)
         seo = article.get("seo_score")
@@ -766,6 +767,7 @@ async def _objective_loop(
             )
             cur_md = article["content_md"] or ""
             new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
+            did_work = True  # the reviser agent responded (not an infra failure)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
             if comp_hosts:
@@ -790,6 +792,10 @@ async def _objective_loop(
                 gen_svc._update(db, article_id, content_md=cur_md, **snap)
                 break
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
+            # A first-pass agent failure (the reviser never responded) means refine did
+            # nothing — surface it instead of a silent no-op. Later failures are swallowed.
+            if not did_work:
+                raise
             break
 
 
@@ -1033,6 +1039,10 @@ async def _targeted_loop(
                 brands.get_profile(db, _first["business_id"])
             )
     agent_id: str | None = None
+    # Loop-scoped: True once ANY pass's reviser call has responded. If the very first pass
+    # fails at the agent call (infra), we re-raise; a later failure after real work is
+    # swallowed.
+    did_work = False
     for i in range(MAX_REVISIONS):
         article = gen_svc.get_article(db, article_id)
         if not article:
@@ -1068,6 +1078,7 @@ async def _targeted_loop(
                 # (otherwise it depends entirely on the reviser's cooperation).
                 if new_md and "em_dashes" in loc_keys:
                     new_md = _thin_em_dashes(new_md)
+            did_work = True  # the reviser agent responded (not an infra failure)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
             # Guaranteed competitor-link removal when that issue is selected — enforced
@@ -1102,6 +1113,12 @@ async def _targeted_loop(
             # restore the prior content + snapshot before bailing.
             if wrote_new:
                 gen_svc._update(db, article_id, content_md=cur_md, **snap)
+            # If the reviser agent never even responded (e.g. a Gemini routing/credential
+            # misconfig) the refine accomplished nothing — surface it as a failure rather
+            # than reporting a silent no-op "done". A LATER pass failing after earlier work
+            # succeeded is still swallowed (a good result shouldn't be wedged).
+            if not did_work:
+                raise
             break
 
 

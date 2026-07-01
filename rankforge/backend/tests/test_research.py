@@ -186,22 +186,23 @@ async def test_evaluate_prunes_low_and_backfills(monkeypatch):
     monkeypatch.setattr(svc, "score_sources", fake_score)
     monkeypatch.setattr(svc, "_drop_source", fake_drop)
     monkeypatch.setattr(svc, "_scrape_one", fake_scrape)
-    monkeypatch.setattr(svc, "SOURCE_FLOOR", 0)  # isolate prune logic from the floor
 
     teardowns, stats = await svc.evaluate_and_prune(
         client, db, RID, by_url=by_url,
         backfill_pool=["https://fresh.org/c"], title_by_url={},
     )
-    assert dropped == ["s_weak"]  # only the weak source is pruned
+    # A confirmed replacement (fresh, 80) was scraped BEFORE the weak source was dropped.
+    assert dropped == ["s_weak"]  # weak swapped out only once its replacement landed
     assert stats == {"scored": 2, "dropped": 1, "added": 1}
     assert "https://weak.blog/b" not in by_url
     assert "https://fresh.org/c" in by_url  # replacement kept
     assert {t["title"] for t in teardowns} == {"Good", "Fresh"}
 
 
-async def test_evaluate_respects_source_floor(monkeypatch):
-    # Two usable sources, one weak — but with a floor of 2 nothing may be pruned, so the
-    # writer isn't starved. The weak source survives despite scoring below MIN_TRUST.
+async def test_evaluate_no_net_loss_when_backfill_fails(monkeypatch):
+    # C2: the destructive delete is deferred until a replacement is CONFIRMED. When every
+    # backfill scrape fails, the weak source is NOT dropped — evaluation must never leave
+    # the article with fewer usable sources than skipping it (a 45-score source > nothing).
     db = MagicMock()
     db.aexecute = AsyncMock()
     by_url = {
@@ -214,7 +215,6 @@ async def test_evaluate_respects_source_floor(monkeypatch):
             "status": "extracted",
         },
     }
-    monkeypatch.setattr(svc, "SOURCE_FLOOR", 2)
     monkeypatch.setattr(svc, "score_sources", AsyncMock(return_value={
         "https://good.com/a": (88, "authoritative"),
         "https://weak.blog/b": (25, "thin"),
@@ -224,12 +224,61 @@ async def test_evaluate_respects_source_floor(monkeypatch):
         svc, "_drop_source",
         AsyncMock(side_effect=lambda *a: dropped.append(a[-1])),
     )
+    monkeypatch.setattr(svc, "_scrape_one", AsyncMock(return_value=None))  # all fail
     _, stats = await svc.evaluate_and_prune(
         client=MagicMock(), db=db, run_id=RID, by_url=by_url,
-        backfill_pool=[], title_by_url={},
+        backfill_pool=["https://fresh.org/c"], title_by_url={},
     )
-    assert dropped == [] and stats["dropped"] == 0  # floor protected the weak source
-    assert "https://weak.blog/b" in by_url
+    assert dropped == []  # nothing deleted without a confirmed replacement
+    assert stats == {"scored": 2, "dropped": 0, "added": 0}
+    assert "https://weak.blog/b" in by_url  # weak source kept — no net loss
+
+
+async def test_evaluate_drops_replacement_that_is_also_weak(monkeypatch):
+    # A backfilled replacement that itself scores below MIN_TRUST is dropped (not hoarded),
+    # and since no replacement was confirmed, the weak original is NOT swapped out either.
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    by_url = {
+        "https://good.com/a": {
+            "teardown": _teardown("Good", 900), "source_id": "s_good",
+            "status": "extracted",
+        },
+        "https://weak.blog/b": {
+            "teardown": _teardown("Weak", 800), "source_id": "s_weak",
+            "status": "extracted",
+        },
+    }
+    seq = [
+        {"https://good.com/a": (88, "authoritative"),
+         "https://weak.blog/b": (25, "thin")},
+        {"https://fresh.org/c": (30, "also thin")},  # replacement also weak
+    ]
+    calls = {"n": 0}
+
+    async def fake_score(_c, _s):
+        r = seq[calls["n"]]
+        calls["n"] += 1
+        return r
+
+    dropped: list[str] = []
+    monkeypatch.setattr(svc, "score_sources", fake_score)
+    monkeypatch.setattr(
+        svc, "_drop_source", AsyncMock(side_effect=lambda *a: dropped.append(a[-1]))
+    )
+    monkeypatch.setattr(svc, "_scrape_one", AsyncMock(return_value={
+        "teardown": svc.CompetitorTeardown(
+            url="https://fresh.org/c", title="Fresh", word_count=900, headings=[],
+            source_id="s_fresh"),
+        "source_id": "s_fresh", "status": "extracted", "url": "https://fresh.org/c",
+    }))
+    _, stats = await svc.evaluate_and_prune(
+        client=MagicMock(), db=db, run_id=RID, by_url=by_url,
+        backfill_pool=["https://fresh.org/c"], title_by_url={},
+    )
+    assert dropped == ["s_fresh"]  # only the also-weak replacement is discarded
+    assert stats == {"scored": 2, "dropped": 0, "added": 0}
+    assert "https://weak.blog/b" in by_url  # original weak source retained
 
 
 async def test_evaluate_keeps_all_when_scoring_unavailable(monkeypatch):

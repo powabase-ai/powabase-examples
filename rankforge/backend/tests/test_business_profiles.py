@@ -64,6 +64,11 @@ def test_upload_logo_uploads_to_storage_and_stores_url(monkeypatch):
     assert resp.status_code == 200
     pb.upload_public_object.assert_awaited_once()
     assert resp.json()["logo_url"].startswith(pub)  # stored URL (+ cache-buster)
+    # The object key is namespaced by org so it isn't a bare, guessable brand id in the
+    # shared public bucket (no cross-org overwrite).
+    bucket, path = pb.upload_public_object.await_args.args[:2]
+    assert bucket == "brand-logos"
+    assert path == f"{ADMIN_ORG}/{ROW['id']}.png"
 
 
 def test_upload_logo_404_when_brand_in_another_org(monkeypatch):
