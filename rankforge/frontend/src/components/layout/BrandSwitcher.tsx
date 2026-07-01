@@ -48,9 +48,18 @@ export function BrandSwitcher({ brandId }: { brandId: string }) {
           aria-label="Switch brand"
           className="group mt-4 flex h-12 w-full items-center gap-2.5 rounded-lg border border-[rgb(var(--iron-line))] bg-[rgb(var(--iron-hover))] px-2.5 text-left outline-none transition-colors hover:border-[rgb(var(--ember))]/50 focus-visible:ring-2 focus-visible:ring-[rgb(var(--ember))]"
         >
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-[rgb(var(--ember))] to-[rgb(var(--ember-bright))] text-sm font-bold text-white shadow-sm">
-            {initial(current?.name)}
-          </span>
+          {current?.logo_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={current.logo_url}
+              alt=""
+              className="size-8 shrink-0 rounded-md border border-[rgb(var(--iron-line))] bg-white object-contain"
+            />
+          ) : (
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-[rgb(var(--ember))] to-[rgb(var(--ember-bright))] text-sm font-bold text-white shadow-sm">
+              {initial(current?.name)}
+            </span>
+          )}
           <span className="min-w-0 flex-1">
             <span className="block text-[10px] font-medium uppercase tracking-wide text-[rgb(var(--iron-text))]">
               Brand
@@ -78,9 +87,18 @@ export function BrandSwitcher({ brandId }: { brandId: string }) {
                   value={b.id}
                   className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-2 text-sm outline-none data-[highlighted]:bg-[rgb(var(--iron-hover))] data-[state=checked]:text-[rgb(var(--iron-strong))]"
                 >
-                  <span className="flex size-6 shrink-0 items-center justify-center rounded bg-[rgb(var(--iron-hover))] text-[10px] font-bold text-[rgb(var(--iron-strong))]">
-                    {initial(b.name)}
-                  </span>
+                  {b.logo_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={b.logo_url}
+                      alt=""
+                      className="size-6 shrink-0 rounded border border-[rgb(var(--iron-line))] bg-white object-contain"
+                    />
+                  ) : (
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded bg-[rgb(var(--iron-hover))] text-[10px] font-bold text-[rgb(var(--iron-strong))]">
+                      {initial(b.name)}
+                    </span>
+                  )}
                   <Select.ItemText>{b.name}</Select.ItemText>
                   <Select.ItemIndicator className="ml-auto">
                     <Check className="size-4 text-[rgb(var(--ember-bright))]" />

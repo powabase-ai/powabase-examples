@@ -50,6 +50,7 @@ export interface BusinessProfile {
   sitemap_url?: string | null;
   url_pattern?: string | null;
   default_author?: string | null;
+  logo_url?: string | null;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
@@ -68,6 +69,7 @@ export interface BusinessProfileInput {
   sitemap_url?: string | null;
   url_pattern?: string | null;
   default_author?: string | null;
+  logo_url?: string | null;
 }
 
 async function request<T>(

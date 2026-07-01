@@ -1,11 +1,41 @@
 "use client";
 
 import * as React from "react";
+import { toast } from "sonner";
 
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import type { BusinessProfile, BusinessProfileInput } from "@/lib/api";
+
+/** Read an image file, downscale it to a small square-ish avatar, and return a data
+ *  URL — so a brand logo is self-contained (no object storage) and stays tiny. SVGs
+ *  are used as-is (already small + scalable). */
+async function fileToLogoDataUrl(file: File, max = 128): Promise<string> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+  if (file.type === "image/svg+xml") return dataUrl;
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error("decode failed"));
+    im.src = dataUrl;
+  });
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return dataUrl;
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL("image/png");
+}
 
 export interface BrandFormState {
   name: string;
@@ -19,6 +49,7 @@ export interface BrandFormState {
   sitemap_url: string;
   url_pattern: string;
   default_author: string;
+  logo_url: string;
 }
 
 const csv = (xs?: string[]) => (xs ?? []).join(", ");
@@ -40,6 +71,7 @@ export const emptyBrandForm = (): BrandFormState => ({
   sitemap_url: "",
   url_pattern: "",
   default_author: "",
+  logo_url: "",
 });
 
 export const brandToForm = (b: BusinessProfile): BrandFormState => ({
@@ -54,6 +86,7 @@ export const brandToForm = (b: BusinessProfile): BrandFormState => ({
   sitemap_url: b.sitemap_url ?? "",
   url_pattern: b.url_pattern ?? "",
   default_author: b.default_author ?? "",
+  logo_url: b.logo_url ?? "",
 });
 
 export const formToPayload = (f: BrandFormState): BusinessProfileInput => ({
@@ -68,6 +101,7 @@ export const formToPayload = (f: BrandFormState): BusinessProfileInput => ({
   sitemap_url: f.sitemap_url.trim() || null,
   url_pattern: f.url_pattern.trim() || null,
   default_author: f.default_author.trim() || null,
+  logo_url: f.logo_url.trim() || null,
 });
 
 export function BrandFields({
@@ -81,6 +115,21 @@ export function BrandFields({
     (k: keyof BrandFormState) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
       onChange({ [k]: e.target.value });
+
+  async function onPickLogo(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Please pick an image under 5 MB");
+      return;
+    }
+    try {
+      onChange({ logo_url: await fileToLogoDataUrl(file) });
+    } catch {
+      toast.error("Couldn't read that image");
+    }
+  }
 
   return (
     <div className="grid gap-4">
@@ -162,6 +211,47 @@ export function BrandFields({
         />
         <p className="text-xs text-muted-foreground">
           The <code>author</code> in exported frontmatter. Any article can override it.
+        </p>
+      </div>
+      <div className="grid gap-1.5">
+        <Label>
+          Logo{" "}
+          <span className="text-muted-foreground">(shown in the brand switcher)</span>
+        </Label>
+        <div className="flex items-center gap-3">
+          {value.logo_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={value.logo_url}
+              alt="Brand logo"
+              className="size-10 shrink-0 rounded-md border border-input bg-white object-contain"
+            />
+          ) : (
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-md border border-dashed border-input text-[10px] text-muted-foreground">
+              Logo
+            </div>
+          )}
+          <label className="inline-flex h-8 cursor-pointer items-center rounded-md border border-input px-3 text-xs font-medium hover:bg-secondary">
+            Upload
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/svg+xml,image/webp"
+              className="hidden"
+              onChange={onPickLogo}
+            />
+          </label>
+          {value.logo_url && (
+            <button
+              type="button"
+              onClick={() => onChange({ logo_url: "" })}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              Remove
+            </button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          PNG, SVG, JPG, or WebP — downscaled to a small square avatar.
         </p>
       </div>
     </div>

@@ -29,6 +29,9 @@ class BusinessProfileCreate(BaseModel):
     sitemap_url: str | None = Field(default=None, max_length=2_000)
     url_pattern: str | None = Field(default=None, max_length=2_000)
     default_author: str | None = Field(default=None, max_length=200)
+    # A small downscaled data URL (or an http URL). Bounded so a client can't store an
+    # unbounded blob in the brand row / list response.
+    logo_url: str | None = Field(default=None, max_length=500_000)
 
 
 class BusinessProfileUpdate(BaseModel):
@@ -44,6 +47,9 @@ class BusinessProfileUpdate(BaseModel):
     sitemap_url: str | None = Field(default=None, max_length=2_000)
     url_pattern: str | None = Field(default=None, max_length=2_000)
     default_author: str | None = Field(default=None, max_length=200)
+    # A small downscaled data URL (or an http URL). Bounded so a client can't store an
+    # unbounded blob in the brand row / list response.
+    logo_url: str | None = Field(default=None, max_length=500_000)
 
 
 class BusinessProfile(BaseModel):
@@ -60,6 +66,7 @@ class BusinessProfile(BaseModel):
     sitemap_url: str | None = None
     url_pattern: str | None = None
     default_author: str | None = None
+    logo_url: str | None = None
     materials_progress: dict = {}
     created_by: UUID | None = None
     created_at: datetime
