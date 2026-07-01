@@ -18,7 +18,7 @@ from .agents import ensure_agent
 BRIEF_AGENT_NAME = "rankforge-brief"
 # Planning step — sets the contract every downstream agent obeys. Top model +
 # extended thinking; thinking forces temperature≈1, so we omit temperature.
-BRIEF_MODEL = "claude-opus-4-7"
+BRIEF_MODEL = "claude-opus-4-8"
 
 _SYSTEM_PROMPT = """\
 You are RankForge's **SEO/GEO content strategist**. You turn topic research into a \

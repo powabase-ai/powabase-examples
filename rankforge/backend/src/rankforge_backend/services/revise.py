@@ -360,6 +360,18 @@ def _objective_total(
     return t + (g if isinstance(g, (int, float)) else 0)
 
 
+def _competitor_hosts_for(db: Database, article_id: UUID) -> set[str]:
+    """The article brand's competitor hostnames (empty if none) — for stripping any
+    outbound rival link a reviser rewrite might reintroduce, so content_md stays clean
+    for every consumer (public page, in-app preview, export, webhook)."""
+    from . import linking
+
+    art = gen_svc.get_article(db, article_id)
+    if not art or not art.get("business_id"):
+        return set()
+    return linking.competitor_hosts(brands.get_profile(db, art["business_id"]))
+
+
 def _met_regressed_badly(pairs: list[tuple[dict | None, dict | None]]) -> bool:
     """True if a previously-met axis fell more than _MET_TOLERANCE below target."""
     for old, new in pairs:
@@ -478,7 +490,7 @@ def _step(db: Database, article_id: UUID, i: int, step: str, total: int) -> None
 
 # --- editorial / de-AI loop (human-ness, judged by an LLM editor) ---
 EDITOR_AGENT_NAME = "rankforge-editor"
-EDITOR_MODEL = "claude-opus-4-7"
+EDITOR_MODEL = "claude-opus-4-8"
 MAX_EDITORIAL_PASSES = 2
 # reads_human at/above this = ship without another rewrite (the editor's call,
 # this is just a backstop if the model returns a score but a vague verdict).
@@ -638,8 +650,10 @@ async def _editorial_loop(
     rewrites against the editor's specific notes → accept only if the OBJECTIVE axes
     (SEO/GEO) don't regress → re-fact-check/optimize/score. Capped so it terminates.
     """
-    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+    from . import geo_optimize, linking, quality, scoring  # local: avoid import cycle
 
+    # Strip any competitor link the voice rewrite reintroduces (see _objective_loop).
+    comp_hosts = _competitor_hosts_for(db, article_id)
     editor_id: str | None = None
     reviser_id: str | None = None
     for i in range(MAX_EDITORIAL_PASSES):
@@ -679,6 +693,8 @@ async def _editorial_loop(
             )
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
+            if comp_hosts:
+                new_md = linking.strip_competitor_links(new_md, comp_hosts)
             # Guard the OBJECTIVE axes only — the editor owns human-ness.
             title = article.get("meta_title") or article.get("title") or ""
             meta = article.get("meta_description")
@@ -722,9 +738,13 @@ async def _objective_loop(
     SEO/GEO pre-check would veto every grounding fix that costs a point of a thin-margin
     axis. We keep a pass only if it raised SEO+GEO+grounding overall without wrecking a
     met axis; otherwise we revert (restoring the cached scores — no extra fact-check)."""
-    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+    from . import geo_optimize, linking, quality, scoring  # local: avoid import cycle
 
     _SNAP = ("seo_score", "geo_score", "grounding_report", "readability_score", "json_ld")
+    # The reviser can reintroduce a competitor link while chasing SEO/GEO (its prompt only
+    # forbids it for the writer). Strip any on every accepted pass so content_md — and thus
+    # the public page/preview — never carries a rival link.
+    comp_hosts = _competitor_hosts_for(db, article_id)
     agent_id: str | None = None
     for i in range(MAX_REVISIONS):
         article = gen_svc.get_article(db, article_id)
@@ -748,6 +768,8 @@ async def _objective_loop(
             new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
+            if comp_hosts:
+                new_md = linking.strip_competitor_links(new_md, comp_hosts)
             before = _objective_total(seo, geo, gr)
             snap = {k: article.get(k) for k in _SNAP}
             gen_svc._update(db, article_id, content_md=new_md)
@@ -1041,6 +1063,11 @@ async def _targeted_loop(
                     client, kb_id, brief, source_ids, url_by_source
                 )
                 new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
+                # The whole-article path has no surgical backstop, so guarantee the
+                # em-dash tell drops here when it's among the selected localized keys
+                # (otherwise it depends entirely on the reviser's cooperation).
+                if new_md and "em_dashes" in loc_keys:
+                    new_md = _thin_em_dashes(new_md)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
             # Guaranteed competitor-link removal when that issue is selected — enforced

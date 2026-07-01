@@ -206,21 +206,31 @@ def set_pillar(
     )
     if art is None:
         return None
-    db.execute(
-        "update public.articles set cluster_role = 'member' "
-        "where cluster_id = %s and cluster_role = 'pillar'",
-        (cluster_id,),
-    )
-    db.execute(
-        "update public.articles set cluster_id = %s, cluster_role = 'pillar' "
-        "where id = %s",
-        (cluster_id, article_id),
-    )
-    return db.fetch_one(
-        "update public.content_clusters set pillar_article_id = %s, "
-        f"pillar_locked = true, updated_at = now() where id = %s returning {_COLUMNS}",
-        (article_id, cluster_id),
-    )
+    # One transaction so the pillar swap can't half-apply. FIRST vacate any OTHER cluster
+    # this article currently anchors, so promoting it here never leaves a dangling
+    # pillar_article_id pointing at an article that moved (mirrors move_article).
+    with db.connection() as conn:
+        conn.execute(
+            "update public.content_clusters set pillar_article_id = null, "
+            "updated_at = now() where pillar_article_id = %s and id <> %s",
+            (article_id, cluster_id),
+        )
+        conn.execute(
+            "update public.articles set cluster_role = 'member' "
+            "where cluster_id = %s and cluster_role = 'pillar'",
+            (cluster_id,),
+        )
+        conn.execute(
+            "update public.articles set cluster_id = %s, cluster_role = 'pillar' "
+            "where id = %s",
+            (cluster_id, article_id),
+        )
+        row = conn.execute(
+            "update public.content_clusters set pillar_article_id = %s, "
+            f"pillar_locked = true, updated_at = now() where id = %s returning {_COLUMNS}",
+            (article_id, cluster_id),
+        ).fetchone()
+    return row
 
 
 async def create_cluster(
@@ -294,7 +304,10 @@ def move_article(
 
 # --- the architect agent ---
 CLUSTER_AGENT_NAME = "rankforge-cluster-architect"
-CLUSTER_MODEL = "claude-opus-4-7"
+# A bounded join-vs-found classification over a handful of candidate clusters — Sonnet at
+# medium effort handles it as well as Opus did, at a fraction of the cost (this runs per
+# opportunity/article and in a 25-item backfill loop).
+CLUSTER_MODEL = "claude-sonnet-4-6"
 
 _SYSTEM = """\
 You are RankForge's **content-cluster architect**. A brand's blog is organized into \

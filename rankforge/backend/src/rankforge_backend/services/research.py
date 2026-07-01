@@ -39,6 +39,11 @@ MIN_TRUST = 50
 # Cap backfill scrapes so a run that prunes many weak sources can't balloon into an
 # unbounded scrape (each page still polls up to ~80s).
 MAX_BACKFILL = 12
+# Never prune below this many usable sources, even if the judge scored them low — a
+# harsh judge plus a thin SERP must not starve the writer of grounding (which would tank
+# citation density + grounding). We keep the HIGHEST-trust sub-threshold sources to fill
+# the floor rather than deleting blind.
+SOURCE_FLOOR = 5
 
 # depth → (serp results to analyze, competitor pages to scrape). Generous counts so,
 # after the trust/quality gate drops thin or failed pages, the article still has many
@@ -168,11 +173,17 @@ demonstrated authority; usable only as color.
 pages, anonymous low-DA sites, link-bait.
 
 ## How to judge
-- Judge from the DOMAIN, URL, and title — domain authority is a property of the domain. \
-A recognizable, reputable domain scores higher; an unknown domain that reads like an \
-SEO play (generic ".blog"/".dev" personal sites, keyword-stuffed titles) scores lower.
+- Weigh the DOMAIN/URL (domain authority is a property of the domain — a recognizable, \
+reputable domain scores higher; an unknown domain that reads like an SEO play, e.g. \
+generic ".blog"/".dev" personal sites or keyword-stuffed titles, scores lower) TOGETHER \
+with the content **excerpt** when one is provided.
+- Use the excerpt to tell a thin SEO/affiliate page (keyword-stuffed, vague, listicle \
+filler, thin rewording) from genuinely substantive writing (specific facts, data, named \
+expertise, primary detail) on an unfamiliar domain — the excerpt is how you avoid \
+judging by domain name alone.
 - A high word count does NOT make a thin SEO blog authoritative — do not reward length.
-- When unsure about an unknown domain, lean skeptical (mid-to-low), not generous.
+- When the domain is unknown AND the excerpt is thin/generic, lean skeptical (mid-to-low). \
+A strong excerpt can lift an unknown domain into the solid-secondary band.
 
 ## Output
 - Return exactly ONE JSON array, one object per source in the SAME order you were \
@@ -217,11 +228,16 @@ async def score_sources(
     scorable = [s for s in sources if s.get("url")]
     if not scorable:
         return {}
-    lines = [
-        f"{i}. domain: {_domain(s['url'])} | url: {s['url']} | "
-        f"title: {s.get('title') or '(none)'} | words: {s.get('word_count') or 0}"
-        for i, s in enumerate(scorable)
-    ]
+    lines = []
+    for i, s in enumerate(scorable):
+        line = (
+            f"{i}. domain: {_domain(s['url'])} | url: {s['url']} | "
+            f"title: {s.get('title') or '(none)'} | words: {s.get('word_count') or 0}"
+        )
+        excerpt = " ".join((s.get("excerpt") or "").split())[:400]
+        if excerpt:
+            line += f"\n   excerpt: {excerpt}"
+        lines.append(line)
     msg = (
         "## Sources to rate\n" + "\n".join(lines) + "\n\n"
         "## Task\nRate every source 0-100 for authority/trust as an editorial "
@@ -452,6 +468,10 @@ async def _scrape_one(
         "status": status,
         "source_id": source_id,
         "url": url,
+        # A short excerpt of the real content so the source-quality judge can assess more
+        # than the domain name (a thin SEO blog and an authoritative guide look identical
+        # from URL + title alone).
+        "excerpt": md[:600] if md else "",
     }
 
 
@@ -477,7 +497,8 @@ def _usable_for_scoring(by_url: dict[str, dict[str, Any]]) -> list[dict[str, Any
     """The subset worth spending judge tokens on: sources that actually extracted enough
     content to cite (a failed/thin scrape is dropped by is_usable_source anyway)."""
     return [
-        {"url": u, "title": v["teardown"].title, "word_count": v["teardown"].word_count}
+        {"url": u, "title": v["teardown"].title, "word_count": v["teardown"].word_count,
+         "excerpt": v.get("excerpt", "")}
         for u, v in by_url.items()
         if v["status"] == "extracted"
         and (v["teardown"].word_count or 0) >= MIN_SOURCE_WORDS
@@ -506,17 +527,23 @@ async def evaluate_and_prune(
             "where research_run_id = %s and url = %s",
             (score, reason, run_id, u),
         )
-    # Prune only sources we actually scored and that fell short — an unscored source
-    # (judge skipped it, or evaluation degraded) is kept, never dropped blind.
+    # Prune sub-threshold sources WORST-FIRST, but never below SOURCE_FLOOR usable ones —
+    # a harsh judge plus a thin SERP must not starve the writer of grounding. Only scored
+    # sources are candidates (all scored sources are usable; an unscored one is kept, never
+    # dropped blind); when the floor bites we keep the HIGHEST-trust sub-threshold ones.
     used_domains = {_domain(u) for u in by_url}
+    usable_count = len(_usable_for_scoring(by_url))
+    sub_threshold = sorted(
+        (u for u in by_url if (sc := scores.get(u)) and sc[0] < MIN_TRUST),
+        key=lambda u: scores[u][0],  # worst score first
+    )
+    max_drop = max(0, usable_count - SOURCE_FLOOR)
     dropped = 0
-    for u in list(by_url):
-        sc = scores.get(u)
-        if sc and sc[0] < MIN_TRUST:
-            await _drop_source(client, db, run_id, by_url[u]["source_id"])
-            used_domains.discard(_domain(u))
-            del by_url[u]
-            dropped += 1
+    for u in sub_threshold[:max_drop]:
+        await _drop_source(client, db, run_id, by_url[u]["source_id"])
+        used_domains.discard(_domain(u))
+        del by_url[u]
+        dropped += 1
 
     added = 0
     if dropped:
@@ -543,7 +570,7 @@ async def evaluate_and_prune(
             )
             fresh.append(
                 {"url": u, "teardown": t, "source_id": res["source_id"],
-                 "status": res["status"]}
+                 "status": res["status"], "excerpt": res.get("excerpt", "")}
             )
         # Score the replacements too; keep the good ones, prune any that are also weak.
         fresh_by_url = {b["url"]: b for b in fresh}
@@ -562,7 +589,7 @@ async def evaluate_and_prune(
                 continue
             by_url[u] = {
                 "teardown": b["teardown"], "source_id": b["source_id"],
-                "status": b["status"],
+                "status": b["status"], "excerpt": b.get("excerpt", ""),
             }
             added += 1
 
@@ -658,6 +685,7 @@ async def run_research_task(
             )
             by_url[r["url"]] = {
                 "teardown": t, "source_id": r["source_id"], "status": r["status"],
+                "excerpt": r.get("excerpt", ""),
             }
 
         # 3) evaluate source quality: score each source, prune weak ones, and backfill

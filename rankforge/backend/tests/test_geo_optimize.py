@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
-from rankforge_backend.services import geo_optimize, scoring
+from rankforge_backend.services import geo_optimize
 from rankforge_backend.services.geo_optimize import (
     build_article_jsonld,
     build_howto_jsonld,
@@ -46,7 +46,9 @@ def test_build_article_jsonld():
 
 async def test_build_faq_jsonld_survives_malformed_response(monkeypatch):
     # A FAQ response that's a list of non-dicts must not crash (AttributeError).
-    monkeypatch.setattr(scoring, "ensure_judge_agent", AsyncMock(return_value="aid"))
+    monkeypatch.setattr(
+        geo_optimize, "ensure_faq_agent", AsyncMock(return_value="aid")
+    )
     client = MagicMock()
     client.run_agent = AsyncMock(
         return_value={"content": '{"faqs": ["just a string", 123]}'}

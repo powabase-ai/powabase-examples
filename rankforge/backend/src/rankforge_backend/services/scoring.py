@@ -484,7 +484,7 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
 
 JUDGE_AGENT_NAME = "rankforge-geo-judge"
 # Evaluation/judgment with short JSON output — top model + extended thinking.
-JUDGE_MODEL = "claude-opus-4-7"
+JUDGE_MODEL = "claude-opus-4-8"
 _JUDGE_SYSTEM = """\
 You are a **GEO (Generative Engine Optimization) auditor**. You rate how easily an \
 AI answer engine (ChatGPT, Perplexity, Google AI Overviews) could lift a passage \
@@ -552,7 +552,7 @@ async def judge_geo(client: PowabaseClient, content_md: str) -> dict | None:
 
 
 READ_JUDGE_AGENT_NAME = "rankforge-readability-judge"
-READ_JUDGE_MODEL = "claude-opus-4-7"
+READ_JUDGE_MODEL = "claude-opus-4-8"
 _READ_JUDGE_SYSTEM = """\
 You are a **human-writing auditor**. Search engines now penalize content that reads \
 as AI-generated, so you rate how human and natural an article reads. Your scores and \

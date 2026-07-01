@@ -34,7 +34,7 @@ log = logging.getLogger("rankforge.scouts")
 SCOUT_AGENT_NAME = "rankforge-scout"
 # Discovery quality feeds auto-draft — top model + moderate extended thinking to
 # weigh timeliness/fit (we still re-score deterministically in code).
-SCOUT_MODEL = "claude-opus-4-7"
+SCOUT_MODEL = "claude-opus-4-8"
 
 _SYSTEM_PROMPT = """\
 You are RankForge's content scout **executor**. You're given a Search Plan — specific \

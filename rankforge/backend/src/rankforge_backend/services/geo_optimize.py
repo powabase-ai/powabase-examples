@@ -13,8 +13,8 @@ from ..util import extract_json
 from . import brief as brief_svc
 from . import business_profiles as brands
 from . import generation as gen_svc
-from . import scoring
 from . import templates as templates_svc
+from .agents import ensure_agent
 
 
 def _h2s(md: str) -> list[str]:
@@ -76,6 +76,17 @@ def build_article_jsonld(
     return ld
 
 
+# FAQ extraction is a cheap, deterministic pull — its own small Sonnet agent, NOT the
+# expensive Opus GEO-auditor (whose persona/reasoning were wrong for this task anyway).
+FAQ_AGENT_NAME = "rankforge-faq-extractor"
+FAQ_MODEL = "claude-sonnet-4-6"
+_FAQ_SYSTEM = (
+    "You extract an article's FAQ as structured JSON for schema.org FAQPage markup. "
+    "Include only questions the article genuinely answers, with concise answers copied "
+    "from the article's own content. You always reply with exactly one JSON object and "
+    "nothing else — no prose, no code fences."
+)
+
 _FAQ_PROMPT = (
     "Extract the FAQ from this article. Return ONLY "
     '{"faqs": [{"question": str, "answer": str}]} — concise answers (<=60 words), '
@@ -84,11 +95,21 @@ _FAQ_PROMPT = (
 )
 
 
+async def ensure_faq_agent(client: PowabaseClient) -> str:
+    return await ensure_agent(
+        client,
+        name=FAQ_AGENT_NAME,
+        model=FAQ_MODEL,
+        system_prompt=_FAQ_SYSTEM,
+        settings={"temperature": 0},
+    )
+
+
 async def build_faq_jsonld(
     client: PowabaseClient, content_md: str
 ) -> dict[str, Any] | None:
     try:
-        agent_id = await scoring.ensure_judge_agent(client)
+        agent_id = await ensure_faq_agent(client)
         res = await client.run_agent(
             agent_id, f"{_FAQ_PROMPT}\n\n---ARTICLE---\n{content_md[:16000]}"
         )

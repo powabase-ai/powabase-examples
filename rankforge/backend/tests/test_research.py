@@ -186,6 +186,7 @@ async def test_evaluate_prunes_low_and_backfills(monkeypatch):
     monkeypatch.setattr(svc, "score_sources", fake_score)
     monkeypatch.setattr(svc, "_drop_source", fake_drop)
     monkeypatch.setattr(svc, "_scrape_one", fake_scrape)
+    monkeypatch.setattr(svc, "SOURCE_FLOOR", 0)  # isolate prune logic from the floor
 
     teardowns, stats = await svc.evaluate_and_prune(
         client, db, RID, by_url=by_url,
@@ -196,6 +197,39 @@ async def test_evaluate_prunes_low_and_backfills(monkeypatch):
     assert "https://weak.blog/b" not in by_url
     assert "https://fresh.org/c" in by_url  # replacement kept
     assert {t["title"] for t in teardowns} == {"Good", "Fresh"}
+
+
+async def test_evaluate_respects_source_floor(monkeypatch):
+    # Two usable sources, one weak — but with a floor of 2 nothing may be pruned, so the
+    # writer isn't starved. The weak source survives despite scoring below MIN_TRUST.
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    by_url = {
+        "https://good.com/a": {
+            "teardown": _teardown("Good", 900), "source_id": "s_good",
+            "status": "extracted",
+        },
+        "https://weak.blog/b": {
+            "teardown": _teardown("Weak", 800), "source_id": "s_weak",
+            "status": "extracted",
+        },
+    }
+    monkeypatch.setattr(svc, "SOURCE_FLOOR", 2)
+    monkeypatch.setattr(svc, "score_sources", AsyncMock(return_value={
+        "https://good.com/a": (88, "authoritative"),
+        "https://weak.blog/b": (25, "thin"),
+    }))
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        svc, "_drop_source",
+        AsyncMock(side_effect=lambda *a: dropped.append(a[-1])),
+    )
+    _, stats = await svc.evaluate_and_prune(
+        client=MagicMock(), db=db, run_id=RID, by_url=by_url,
+        backfill_pool=[], title_by_url={},
+    )
+    assert dropped == [] and stats["dropped"] == 0  # floor protected the weak source
+    assert "https://weak.blog/b" in by_url
 
 
 async def test_evaluate_keeps_all_when_scoring_unavailable(monkeypatch):
