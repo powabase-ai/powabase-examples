@@ -25,10 +25,11 @@ from .agents import ensure_agent
 log = logging.getLogger("rankforge.revise")
 
 REVISER_AGENT_NAME = "rankforge-reviser"
-# The "make it satisfactory" full-article rewrite — top model. Keep a low
-# temperature (faithful edits) rather than extended thinking, since this is a
-# large streamed output where thinking would add the most latency.
-REVISER_MODEL = "claude-opus-4-7"
+# The "make it satisfactory" full-article rewrite. Gemini 3.1 Pro (the `gemini/`
+# AI-Studio path — the bare id routes to Vertex, which needs the GCP SDK). Low
+# temperature + low reasoning: faithful edits over heavy thinking on a large streamed
+# output where thinking would add the most latency.
+REVISER_MODEL = "gemini/gemini-3.1-pro-preview"
 # Metadata is a trivial one-liner — a fast capable model is plenty.
 META_MODEL = "claude-sonnet-4-6"
 
@@ -106,7 +107,9 @@ async def ensure_reviser_agent(client: PowabaseClient) -> str:
         system_prompt=_SYSTEM,
         # whole-article rewrites — a generous OUTPUT ceiling so a long article isn't
         # truncated (input is separate, on the context window). See ensure_writer_agent.
-        settings={"temperature": 0.2, "max_tokens": 32000},
+        settings={
+            "temperature": 0.2, "max_tokens": 32000, "reasoning_effort": "low"
+        },
     )
 
 

@@ -35,9 +35,10 @@ _ACTIVE_GEN_STATUSES = (
 )
 
 WRITER_AGENT_NAME = "rankforge-writer"
-# Long-form prose IS the product — top model. Temperature (not extended thinking) for
-# natural variety: one big streamed draft, where thinking would add the most latency.
-WRITER_MODEL = "claude-opus-4-7"
+# Long-form prose IS the product. Gemini 3.1 Pro (the `gemini/` AI-Studio path — the
+# bare id routes to Vertex, which needs the GCP SDK). Low reasoning + temperature for
+# natural variety on one big streamed draft; heavy thinking mostly adds latency here.
+WRITER_MODEL = "gemini/gemini-3.1-pro-preview"
 
 _SYSTEM_PROMPT = """\
 You are RankForge's **senior content writer**. You write a complete long-form \
@@ -157,7 +158,9 @@ async def ensure_writer_agent(client: PowabaseClient) -> str:
         # context window). One pass emits the whole article — a generous ceiling so a
         # long pillar piece is never truncated; the model still writes to the brief's
         # target_word_count and stops, so this costs nothing extra in practice.
-        settings={"temperature": 0.4, "max_tokens": 32000},
+        settings={
+            "temperature": 0.4, "max_tokens": 32000, "reasoning_effort": "low"
+        },
     )
 
 
