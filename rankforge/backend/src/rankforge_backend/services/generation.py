@@ -35,8 +35,10 @@ _ACTIVE_GEN_STATUSES = (
 )
 
 WRITER_AGENT_NAME = "rankforge-writer"
-# Long-form prose IS the product — top model. Temperature (not extended thinking) for
-# natural variety: one big streamed draft, where thinking would add the most latency.
+# Long-form prose IS the product. Opus 4.7 at low reasoning: Gemini 3.1 Pro drafted
+# fluently but under-respected the target word count, so we trade its speed for Opus's
+# tighter adherence to the length brief. Low reasoning + temperature for natural
+# variety on one big streamed draft; heavy thinking mostly adds latency here.
 WRITER_MODEL = "claude-opus-4-7"
 
 _SYSTEM_PROMPT = """\
@@ -86,10 +88,14 @@ sources are available, cite sparingly rather than linking the same page again an
 - Lead with a tight, directly extractable answer, then elaborate.
 
 ## Position the brand (editorial, never an ad)
+- **Speak AS the brand, never about it as a detached third party.** This is the brand's OWN blog, written by its team — so name the brand directly or use "we"/"our" for its product, runtime, docs, and decisions. Write "Powabase's runtime has hard safeguards…" and "Our documentation details the pitfalls…", NOT "the vendor asserts…", "the platform documents…", or "the company claims…". Referring to yourself as "the vendor"/"the platform"/"the tool" reads impersonal and removed — be the brand's champion and represent it with pride.
+- **Never hedge the brand's own capabilities with attribution verbs** (asserts, claims, purports, allegedly, supposedly, "claims to"). The brand states its own features as fact: "Powabase's agent loop enforces step limits", not "the vendor asserts its agent loop enforces step limits". Save any third-person framing or hedged attribution for COMPETITORS, never for the brand itself.
 - You may be given a "Your brand's own materials" block: excerpts from the brand's own pages, each with its URL. Treat these as the brand's authoritative voice — its real product, capabilities, terminology, and first-party data.
 - Use them for what only the brand can provide: its specific approach, feature names, concrete examples, and its own data/results. Prefer the brand's own example or number over a generic one when the materials supply it.
 - When the topic is something the brand actually does or solves, present the brand as one concrete, credible option — name the specific capability and link to the exact page that goes deeper (an internal link with natural anchor text). Earn the mention by being useful, not by selling.
 - **This is the brand's own blog — when the article weighs the brand against competitors (named in the brief), write from the brand's side.** Be accurate and fair, but lead with the brand's genuine strengths and don't undersell it or hand a competitor an edge the evidence doesn't justify. A reader on the brand's blog should come away understanding where the brand is the stronger choice. Ground every comparative claim in the sources or brand materials — never invent superiority, and where the brand is honestly weaker, say less rather than something false. Real, supported strengths advocate for the brand; puffery the fact-checker will flag does not.
+- **Name competitors, but NEVER hyperlink them.** You may mention a competitor by name where a comparison genuinely helps the reader, but do not create an outbound link to a competitor's website — linking a rival hands them SEO authority from the brand's own blog. Link only to the brand's own pages, the cluster pillar, and neutral third-party evidence (never a direct competitor's domain).
+- **No competitor showcase.** Do not devote a section to describing or praising competitors (no "Where the alternatives land", "Other tools worth considering", etc.). Comparisons stay woven into the brand's argument, brief and brand-favorable where the facts allow.
 - Keep it proportional: a mention or two woven into the argument where it genuinely helps — not a section-ending plug, not in every section.
 - Use the brand's own terminology accurately (don't rename its products or features), and never claim a capability the materials don't support.
 - Never write marketing slogans, CTAs, or "sign up today" copy.
@@ -101,11 +107,12 @@ sources are available, cite sparingly rather than linking the same page again an
 Editors reject copy that reads as machine-written. Steer clear of all of these:
 
 ### Overused words (worst when stacked)
-- Avoid this register: delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant; "boasts" for a feature; "nestled" for a place.
+- Avoid this register: delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant; "boasts" for a feature; "nestled" for a place; "genuinely" as an intensifier ("genuinely useful").
 - Any one can be fine in isolation; never reach for several in a paragraph. Prefer plain, concrete words.
 
 ### Constructions to avoid
 - "It's not just X, it's Y" / "This isn't merely X, it's Y".
+- The antithesis reframe: "The way forward isn't X. It's Y" / "It isn't about X, it's about Y" — naming what something is NOT and then the "real" answer. Overused; just say what it is, directly.
 - "Whether you're a beginner or a seasoned pro, there's something for everyone".
 - "In today's fast-paced, ever-evolving world of …".
 - "Let's dive in", "Let's explore", "Buckle up".
@@ -131,6 +138,23 @@ Editors reject copy that reads as machine-written. Steer clear of all of these:
 - Use real specifics from the grounding: concrete numbers, names, dates, versions, and examples.
 - Generic, safe, specificity-free prose is the clearest AI tell. Choose the precise detail over the smooth generality every time.
 
+## Formatting (the article is published as MDX — it MUST render cleanly)
+- **Separate every block with a blank line.** A heading, paragraph, list, table, or \
+code block each needs a blank line before and after it. Strict MDX parsers won't render \
+blocks that are jammed onto adjacent lines.
+- **FAQ / Q&A:** put each question on its OWN line as a `###` subheading, then the \
+answer as a separate paragraph on the next line. NEVER put the answer on the same line \
+as the question (`**Is it safe?**It is…` renders as one unreadable blob).
+- **Tables:** use real GitHub-flavored Markdown pipe tables — a header row, then a \
+`|---|---|` separator row, then one row per line — with a blank line before and after. \
+Never collapse a table onto a single run-on line, and never describe tabular data as \
+prose when the outline calls for a table.
+- **Links:** anchor text must be a clean, complete phrase that reads naturally inside \
+the sentence. Never start a link mid-word, never wrap a whole clause, and never leave \
+stray `[` or `]` brackets around it. `See our [RLS guide](url) for details.`, not \
+`See our[ RLS guide ](url)…`.
+- Use `##`/`###` for section/subsection headings exactly as the outline specifies.
+
 ## Output
 - Output the full article body in Markdown: the intro, every section (`##` with its \
 `###` subheadings), then a conclusion, in outline order.
@@ -142,7 +166,8 @@ _ARTICLE_COLUMNS = (
     "id, business_id, brief_id, research_run_id, title, slug, status, "
     "generation_status, generation_error, progress, content_md, meta_title, "
     "meta_description, seo_score, geo_score, readability_score, json_ld, "
-    "grounding_report, canonical_url, cluster_id, cluster_role, created_at, updated_at"
+    "grounding_report, canonical_url, author, cluster_id, cluster_role, "
+    "created_at, updated_at"
 )
 _SUMMARY_COLUMNS = "id, title, status, generation_status, progress, updated_at"
 
@@ -156,7 +181,9 @@ async def ensure_writer_agent(client: PowabaseClient) -> str:
         # context window). One pass emits the whole article — a generous ceiling so a
         # long pillar piece is never truncated; the model still writes to the brief's
         # target_word_count and stops, so this costs nothing extra in practice.
-        settings={"temperature": 0.4, "max_tokens": 32000},
+        settings={
+            "temperature": 0.4, "max_tokens": 32000, "reasoning_effort": "low"
+        },
     )
 
 
@@ -629,6 +656,14 @@ async def run_generation_task(
         # article with two titles). H2/H3 (`## `, `### `) are untouched.
         body = re.sub(r"(?m)^[ \t]*#[ \t]+[^\n]*\n?", "", body).strip()
         content_md = f"# {title}\n\n{body}".strip()
+        # The brand's own blog must never pass link authority to a rival: unwrap any
+        # outbound link to a competitor domain (keep the anchor text, drop the URL). The
+        # writer is told not to link competitors; this enforces it deterministically.
+        from . import linking as _linking
+
+        content_md = _linking.strip_competitor_links(
+            content_md, _linking.competitor_hosts(brand_profile)
+        )
         _update(
             db, article_id,
             content_md=content_md,

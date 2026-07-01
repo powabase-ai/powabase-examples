@@ -26,19 +26,39 @@ interface NavItem {
   exact?: boolean;
 }
 
+interface NavGroup {
+  label: string;
+  items: NavItem[];
+}
+
 export function AppSidebar({ brandId }: { brandId: string }) {
   const pathname = usePathname();
   const { profile, signOut } = useAuth();
 
-  const nav: NavItem[] = [
-    { title: "Scouts", href: `/brands/${brandId}/scouts`, icon: Radar },
-    { title: "Research", href: `/brands/${brandId}`, icon: Search, exact: true },
-    { title: "Sources", href: `/brands/${brandId}/sources`, icon: Layers },
-    { title: "Articles", href: `/brands/${brandId}/articles`, icon: PenLine },
-    { title: "Clusters", href: `/brands/${brandId}/clusters`, icon: Boxes },
-    { title: "Materials", href: `/brands/${brandId}/materials`, icon: Library },
-    { title: "Team", href: `/brands/${brandId}/team`, icon: Users },
-    { title: "Settings", href: `/brands/${brandId}/settings`, icon: Settings },
+  const groups: NavGroup[] = [
+    {
+      label: "Ideation",
+      items: [
+        { title: "Scouts", href: `/brands/${brandId}/scouts`, icon: Radar },
+        { title: "Research", href: `/brands/${brandId}`, icon: Search, exact: true },
+        { title: "Sources", href: `/brands/${brandId}/sources`, icon: Layers },
+      ],
+    },
+    {
+      label: "Content",
+      items: [
+        { title: "Articles", href: `/brands/${brandId}/articles`, icon: PenLine },
+        { title: "Clusters", href: `/brands/${brandId}/clusters`, icon: Boxes },
+        { title: "Materials", href: `/brands/${brandId}/materials`, icon: Library },
+      ],
+    },
+    {
+      label: "Configuration",
+      items: [
+        { title: "Team", href: `/brands/${brandId}/team`, icon: Users },
+        { title: "Settings", href: `/brands/${brandId}/settings`, icon: Settings },
+      ],
+    },
   ];
 
   return (
@@ -53,32 +73,39 @@ export function AppSidebar({ brandId }: { brandId: string }) {
         <BrandSwitcher brandId={brandId} />
       </div>
 
-      <nav className="flex flex-col gap-0.5 px-3">
-        {nav.map((item) => {
-          const active = item.exact
-            ? pathname === item.href
-            : pathname.startsWith(item.href);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                "flex items-center gap-2.5 border-l-2 py-2 pl-3.5 pr-3 text-sm font-medium transition-colors",
-                active
-                  ? "border-[rgb(var(--ember))] bg-[rgb(var(--iron-hover))] text-[rgb(var(--iron-strong))]"
-                  : "border-transparent text-[rgb(var(--iron-text))] hover:bg-[rgb(var(--iron-hover))]/60 hover:text-[rgb(var(--iron-strong))]"
-              )}
-            >
-              <item.icon
-                className={cn(
-                  "size-4 shrink-0",
-                  active && "text-[rgb(var(--ember-bright))]"
-                )}
-              />
-              {item.title}
-            </Link>
-          );
-        })}
+      <nav className="flex flex-col gap-3 px-3">
+        {groups.map((group) => (
+          <div key={group.label} className="flex flex-col gap-0.5">
+            <div className="px-3.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-[rgb(var(--iron-text))]/60">
+              {group.label}
+            </div>
+            {group.items.map((item) => {
+              const active = item.exact
+                ? pathname === item.href
+                : pathname.startsWith(item.href);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={cn(
+                    "flex items-center gap-2.5 border-l-2 py-2 pl-3.5 pr-3 text-sm font-medium transition-colors",
+                    active
+                      ? "border-[rgb(var(--ember))] bg-[rgb(var(--iron-hover))] text-[rgb(var(--iron-strong))]"
+                      : "border-transparent text-[rgb(var(--iron-text))] hover:bg-[rgb(var(--iron-hover))]/60 hover:text-[rgb(var(--iron-strong))]"
+                  )}
+                >
+                  <item.icon
+                    className={cn(
+                      "size-4 shrink-0",
+                      active && "text-[rgb(var(--ember-bright))]"
+                    )}
+                  />
+                  {item.title}
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       <div className="mt-auto border-t border-[rgb(var(--iron-line))]">

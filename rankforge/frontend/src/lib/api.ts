@@ -49,6 +49,8 @@ export interface BusinessProfile {
   brand_kb_id?: string | null;
   sitemap_url?: string | null;
   url_pattern?: string | null;
+  default_author?: string | null;
+  logo_url?: string | null;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
@@ -66,6 +68,8 @@ export interface BusinessProfileInput {
   brand_kb_id?: string | null;
   sitemap_url?: string | null;
   url_pattern?: string | null;
+  default_author?: string | null;
+  logo_url?: string | null;
 }
 
 async function request<T>(
@@ -107,8 +111,42 @@ export async function getBackendHealth(): Promise<{ status: string }> {
   return request("/health");
 }
 
+/** Multipart upload of a brand logo → public storage; returns the updated brand.
+ *  Mirrors uploadMaterial()'s auth + 401→refresh→retry. */
+async function uploadBrandLogo(
+  id: string,
+  file: File,
+  retry = false
+): Promise<BusinessProfile> {
+  const form = new FormData();
+  form.append("file", file);
+  const token = getAccessToken();
+  const res = await fetch(`${API_BASE_URL}/api/business-profiles/${id}/logo`, {
+    method: "POST",
+    cache: "no-store",
+    body: form,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return uploadBrandLogo(id, file, true);
+  }
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      const body = await res.json();
+      detail = body.detail ?? JSON.stringify(body);
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, friendlyMessage(res.status, detail));
+  }
+  return res.json();
+}
+
 export const brandsApi = {
   list: () => request<BusinessProfile[]>("/api/business-profiles"),
+  uploadLogo: (id: string, file: File) => uploadBrandLogo(id, file),
   get: (id: string) => request<BusinessProfile>(`/api/business-profiles/${id}`),
   create: (data: BusinessProfileInput) =>
     request<BusinessProfile>("/api/business-profiles", {
@@ -144,6 +182,7 @@ export type ResearchStatus =
   | "queued"
   | "searching"
   | "scraping"
+  | "evaluating"
   | "analyzing"
   | "done"
   | "failed";
@@ -172,7 +211,13 @@ export const researchApi = {
   listByBrand: (businessId: string) =>
     request<ResearchRun[]>(`/api/research?business_id=${businessId}`),
   get: (id: string) => request<ResearchRun>(`/api/research/${id}`),
-  run: (data: { business_id: string; topic: string; locale?: string; depth?: string }) =>
+  run: (data: {
+    business_id: string;
+    topic: string;
+    locale?: string;
+    depth?: string;
+    evaluate_sources?: boolean;
+  }) =>
     request<ResearchRun>("/api/research", {
       method: "POST",
       body: JSON.stringify(data),
@@ -191,6 +236,8 @@ export interface BrandSource {
   title?: string | null;
   word_count?: number | null;
   status?: string | null;
+  trust_score?: number | null;
+  trust_reason?: string | null;
   created_at: string;
   research_run_id: string;
   run_topic?: string | null;
@@ -410,6 +457,7 @@ export interface Article extends ArticleSummary {
   json_ld?: Record<string, unknown> | null;
   grounding_report?: GroundingReport | null;
   canonical_url?: string | null;
+  author?: string | null;
   cluster_id?: string | null;
   cluster_role?: "pillar" | "member" | null;
   created_at: string;
@@ -521,7 +569,21 @@ export const articlesApi = {
       `/api/articles/${id}/links/health/${findingId}/ignore`,
       { method: "POST" }
     ),
+  removeBrokenLink: (id: string, findingId: string, keepText: boolean) =>
+    request<RemoveLinkResult>(
+      `/api/articles/${id}/links/health/${findingId}/remove`,
+      { method: "POST", body: JSON.stringify({ keep_text: keepText }) }
+    ),
 };
+
+/** How a broken link was mended. 'mechanical' = the LLM copy-edit failed and a raw
+ *  strip was used, which can leave a rough seam worth a human read. */
+export type LinkRepair = "unlinked" | "llm" | "mechanical" | "none";
+
+export interface RemoveLinkResult {
+  article: Article;
+  repaired: LinkRepair;
+}
 
 /** A broken outbound link found in a published article (internal target gone /
  *  external 4xx-5xx / unreachable), surfaced for an editor to fix or ignore. */
@@ -775,10 +837,21 @@ export const clustersApi = {
     request<ContentCluster[]>(
       `/api/business-profiles/${businessId}/clusters`
     ),
+  create: (businessId: string, data: { label: string; theme?: string }) =>
+    request<ContentCluster>(`/api/business-profiles/${businessId}/clusters`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   get: (clusterId: string) =>
     request<ClusterDetail>(`/api/clusters/${clusterId}`),
   setPillar: (clusterId: string, articleId: string) =>
     request<ClusterDetail>(`/api/clusters/${clusterId}/pillar`, {
+      method: "POST",
+      body: JSON.stringify({ article_id: articleId }),
+    }),
+  // Move an article into `clusterId` as a member (from whatever cluster it's in now).
+  moveArticle: (clusterId: string, articleId: string) =>
+    request<ClusterDetail>(`/api/clusters/${clusterId}/members`, {
       method: "POST",
       body: JSON.stringify({ article_id: articleId }),
     }),
@@ -854,6 +927,7 @@ export interface ArticleUpdate {
   meta_description?: string;
   status?: string;
   canonical_url?: string;
+  author?: string;
 }
 
 // --- Brief (Stage B) ---

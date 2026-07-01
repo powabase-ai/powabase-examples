@@ -175,6 +175,10 @@ def _objective_env(monkeypatch, before, after, new_md="X" * 500):
     monkeypatch.setattr(revise, "ensure_reviser_agent", AsyncMock(return_value="rv"))
     monkeypatch.setattr(revise, "_diverse_excerpts", AsyncMock(return_value="(none)"))
     monkeypatch.setattr(revise, "_revise_once", AsyncMock(return_value=new_md))
+    # Localized readability tells route through the surgical rewriter instead.
+    monkeypatch.setattr(
+        revise, "_surgical_tell_rewrite", AsyncMock(return_value=new_md)
+    )
 
     async def _reflect(client, db, aid):
         state["art"]["grounding_report"] = after["grounding_report"]
@@ -323,6 +327,37 @@ async def test_editorial_loop_respects_revise_over_high_score(monkeypatch):
         MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {}
     )
     rev.assert_awaited()
+
+
+async def test_editorial_loop_reraises_on_first_pass_infra_failure(monkeypatch):
+    """M1: if the reviser never responds on the FIRST pass (misconfigured/unreachable —
+    e.g. a bad model route), the editorial pass did nothing. It must propagate, not be
+    swallowed into a silent 'done' over an unchanged draft (like _objective_loop)."""
+    art = {"content_md": "Body here.", "readability_score": None, "title": "T",
+           "meta_title": None, "meta_description": None}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda db, aid: art)
+    monkeypatch.setattr(revise, "ensure_editor_agent", AsyncMock(return_value="ed"))
+    monkeypatch.setattr(revise, "ensure_reviser_agent", AsyncMock(return_value="rv"))
+    monkeypatch.setattr(
+        revise, "_editor_review",
+        AsyncMock(return_value={
+            "verdict": "revise", "reads_human": 40,
+            "notes": [{"quote": "x", "problem": "p", "fix": "f"}],
+        }),
+    )
+    monkeypatch.setattr(revise, "_diverse_excerpts", AsyncMock(return_value="(none)"))
+    monkeypatch.setattr(
+        revise, "_revise_for_voice",
+        AsyncMock(side_effect=RuntimeError("reviser route unreachable")),
+    )
+    raised = False
+    try:
+        await revise._editorial_loop(
+            MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {}
+        )
+    except RuntimeError:
+        raised = True
+    assert raised  # first-pass infra failure propagates instead of a silent no-op
 
 
 # --- user-directed targeted refine ---
@@ -476,18 +511,20 @@ _TARGETED_BEFORE = {
 }
 
 
-async def test_targeted_loop_reverts_when_selected_total_unmoved(monkeypatch):
-    """A targeted pass that doesn't raise the selected signals' combined score must
-    restore BOTH the prior content and the cached scores (no half-applied state)."""
-    after = {  # rescore shows the em-dash signal didn't move
+async def test_targeted_loop_reverts_only_when_selected_gets_worse(monkeypatch):
+    """A pass that makes the SELECTED signal WORSE restores BOTH the prior content and
+    the cached scores (no half-applied state). A flat/unmoved pass, by contrast, is now
+    KEPT (see the next test) — only active harm to your checked items reverts."""
+    after = {  # rescore shows the selected em-dash signal got WORSE (30 → 15)
         "seo_score": SEO_MET, "geo_score": GEO_MET,
         "readability_score": {"signals": [
-            {"key": "em_dashes", "label": "Em-dash restraint", "score": 30,
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 15,
              "fixes": ["Thin out em-dashes."]},
         ]},
         "grounding_report": GR_OK,
     }
     state = _targeted_env(monkeypatch, _TARGETED_BEFORE, after)
+    monkeypatch.setattr(revise, "_surgical_tell_rewrite", AsyncMock(return_value="X" * 500))
     reverts: list = []
     real_update = revise.gen_svc._update
 
@@ -501,17 +538,36 @@ async def test_targeted_loop_reverts_when_selected_total_unmoved(monkeypatch):
         MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
         ["readability:em_dashes"],
     )
-    assert state["art"]["content_md"] == "body"  # content reverted
+    assert state["art"]["content_md"] == "body"  # content reverted (selected got worse)
     # the revert call restored the snapshot (seo/geo/grounding/readability/json_ld)
     assert reverts and "seo_score" in reverts[-1] and "grounding_report" in reverts[-1]
 
 
-async def test_targeted_loop_reverts_when_grounding_lost(monkeypatch):
-    """Even when the SELECTED (readability) signal improves, a pass that quietly weakens
-    factual grounding below target AND below prior must be reverted (the grounding
-    guard) — a readability-only target can't be allowed to degrade grounding."""
+async def test_targeted_loop_keeps_a_flat_pass(monkeypatch):
+    """A pass that leaves the selected signal unchanged (didn't help, didn't hurt) is now
+    KEPT — the user sees the attempt rather than a silent no-op revert."""
+    after = {  # em_dashes unchanged at 30 (flat)
+        "seo_score": SEO_MET, "geo_score": GEO_MET,
+        "readability_score": {"signals": [
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 30, "fixes": []},
+        ]},
+        "grounding_report": GR_OK,
+    }
+    state = _targeted_env(monkeypatch, _TARGETED_BEFORE, after)
+    monkeypatch.setattr(revise, "_surgical_tell_rewrite", AsyncMock(return_value="X" * 500))
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["readability:em_dashes"],
+    )
+    assert state["art"]["content_md"] == "X" * 500  # flat pass kept, not reverted
+
+
+async def test_targeted_loop_keeps_pass_when_unselected_axis_regresses(monkeypatch):
+    """Targeted refine fixes exactly what's checked. A pass that improves the SELECTED
+    signal is KEPT even if an UNSELECTED axis (here grounding) regresses — the regression
+    is surfaced in the scores/grounding report for the user to fix, not auto-reverted."""
     before = {**_TARGETED_BEFORE, "grounding_report": {"grounding_score": 80}}
-    after = {  # em_dashes 30→90 (selected total rises) but grounding 80→50 collapses
+    after = {  # em_dashes 30→90 (selected ↑); grounding 80→50 (unselected) — allowed
         "seo_score": SEO_MET, "geo_score": GEO_MET,
         "readability_score": {"signals": [
             {"key": "em_dashes", "label": "Em-dash restraint", "score": 90, "fixes": []},
@@ -519,9 +575,137 @@ async def test_targeted_loop_reverts_when_grounding_lost(monkeypatch):
         "grounding_report": {"grounding_score": 50},
     }
     state = _targeted_env(monkeypatch, before, after)
+    monkeypatch.setattr(revise, "_surgical_tell_rewrite", AsyncMock(return_value="X" * 500))
     await revise._targeted_loop(
         MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
         ["readability:em_dashes"],
     )
-    assert state["art"]["content_md"] == "body"  # reverted despite the selected gain
-    assert state["art"]["grounding_report"]["grounding_score"] == 80
+    assert state["art"]["content_md"] == "X" * 500  # kept: the selected fix landed
+    assert state["art"]["grounding_report"]["grounding_score"] == 50  # regression persists
+
+
+def test_grounding_collapsed_tolerates_noise_but_catches_real_drops():
+    assert not revise._grounding_collapsed(68, 65)  # 3-pt dip = fact-checker noise
+    assert not revise._grounding_collapsed(80, 78)  # still above target
+    assert revise._grounding_collapsed(64, 55)  # 9-pt drop below target → real collapse
+    assert not revise._grounding_collapsed(None, 50)  # unmeasured prior → not a collapse
+
+
+async def test_targeted_loop_keeps_pass_despite_grounding_dip(monkeypatch):
+    """A selected SEO signal improves while grounding (unselected) dips — the pass is
+    KEPT. Targeted refine no longer vetoes on grounding at all; the fact-checker still
+    flags any new unsupported claim in the report for the user to address."""
+    def _seo(score, fixes):
+        return {"total": 82, "target": 80, "met": True, "signals": [
+            {"key": "secondary_coverage", "label": "Secondary keyword coverage",
+             "score": score, "fixes": fixes}]}
+
+    before = {"seo_score": _seo(30, ["Add the missing keywords."]), "geo_score": GEO_MET,
+              "readability_score": {"signals": []},
+              "grounding_report": {"grounding_score": 68}}
+    after = {"seo_score": _seo(80, []), "geo_score": GEO_MET,
+             "readability_score": {"signals": []},
+             "grounding_report": {"grounding_score": 65}}  # 3-pt dip, both below 70
+    state = _targeted_env(monkeypatch, before, after)
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["seo:secondary_coverage"],
+    )
+    assert state["art"]["content_md"] == "X" * 500  # kept despite the small grounding dip
+
+
+async def test_targeted_loop_deterministically_unlinks_competitors(monkeypatch):
+    """Selecting the competitor-links issue strips rival links DETERMINISTICALLY (the LLM
+    reviser can't be trusted to), so the signal reliably improves and the pass is kept."""
+    body = "Intro. See [Rival](https://rival.com/pricing) for contrast. " + "word " * 200
+
+    def _seo(score):
+        return {"total": 82, "target": 80, "met": True, "signals": [
+            {"key": "competitor_links", "label": "No competitor links",
+             "score": score, "fixes": ["Unlink rival.com."]}]}
+
+    before = {"seo_score": _seo(50), "geo_score": GEO_MET, "grounding_report": GR_OK,
+              "readability_score": {"signals": []}, "business_id": "b1"}
+    after = {"seo_score": _seo(100), "geo_score": GEO_MET, "grounding_report": GR_OK,
+             "readability_score": {"signals": []}}
+    state = _targeted_env(monkeypatch, before, after, new_md=body)
+    monkeypatch.setattr(
+        revise.brands, "get_profile",
+        lambda d, bid: {"competitors": [{"domain": "rival.com"}]},
+    )
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["seo:competitor_links"],
+    )
+    assert "rival.com" not in state["art"]["content_md"]  # rival link stripped
+    assert "Rival" in state["art"]["content_md"]  # anchor text preserved
+
+
+async def test_targeted_loop_reraises_on_first_pass_infra_failure(monkeypatch):
+    # If the reviser never responds on the FIRST pass (e.g. a misconfigured agent), the
+    # loop re-raises so the caller marks the run failed — not a silent no-op "done".
+    state = _targeted_env(monkeypatch, _TARGETED_BEFORE, _TARGETED_BEFORE)
+    monkeypatch.setattr(
+        revise, "_surgical_tell_rewrite",
+        AsyncMock(side_effect=RuntimeError("no agent")),
+    )
+    raised = False
+    try:
+        await revise._targeted_loop(
+            MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+            ["readability:em_dashes"],
+        )
+    except RuntimeError:
+        raised = True
+    assert raised  # infra failure propagates
+    assert state["art"]["content_md"] == "body"  # nothing committed
+
+
+def test_thin_em_dashes_removes_every_em_dash():
+    out = revise._thin_em_dashes("A long aside — really — matters here.")
+    assert "—" not in out  # guaranteed drop
+    assert "  " not in out  # no doubled space left behind
+
+
+def test_localized_vs_nonlocalized_target_classification():
+    assert revise._localized_targets(
+        ["readability:em_dashes", "readability:tell_phrases", "readability:brand_voice"]
+    ) == {"em_dashes", "tell_phrases", "brand_voice"}
+    assert not revise._has_nonlocalized_target(["readability:brand_voice"])
+    assert revise._localized_targets(["readability:rhythm"]) == set()  # global, not local
+    assert not revise._has_nonlocalized_target(["readability:em_dashes"])
+    assert revise._has_nonlocalized_target(["seo:internal_links"])
+    assert revise._has_nonlocalized_target(["grounding:0"])
+    assert revise._has_nonlocalized_target(["readability:rhythm"])  # → whole-article
+
+
+async def test_targeted_loop_uses_surgical_rewrite_for_localized_tells(monkeypatch):
+    """A localized-tell selection (em-dashes) goes through the SURGICAL rewriter, not the
+    whole-article reviser, and is KEPT when the selected signal improves — even though a
+    sibling readability signal regressed (the user accepts minor collateral)."""
+    before = {
+        "seo_score": SEO_MET, "geo_score": GEO_MET, "grounding_report": GR_OK,
+        "readability_score": {"signals": [
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 30, "fixes": []},
+            {"key": "human_voice", "label": "Human voice", "score": 85},
+        ]},
+    }
+    after = {  # em_dashes 30→95 (selected ↑) while human_voice fell 85→60 (allowed)
+        "seo_score": SEO_MET, "geo_score": GEO_MET, "grounding_report": GR_OK,
+        "readability_score": {"signals": [
+            {"key": "em_dashes", "label": "Em-dash restraint", "score": 95, "fixes": []},
+            {"key": "human_voice", "label": "Human voice", "score": 60},
+        ]},
+    }
+    state = _targeted_env(monkeypatch, before, after)
+    surgical = AsyncMock(return_value="X" * 500)
+    monkeypatch.setattr(revise, "_surgical_tell_rewrite", surgical)
+    whole = AsyncMock(return_value="X" * 500)
+    monkeypatch.setattr(revise, "_revise_once", whole)
+    await revise._targeted_loop(
+        MagicMock(), MagicMock(), UUID(int=1), {}, None, None, {},
+        ["readability:em_dashes"],
+    )
+    surgical.assert_awaited()  # surgical path taken
+    whole.assert_not_awaited()  # NOT the whole-article reviser
+    assert state["art"]["content_md"] == "X" * 500  # kept despite the human_voice dip

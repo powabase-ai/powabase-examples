@@ -39,10 +39,123 @@ def test_render_standalone_escapes_jsonld():
     assert "\\u003c/script>" in doc  # closing-tag escaped
 
 
-def test_render_markdown_has_frontmatter():
+def test_render_markdown_frontmatter_shape():
     out = svc.render_markdown(ARTICLE)
-    assert out.startswith("---")
-    assert "title:" in out and "# Heading" in out
+    assert out.startswith("---\n")
+    assert 'title: "Title"' in out
+    assert 'description: "A description."' in out
+    assert "tags:\n  - " in out and '"kw"' in out
+    assert "draft: true" in out  # ARTICLE has no status → not publishable
+    # The body's leading '# Heading' H1 is stripped (the blog renders `title` as the
+    # page h1) — a body H1 would duplicate it. The body starts after a blank line.
+    assert "---\n\nBody text." in out
+    assert "# Heading" not in out
+
+
+def test_render_markdown_strips_only_the_leading_h1():
+    # A '## ' subheading is NOT an H1 → kept; only the single leading '# ' is dropped.
+    out = svc.render_markdown({**ARTICLE, "content_md": "# Title\n\n## Section\n\nx"})
+    assert "## Section" in out
+    assert out.count("# ") == 1  # just the surviving '## '
+
+
+def test_render_markdown_published_is_dated_and_not_draft():
+    out = svc.render_markdown(
+        {**ARTICLE, "status": "published", "updated_at": "2026-06-25T12:00:00Z"}
+    )
+    assert "publishedDate: 2026-06-25" in out
+    assert "draft: false" in out
+
+
+def test_render_markdown_approved_is_not_draft():
+    # Exporting an APPROVED (editorially signed-off) article should seed the live blog.
+    out = svc.render_markdown({**ARTICLE, "status": "approved"})
+    assert "draft: false" in out
+
+
+def test_render_markdown_in_review_stays_draft():
+    out = svc.render_markdown({**ARTICLE, "status": "in_review"})
+    assert "draft: true" in out
+
+
+def test_render_standalone_has_single_h1():
+    # The document emits <h1>{title}</h1>; the body's own leading H1 is stripped so the
+    # page isn't double-titled.
+    doc = svc.render_standalone_html({**ARTICLE, "content_md": "# Title\n\nBody."})
+    assert doc.count("<h1>") == 1
+
+
+def test_export_markdown_fills_author_and_tags_and_export_date(monkeypatch):
+    from datetime import UTC, datetime
+
+    from rankforge_backend.services import business_profiles as brands
+
+    db = MagicMock()
+    db.fetch_one.return_value = {"keywords": ["auth", "sso"]}  # the keywords select
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        lambda d, aid: {**ARTICLE, "business_id": BID, "status": "published",
+                        "author": None, "updated_at": "2026-06-25T00:00:00Z"},
+    )
+    monkeypatch.setattr(brands, "get_profile", lambda d, bid: {"name": "Acme"})
+    monkeypatch.setattr(svc.linking, "resolve_links", lambda d, bid, md: md)
+
+    content, media = svc.export(db, AID, "markdown")
+    assert media == "text/markdown"
+    assert 'author: "Acme Team"' in content  # no override / default → "<Brand> Team"
+    assert '"auth"' in content and '"sso"' in content  # keywords → tags
+    assert "draft: false" in content
+    # A published article with NO publication record yet (first export) → today.
+    today = datetime.now(UTC).date().isoformat()
+    assert f"publishedDate: {today}" in content
+
+
+def test_export_reuses_first_publication_date_for_published(monkeypatch):
+    # Re-exporting a live post must NOT churn its date — it uses the first successful
+    # publication's date, stable across re-exports.
+    from rankforge_backend.services import business_profiles as brands
+
+    db = MagicMock()
+    # 1st fetch_one = keywords select; 2nd = min(published_at) for the publish date.
+    db.fetch_one.side_effect = [
+        {"keywords": []},
+        {"first": "2026-06-01T09:00:00Z"},
+    ]
+    monkeypatch.setattr(svc.linking, "resolve_links", lambda d, bid, md: md)
+    monkeypatch.setattr(brands, "get_profile", lambda d, bid: {"name": "Acme"})
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        lambda d, aid: {**ARTICLE, "business_id": BID, "status": "published",
+                        "author": "A"},
+    )
+    content, _ = svc.export(db, AID, "markdown")
+    assert "publishedDate: 2026-06-01" in content  # stable, not today
+
+
+def test_export_author_override_beats_brand_default(monkeypatch):
+    from rankforge_backend.services import business_profiles as brands
+
+    db = MagicMock()
+    db.fetch_one.return_value = {"keywords": []}
+    monkeypatch.setattr(svc.linking, "resolve_links", lambda d, bid, md: md)
+    monkeypatch.setattr(
+        brands, "get_profile",
+        lambda d, bid: {"name": "Acme", "default_author": "Acme Editorial"},
+    )
+    # No per-article override → brand default_author.
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        lambda d, aid: {**ARTICLE, "business_id": BID, "author": None},
+    )
+    content, _ = svc.export(db, AID, "markdown")
+    assert 'author: "Acme Editorial"' in content
+    # Per-article override wins over the brand default.
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        lambda d, aid: {**ARTICLE, "business_id": BID, "author": "Jane Doe"},
+    )
+    content2, _ = svc.export(db, AID, "markdown")
+    assert 'author: "Jane Doe"' in content2
 
 
 # --- webhook SSRF guard ---
@@ -250,8 +363,10 @@ def test_publish_route(monkeypatch):
     assert resp.json()["status"] == "success"
 
 
-def test_export_route_sets_download_header(monkeypatch):
+def test_export_route_sets_slug_mdx_filename(monkeypatch):
     monkeypatch.setattr(svc, "export", lambda db, aid, fmt: ("# md", "text/markdown"))
     resp = _client(_brand_db()).get(f"/api/articles/{AID}/export?format=markdown")
     assert resp.status_code == 200
-    assert "attachment" in resp.headers.get("content-disposition", "")
+    cd = resp.headers.get("content-disposition", "")
+    assert "attachment" in cd
+    assert 'filename="title.mdx"' in cd  # <slug>.mdx

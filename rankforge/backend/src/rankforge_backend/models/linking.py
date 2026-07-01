@@ -35,6 +35,13 @@ class BrokenLink(BaseModel):
     created_at: datetime | None = None
 
 
+class RemoveLinkRequest(BaseModel):
+    # True = "unlink" (keep the anchor words as plain text, drop the URL); False =
+    # remove the whole [text](url) from the prose. Default to the safe, non-destructive
+    # option so a one-click fix never silently deletes a sentence's words.
+    keep_text: bool = True
+
+
 class RelinkConfig(BaseModel):
     business_id: UUID
     enabled: bool

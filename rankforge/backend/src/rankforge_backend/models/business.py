@@ -22,12 +22,16 @@ class BusinessProfileCreate(BaseModel):
     description: str | None = Field(default=None, max_length=2_000)
     niche: str | None = Field(default=None, max_length=200)
     audience: str | None = Field(default=None, max_length=400)
-    seed_topics: list[_Tag] = Field(default=[], max_length=50)
+    seed_topics: list[_Tag] = Field(default=[], max_length=100)
     target_keywords: list[_Tag] = Field(default=[], max_length=100)
     competitors: list[Competitor] = Field(default=[], max_length=50)
     brand_kb_id: str | None = Field(default=None, max_length=200)
     sitemap_url: str | None = Field(default=None, max_length=2_000)
     url_pattern: str | None = Field(default=None, max_length=2_000)
+    default_author: str | None = Field(default=None, max_length=200)
+    # Public storage URL for the brand logo (set via POST /{id}/logo). Client can also
+    # clear it by PATCHing null.
+    logo_url: str | None = Field(default=None, max_length=2_000)
 
 
 class BusinessProfileUpdate(BaseModel):
@@ -36,12 +40,16 @@ class BusinessProfileUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=2_000)
     niche: str | None = Field(default=None, max_length=200)
     audience: str | None = Field(default=None, max_length=400)
-    seed_topics: list[_Tag] | None = Field(default=None, max_length=50)
+    seed_topics: list[_Tag] | None = Field(default=None, max_length=100)
     target_keywords: list[_Tag] | None = Field(default=None, max_length=100)
     competitors: list[Competitor] | None = Field(default=None, max_length=50)
     brand_kb_id: str | None = Field(default=None, max_length=200)
     sitemap_url: str | None = Field(default=None, max_length=2_000)
     url_pattern: str | None = Field(default=None, max_length=2_000)
+    default_author: str | None = Field(default=None, max_length=200)
+    # Public storage URL for the brand logo (set via POST /{id}/logo). Client can also
+    # clear it by PATCHing null.
+    logo_url: str | None = Field(default=None, max_length=2_000)
 
 
 class BusinessProfile(BaseModel):
@@ -57,6 +65,8 @@ class BusinessProfile(BaseModel):
     brand_kb_id: str | None = None
     sitemap_url: str | None = None
     url_pattern: str | None = None
+    default_author: str | None = None
+    logo_url: str | None = None
     materials_progress: dict = {}
     created_by: UUID | None = None
     created_at: datetime

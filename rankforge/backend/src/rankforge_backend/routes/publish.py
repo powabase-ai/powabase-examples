@@ -29,7 +29,7 @@ router = APIRouter(
 # No auth — published articles are public by definition.
 public_router = APIRouter(prefix="/api/public", tags=["public"])
 
-_EXT = {"markdown": "md", "html": "html"}
+_EXT = {"markdown": "mdx", "html": "html"}
 
 
 @router.get("/{article_id}/export")
@@ -49,11 +49,13 @@ def export_article(
             status.HTTP_404_NOT_FOUND, "article not found or unknown format"
         )
     content, media_type = result
+    # Filename is the URL slug → content/blog/<slug>.mdx serves at /blog/<slug>.
+    slug = article.get("slug") or str(article_id)
     return Response(
         content=content,
         media_type=media_type,
         headers={
-            "Content-Disposition": f'attachment; filename="article.{_EXT[format]}"'
+            "Content-Disposition": f'attachment; filename="{slug}.{_EXT[format]}"'
         },
     )
 

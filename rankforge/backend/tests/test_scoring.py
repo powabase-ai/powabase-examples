@@ -39,6 +39,13 @@ def test_seo_signal_weights_sum_to_one():
     assert round(sum(sig["weight"] for sig in s["signals"]), 6) == 1.0
 
 
+def test_readability_signal_weights_sum_to_one():
+    # Same invariant for readability — a new signal (e.g. brand_voice) must shave a
+    # sibling, not push the denominator past 1.0 and silently dilute every other signal.
+    s = scoring.score_readability(MD, {"human_voice": 80, "flow": 80})
+    assert round(sum(sig["weight"] for sig in s["signals"]), 6) == 1.0
+
+
 def test_low_keyword_density_scores_low_and_names_the_keyword():
     # A primary keyword that appears ~once in a long article is genuinely under-used;
     # the recalibrated band must score that low (the old 1.5 slack scored it ~77).
@@ -56,6 +63,39 @@ def test_secondary_coverage_fix_lists_the_missing_keywords():
     sc = next(x for x in s["signals"] if x["key"] == "secondary_coverage")
     assert sc["fixes"] and "beta term" in sc["fixes"][0]  # the missing one is named
     assert "alpha term" not in sc["fixes"][0]  # already covered → not asked for again
+
+
+def test_competitor_links_flags_rival_and_names_it():
+    # A dofollow link to a configured competitor domain scores the signal down and the
+    # fix names the exact domain to unlink; the brand's own + neutral links are ignored.
+    body = (
+        "# Guide\n\nWe compare options. See [Rival](https://www.rival.com/pricing) "
+        "and [our docs](https://mybrand.com/docs) and [a study](https://research.org/x)."
+    )
+    s = scoring.score_seo(
+        body, "Guide", "x" * 140, {"primary_keyword": "guide"},
+        competitor_hosts={"rival.com"},
+    )
+    cl = next(x for x in s["signals"] if x["key"] == "competitor_links")
+    assert cl["score"] == 50  # one competitor link → 100 - 1*50
+    assert cl["fixes"] and "rival.com" in cl["fixes"][0]
+
+
+def test_competitor_links_matches_subdomains():
+    body = "# G\n\n[Rival blog](https://blog.rival.com/post)."
+    s = scoring.score_seo(
+        body, "G", "x" * 140, {"primary_keyword": "g"}, competitor_hosts={"rival.com"}
+    )
+    cl = next(x for x in s["signals"] if x["key"] == "competitor_links")
+    assert cl["score"] == 50  # blog.rival.com matches the rival.com competitor
+
+
+def test_competitor_links_clean_when_no_hosts():
+    # No competitors configured (or none passed) → the guardrail is a clean 100 no-op.
+    body = "# Guide\n\n[Rival](https://rival.com/x) is one option."
+    s = scoring.score_seo(body, "Guide", "x" * 140, {"primary_keyword": "guide"})
+    cl = next(x for x in s["signals"] if x["key"] == "competitor_links")
+    assert cl["score"] == 100 and cl["fixes"] == []
 
 
 def test_geo_deterministic_signals():
@@ -125,6 +165,89 @@ def test_readability_clean_prose_scores_well():
     by = {x["key"]: x["score"] for x in scoring.score_readability(clean, None)["signals"]}
     assert by["ai_vocabulary"] == 100
     assert by["tell_phrases"] == 100
+
+
+def test_readability_flags_antithesis_reframe():
+    # "X isn't A. It's B" / "isn't about A, it's about B" — the negate-then-reveal tic.
+    md = (
+        "The way forward isn't more tools. It's better process. "
+        "Success isn't about speed, it's about consistency."
+    )
+    by = {x["key"]: x["score"] for x in scoring.score_readability(md, None)["signals"]}
+    assert by["tell_phrases"] < 100  # the reframe construction was detected
+
+
+def test_readability_flags_genuinely_intensifier():
+    # "genuinely" as an intensifier is an AI-register tell → dings ai_vocabulary.
+    md = "This is genuinely useful, genuinely matters, and genuinely helps you ship."
+    by = {x["key"]: x["score"] for x in scoring.score_readability(md, None)["signals"]}
+    assert by["ai_vocabulary"] < 100
+
+
+def test_antithesis_detector_ignores_plain_negation():
+    # A negation that is NOT the reframe (no "it's" payoff) must not trip the detector.
+    clean = "The build is not green. We rolled back the change and paged the on-call."
+    assert scoring._TELL_RE.search(clean) is None
+
+
+def test_antithesis_detector_ignores_possessive_its():
+    # Possessive "its" after a negation must NOT trip the reframe detector (it requires
+    # the contraction apostrophe in the payoff, not the possessive).
+    assert scoring._TELL_RE.search(
+        "The API isn't deprecated, but its replacement is faster."
+    ) is None
+    assert scoring._TELL_RE.search(
+        "The library wasn't slow, and its footprint stayed small."
+    ) is None
+    # The genuine contraction "it's" still trips it.
+    assert scoring._TELL_RE.search(
+        "The API isn't deprecated, it's just renamed."
+    ) is not None
+
+
+def test_readability_flags_detached_brand_voice():
+    # The brand's own blog referring to itself in the third person / hedging its own
+    # docs — the two narrowed, low-false-positive tells that survive.
+    md = (
+        "Powabase isolates every project. "
+        "The vendor asserts that each runtime enforces hard, non-negotiable step "
+        "limits across the whole execution path, even under sustained concurrent load. "
+        "It works. "
+        "According to Powabase's own internal docs, the safeguards always hold. "
+        "The vendor claims strong, sensible defaults. "
+        "Setup takes minutes, not days, and those defaults suit most teams out of "
+        "the box. "
+        "Try it."
+    )
+    sigs = {s["key"]: s for s in scoring.score_readability(md, None)["signals"]}
+    assert sigs["brand_voice"]["score"] < 40  # 3 detached refs → dinged hard
+    assert sigs["brand_voice"]["fixes"]  # actionable fix offered
+    # ADVISORY, not a gate: even a badly-dinged brand_voice must NOT force the axis to
+    # miss target when the prose is otherwise strong (this drove needless refines).
+    res = scoring.score_readability(md, {"human_voice": 95, "flow": 95})
+    assert res["total"] >= scoring.READABILITY_TARGET
+    assert res["met"] is True
+
+
+def test_brand_voice_ignores_competitor_comparisons():
+    # Third-person attribution + hedging is EXACTLY what the writer prompt wants for
+    # competitor comparisons — the narrowed regex must not false-positive on it.
+    comp = (
+        "Acme claims to be the fastest option on the market. "
+        "Supabase allegedly caps row size. The platform states its pricing publicly, "
+        "and the company asserts 99.9% uptime across all regions."
+    )
+    sigs = {s["key"]: s for s in scoring.score_readability(comp, None)["signals"]}
+    assert sigs["brand_voice"]["score"] == 100  # no false positive on rival claims
+
+
+def test_detached_voice_ignores_first_person_and_neutral_verbs():
+    # First-person ("our own") and neutral verbs ("supports") must NOT trip it.
+    clean = (
+        "According to our own benchmarks, Powabase isolates each project. "
+        "Our runtime enforces step limits. The platform supports batching."
+    )
+    assert scoring._DETACHED_VOICE_RE.search(clean) is None
 
 
 def test_readability_uses_llm_human_voice_when_present():

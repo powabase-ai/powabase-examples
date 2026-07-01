@@ -9,9 +9,11 @@ import {
   ExternalLink,
   Link2,
   Loader2,
+  Scissors,
   Search,
   Settings,
   Sparkles,
+  Trash2,
   Unlink,
   X,
 } from "lucide-react";
@@ -30,6 +32,7 @@ import {
   useGenerateLink,
   useIgnoreBrokenLink,
   useLinkSuggestions,
+  useRemoveBrokenLink,
   useSuggestLinks,
   useUpdateArticle,
 } from "@/lib/hooks/useArticles";
@@ -43,9 +46,12 @@ import { cn } from "@/lib/utils";
 export function InternalLinksPanel({
   articleId,
   brandId,
+  onLocate,
 }: {
   articleId: string;
   brandId: string;
+  /** Jump the article preview to where a given URL is linked. */
+  onLocate?: (url: string) => void;
 }) {
   const { profile } = useAuth();
   const canEdit = canApprove(profile?.role);
@@ -125,6 +131,8 @@ export function InternalLinksPanel({
       </p>
 
       <CanonicalUrlField articleId={articleId} brand={brand.data} />
+
+      <AuthorField articleId={articleId} brand={brand.data} />
 
       {brand.data && !hasPattern ? (
         <div className="rounded-md border border-[rgb(var(--ember))]/30 bg-[rgb(var(--ember))]/[0.06] px-3 py-2.5 text-xs">
@@ -261,7 +269,11 @@ export function InternalLinksPanel({
         </ul>
       )}
 
-      <BrokenLinksSection articleId={articleId} canEdit={canEdit} />
+      <BrokenLinksSection
+        articleId={articleId}
+        canEdit={canEdit}
+        onLocate={onLocate}
+      />
     </div>
   );
 }
@@ -341,19 +353,120 @@ function CanonicalUrlField({
   );
 }
 
+/** Per-article author byline for export frontmatter — overrides the brand default. */
+function AuthorField({
+  articleId,
+  brand,
+}: {
+  articleId: string;
+  brand?: BusinessProfile;
+}) {
+  const { profile } = useAuth();
+  const canEdit = canApprove(profile?.role);
+  const { data: article } = useArticle(articleId);
+  const update = useUpdateArticle(articleId);
+  const [value, setValue] = React.useState("");
+  React.useEffect(() => setValue(article?.author ?? ""), [article?.author]);
+
+  if (!canEdit) return null;
+  const fallback =
+    brand?.default_author || (brand?.name ? `${brand.name} Team` : "");
+  const dirty = value.trim() !== (article?.author ?? "");
+
+  return (
+    <div className="space-y-1.5 rounded-md border border-border p-2.5">
+      <label className="text-xs font-medium text-muted-foreground">
+        Author (this article)
+      </label>
+      <div className="flex gap-2">
+        <Input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={fallback || "Acme Team"}
+          className="h-8 text-xs"
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            update.mutate(
+              { author: value.trim() }, // "" clears the override → brand default
+              {
+                onSuccess: () => toast.success("Author saved"),
+                onError: (e) =>
+                  toast.error(e instanceof Error ? e.message : "Save failed"),
+              }
+            )
+          }
+          disabled={!dirty || update.isPending}
+        >
+          {update.isPending && <Loader2 className="animate-spin" />}
+          Save
+        </Button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        {value.trim() ? (
+          "Overrides the brand default for this article."
+        ) : fallback ? (
+          <>
+            Uses the brand default: <span className="font-data">{fallback}</span>
+          </>
+        ) : (
+          "Set a default author in brand settings, or enter one here."
+        )}
+      </p>
+    </div>
+  );
+}
+
 /** Validate this article's outbound links (internal targets + external URLs) and let
  *  an editor fix the prose or ignore a finding. */
 function BrokenLinksSection({
   articleId,
   canEdit,
+  onLocate,
 }: {
   articleId: string;
   canEdit: boolean;
+  onLocate?: (url: string) => void;
 }) {
   const { data } = useBrokenLinks(articleId);
   const check = useCheckLinks(articleId);
   const ignore = useIgnoreBrokenLink(articleId);
+  const remove = useRemoveBrokenLink(articleId);
+  const [acting, setActing] = React.useState<{ id: string; keep: boolean } | null>(
+    null
+  );
   const open = (data ?? []).filter((b) => b.status === "open");
+  const busy = ignore.isPending || remove.isPending;
+
+  function doRemove(findingId: string, keepText: boolean) {
+    if (
+      !keepText &&
+      !window.confirm(
+        "Remove this link and let AI rephrase the sentence so it reads naturally? " +
+          "(Use “Unlink” to just drop the link and keep the words as-is.)"
+      )
+    )
+      return;
+    setActing({ id: findingId, keep: keepText });
+    remove.mutate(
+      { findingId, keepText },
+      {
+        onSuccess: ({ repaired }) =>
+          repaired === "mechanical"
+            ? toast.warning(
+                "Removed — automatic rephrasing was unavailable, please review the paragraph"
+              )
+            : toast.success(
+                keepText ? "Unlinked — text kept" : "Removed — sentence rephrased"
+              ),
+        onError: (e) =>
+          toast.error(e instanceof Error ? e.message : "Could not edit the link"),
+        onSettled: () => setActing(null),
+      }
+    );
+  }
 
   return (
     <div className="space-y-2 border-t border-border pt-3">
@@ -388,40 +501,78 @@ function BrokenLinksSection({
         <p className="text-xs text-muted-foreground">No broken links found.</p>
       ) : (
         <ul className="space-y-2">
-          {open.map((b) => (
-            <li
-              key={b.id}
-              className="rounded-md border border-destructive/30 bg-destructive/[0.04] p-2.5 text-sm"
-            >
-              <div className="flex items-start gap-1.5">
-                <ExternalLink className="mt-0.5 size-3.5 shrink-0 text-destructive" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium">
-                    {b.anchor_text || b.url}
+          {open.map((b) => {
+            const unlinking = acting?.id === b.id && acting.keep;
+            const removing = acting?.id === b.id && !acting.keep;
+            return (
+              <li
+                key={b.id}
+                className="rounded-md border border-destructive/30 bg-destructive/[0.04] p-2.5 text-sm"
+              >
+                <button
+                  type="button"
+                  onClick={() => onLocate?.(b.url)}
+                  className="flex w-full items-start gap-1.5 text-left"
+                  title="Find this link in the article"
+                >
+                  <ExternalLink className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-medium underline-offset-2 hover:underline">
+                      {b.anchor_text || b.url}
+                    </div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {b.url}
+                    </div>
+                    <div className="mt-0.5 text-xs text-destructive">
+                      {b.reason || "broken"} · click to find in article
+                    </div>
                   </div>
-                  <div className="truncate text-xs text-muted-foreground">
-                    {b.url}
+                </button>
+                {canEdit && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => doRemove(b.id, true)}
+                      disabled={busy}
+                      title="Drop the link but keep the words"
+                    >
+                      {unlinking ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <Scissors />
+                      )}
+                      Unlink
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => doRemove(b.id, false)}
+                      disabled={busy}
+                      title="Remove the link and let AI mend the sentence"
+                    >
+                      {removing ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <Trash2 />
+                      )}
+                      Remove
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => ignore.mutate(b.id)}
+                      disabled={busy}
+                      title="Leave it; stop flagging it"
+                    >
+                      <X />
+                      Ignore
+                    </Button>
                   </div>
-                  <div className="mt-0.5 text-xs text-destructive">
-                    {b.reason || "broken"}
-                  </div>
-                </div>
-              </div>
-              {canEdit && (
-                <div className="mt-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => ignore.mutate(b.id)}
-                    disabled={ignore.isPending}
-                  >
-                    <X />
-                    Ignore
-                  </Button>
-                </div>
-              )}
-            </li>
-          ))}
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

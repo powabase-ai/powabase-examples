@@ -22,8 +22,9 @@ import {
   useCreateBrand,
   useDeleteBrand,
   useUpdateBrand,
+  useUploadBrandLogo,
 } from "@/lib/hooks/useBrands";
-import type { BusinessProfileInput } from "@/lib/api";
+import type { BusinessProfile, BusinessProfileInput } from "@/lib/api";
 
 export default function BrandSettings({
   params,
@@ -109,6 +110,8 @@ export default function BrandSettings({
         </CardContent>
       </Card>
 
+      <BrandLogoCard brand={brand} />
+
       <Card className="mt-6 border-[rgb(var(--destructive))]/30">
         <CardHeader>
           <CardTitle className="text-base text-destructive">Danger zone</CardTitle>
@@ -132,5 +135,95 @@ export default function BrandSettings({
       />
       </PageBody>
     </Page>
+  );
+}
+
+/** Brand logo: upload to public storage, or remove. Saves immediately (independent of
+ *  the profile form). Shown in the brand switcher. */
+function BrandLogoCard({ brand }: { brand?: BusinessProfile }) {
+  const upload = useUploadBrandLogo();
+  const update = useUpdateBrand();
+  if (!brand) return null;
+
+  function onPick(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Image must be under 5 MB");
+      return;
+    }
+    upload.mutate(
+      { id: brand!.id, file },
+      {
+        onSuccess: () => toast.success("Logo updated"),
+        onError: (err) =>
+          toast.error(err instanceof Error ? err.message : "Upload failed"),
+      }
+    );
+  }
+
+  return (
+    <Card className="mt-6">
+      <CardHeader>
+        <CardTitle className="text-base">Logo</CardTitle>
+      </CardHeader>
+      <CardContent className="flex items-center gap-4">
+        {brand.logo_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={brand.logo_url}
+            alt="Brand logo"
+            className="size-14 shrink-0 rounded-md border border-border bg-white object-contain"
+          />
+        ) : (
+          <div className="flex size-14 shrink-0 items-center justify-center rounded-md border border-dashed border-border text-[10px] text-muted-foreground">
+            No logo
+          </div>
+        )}
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-2">
+            <label className="inline-flex h-8 cursor-pointer items-center rounded-md border border-input px-3 text-xs font-medium hover:bg-secondary">
+              {upload.isPending
+                ? "Uploading…"
+                : brand.logo_url
+                  ? "Replace"
+                  : "Upload"}
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="hidden"
+                onChange={onPick}
+                disabled={upload.isPending}
+              />
+            </label>
+            {brand.logo_url && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() =>
+                  update.mutate(
+                    { id: brand.id, data: { logo_url: null } },
+                    {
+                      onSuccess: () => toast.success("Logo removed"),
+                      onError: (err) =>
+                        toast.error(
+                          err instanceof Error ? err.message : "Remove failed"
+                        ),
+                    }
+                  )
+                }
+                disabled={update.isPending}
+              >
+                Remove
+              </Button>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            PNG, JPG, or WebP, up to 5 MB. Shown in the brand switcher.
+          </p>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

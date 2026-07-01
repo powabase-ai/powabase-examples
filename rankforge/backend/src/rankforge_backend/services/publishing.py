@@ -10,7 +10,9 @@ time it is needed (public SSR page, webhook payload, export) and is never persis
 import html as _html
 import ipaddress
 import json
+import re
 import socket
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -24,6 +26,20 @@ from . import generation as gen_svc
 from . import linking
 
 _MD_EXTENSIONS = ["extra", "sane_lists", "toc"]
+
+# A single leading '# H1' line (generation prepends the title to content_md). Not '## '/
+# '### ' — the '[ \t]+' after '#' can't match a second '#'. Used where the renderer emits
+# the title ITSELF (MDX frontmatter, standalone <h1>) so the body H1 doesn't duplicate it.
+_LEADING_H1_RE = re.compile(r"\A\s*#[ \t]+[^\n]*(?:\n+|\Z)")
+# Article statuses whose export should go live immediately (draft: false). Genuine
+# drafts / in-review pieces stay hidden (draft: true).
+_PUBLISHABLE_STATUSES = frozenset({"approved", "published"})
+
+
+def _strip_leading_h1(content_md: str) -> str:
+    """Drop the single leading '# Title' line from a body when the title is rendered
+    separately, so exports don't show two H1s (bad for SEO, visually redundant)."""
+    return _LEADING_H1_RE.sub("", content_md or "", count=1)
 
 _PUBLICATION_COLUMNS = (
     "id, article_id, target_type, target_id, external_id, url, status, "
@@ -67,7 +83,9 @@ def _jsonld_script(article: dict[str, Any]) -> str:
 def render_standalone_html(article: dict[str, Any]) -> str:
     """A complete, self-contained HTML document with JSON-LD + meta in <head> —
     crawlable as-is when exported or served."""
-    body = render_body_html(article.get("content_md") or "")
+    # Strip the body's leading '# Title' — this document renders <h1>{title}</h1> itself,
+    # so keeping it would emit two H1s.
+    body = render_body_html(_strip_leading_h1(article.get("content_md") or ""))
     title = _html.escape(article.get("title") or "")
     return f"""<!doctype html>
 <html lang="en">
@@ -87,16 +105,47 @@ def render_standalone_html(article: dict[str, Any]) -> str:
 """
 
 
+def _fm_date(val: Any) -> str:
+    """YYYY-MM-DD from a datetime (psycopg) or an ISO-ish string."""
+    if hasattr(val, "date"):
+        return val.date().isoformat()
+    return str(val or "")[:10]
+
+
 def render_markdown(article: dict[str, Any]) -> str:
-    """Portable Markdown with YAML front matter (title/description/keywords)."""
-    fm_lines = ["---", f"title: {json.dumps(article.get('title') or '')}"]
-    if article.get("meta_description"):
-        fm_lines.append(f"description: {json.dumps(article['meta_description'])}")
-    kws = article.get("keywords") or []
-    if kws:
-        fm_lines.append(f"keywords: {json.dumps(kws)}")
-    fm_lines.append("---\n")
-    return "\n".join(fm_lines) + (article.get("content_md") or "")
+    """Export as a blog `.mdx`: YAML frontmatter + the Markdown body.
+
+    Matches the target blog's `content/blog/<slug>.mdx` shape — title, description,
+    publishedDate, author, tags, draft — followed by a blank line and the body. Strings
+    are JSON-quoted so a title/description containing a colon, `#`, etc. stays valid YAML.
+
+    The title is the frontmatter `title` (the blog renders it as the page <h1>), so the
+    body's own leading '# Title' is stripped — otherwise the page shows two H1s. `draft`
+    is false once the article is approved/published (so an export actually seeds the live
+    blog), true only for genuine drafts/in-review pieces."""
+    fm = [
+        "---",
+        f"title: {json.dumps(article.get('title') or '')}",
+        f"description: {json.dumps(article.get('meta_description') or '')}",
+    ]
+    published = _fm_date(
+        article.get("published_date")
+        or article.get("updated_at")
+        or article.get("created_at")
+    )
+    if published:
+        fm.append(f"publishedDate: {published}")
+    if article.get("author"):
+        fm.append(f"author: {json.dumps(article['author'])}")
+    tags = article.get("keywords") or []
+    if tags:
+        fm.append("tags:")
+        fm.extend(f"  - {json.dumps(t)}" for t in tags)
+    is_draft = article.get("status") not in _PUBLISHABLE_STATUSES
+    fm.append(f"draft: {'true' if is_draft else 'false'}")
+    fm.append("---")
+    body = _strip_leading_h1(article.get("content_md") or "")
+    return "\n".join(fm) + "\n\n" + body
 
 
 # --- publishing ---
@@ -203,11 +252,14 @@ async def publish(
             validate_webhook_url(url)
         except ValueError:
             return _record(db, article_id, "webhook", status="failed", url=url or None)
-        resolved_md = linking.resolve_links(
-            db,
-            article["business_id"],
-            article.get("content_md") or "",
-            fallback_base=public_base_url,
+        resolved_md = linking.strip_competitor_links(
+            linking.resolve_links(
+                db,
+                article["business_id"],
+                article.get("content_md") or "",
+                fallback_base=public_base_url,
+            ),
+            linking.competitor_hosts(brand),
         )
         payload = {
             "id": str(article_id),
@@ -291,17 +343,59 @@ def get_published(db: Database, article_id: UUID) -> dict[str, Any] | None:
     )
 
 
+def _export_published_date(db: Database, article_id: UUID, status: str | None) -> str:
+    """The date to stamp on the export. For a PUBLISHED article, the first successful
+    publication's date (stable across re-exports); otherwise today (first export)."""
+    if status == "published":
+        first = db.fetch_one(
+            "select min(published_at) as first from public.publications "
+            "where article_id = %s and published_at is not null",
+            (article_id,),
+        )
+        if first and first.get("first"):
+            return _fm_date(first["first"])
+    return datetime.now(UTC).date().isoformat()
+
+
 def export(db: Database, article_id: UUID, fmt: str) -> tuple[str, str] | None:
     """Return (content, media_type) for a download, or None if the article is gone.
     Internal-link refs are resolved to live canonical URLs in the exported file."""
     article = gen_svc.get_article(db, article_id)
     if article is None:
         return None
+    # Enrich for the frontmatter: keywords → tags (not in the default article select),
+    # and an author byline derived from the brand name. Local import avoids a cycle.
+    from . import business_profiles as brands_svc
+
+    brand = (
+        brands_svc.get_profile(db, article["business_id"])
+        if article.get("business_id")
+        else None
+    )
+    kw_row = db.fetch_one(
+        "select keywords from public.articles where id = %s", (article_id,)
+    )
+    brand_name = (brand or {}).get("name")
+    # Author resolves: per-article override → brand default → "<Brand> Team" fallback.
+    author = (
+        article.get("author")
+        or (brand or {}).get("default_author")
+        or (f"{brand_name} Team" if brand_name else None)
+    )
     article = {
         **article,
-        "content_md": linking.resolve_links(
-            db, article["business_id"], article.get("content_md") or ""
+        "content_md": linking.strip_competitor_links(
+            linking.resolve_links(
+                db, article["business_id"], article.get("content_md") or ""
+            ),
+            linking.competitor_hosts(brand),
         ),
+        "keywords": (kw_row or {}).get("keywords") or [],
+        "author": author,
+        # publishedDate: for a live post, keep it STABLE across re-exports — use the first
+        # successful publication's date so re-exporting to update a post doesn't churn its
+        # date. Only a not-yet-published article (first export) defaults to today.
+        "published_date": _export_published_date(db, article_id, article.get("status")),
     }
     if fmt == "markdown":
         return render_markdown(article), "text/markdown"

@@ -1,6 +1,7 @@
 """Article (Stage C) schemas."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -26,6 +27,7 @@ class ArticleUpdate(BaseModel):
     meta_description: str | None = None
     status: str | None = None  # draft|in_review|approved|published|archived
     canonical_url: str | None = None  # override for where this article lives
+    author: str | None = None  # per-article override of the brand's default author
 
 
 class Article(BaseModel):
@@ -53,6 +55,7 @@ class Article(BaseModel):
     # here too, not as inert markdown text the reviewer can't catch).
     content_html: str | None = None
     canonical_url: str | None = None
+    author: str | None = None
     cluster_id: UUID | None = None
     cluster_role: str | None = None
     created_at: datetime
@@ -73,3 +76,16 @@ class ArticleVersion(BaseModel):
     article_id: UUID
     created_at: datetime
     word_count: int | None = None
+
+
+class RemoveLinkResult(BaseModel):
+    """Result of a one-click broken-link removal. `repaired` tells the UI HOW the prose
+    was mended, so a mechanical strip can be flagged for a human to eyeball:
+      'unlinked'   — anchor words kept, URL dropped (keep_text); nothing to mend.
+      'llm'        — the copy-editor rewrote the affected paragraph(s) cleanly.
+      'mechanical' — the LLM was unavailable/failed on >=1 block, so a regex strip
+                     removed the link; it can leave a rough seam worth a human read.
+      'none'       — the URL wasn't in the body (stale finding); article unchanged."""
+
+    article: Article
+    repaired: Literal["unlinked", "llm", "mechanical", "none"]

@@ -206,26 +206,108 @@ def set_pillar(
     )
     if art is None:
         return None
-    db.execute(
-        "update public.articles set cluster_role = 'member' "
-        "where cluster_id = %s and cluster_role = 'pillar'",
-        (cluster_id,),
+    # One transaction so the pillar swap can't half-apply. FIRST vacate any OTHER cluster
+    # this article currently anchors, so promoting it here never leaves a dangling
+    # pillar_article_id pointing at an article that moved (mirrors move_article).
+    with db.connection() as conn:
+        conn.execute(
+            "update public.content_clusters set pillar_article_id = null, "
+            "updated_at = now() where pillar_article_id = %s and id <> %s",
+            (article_id, cluster_id),
+        )
+        conn.execute(
+            "update public.articles set cluster_role = 'member' "
+            "where cluster_id = %s and cluster_role = 'pillar'",
+            (cluster_id,),
+        )
+        conn.execute(
+            "update public.articles set cluster_id = %s, cluster_role = 'pillar' "
+            "where id = %s",
+            (cluster_id, article_id),
+        )
+        row = conn.execute(
+            "update public.content_clusters set pillar_article_id = %s, "
+            f"pillar_locked = true, updated_at = now() where id = %s returning {_COLUMNS}",
+            (article_id, cluster_id),
+        ).fetchone()
+    return row
+
+
+async def create_cluster(
+    client: PowabaseClient,
+    db: Database,
+    business_id: UUID,
+    *,
+    label: str,
+    theme: str = "",
+) -> dict[str, Any]:
+    """Manually found a new (empty) cluster: insert the row + build its one-doc index
+    entry so future topics can be matched to it by the architect. Mirrors assign()'s
+    'found' branch without the agent decision — the user is explicitly founding. The
+    cluster starts with no pillar; populate it by moving articles in and designating one
+    (move_article / set_pillar)."""
+    kb_id = await ensure_cluster_kb(client, db, business_id)
+    cluster = db.fetch_one(
+        "insert into public.content_clusters (business_id, label, theme) "
+        f"values (%s, %s, %s) returning {_COLUMNS}",
+        (business_id, label[:120], theme or ""),
     )
-    db.execute(
-        "update public.articles set cluster_id = %s, cluster_role = 'pillar' "
-        "where id = %s",
-        (cluster_id, article_id),
+    # pillar_title = label: there's no pillar article yet, so the index doc describes the
+    # cluster by its label/theme (enough for topical-similarity retrieval).
+    doc_id = await _index_doc(client, kb_id, label=label, theme=theme, pillar_title=label)
+    if doc_id:
+        db.execute(
+            "update public.content_clusters set index_doc_id = %s where id = %s",
+            (doc_id, cluster["id"]),
+        )
+        cluster["index_doc_id"] = doc_id
+    return cluster
+
+
+def move_article(
+    db: Database, business_id: UUID, article_id: UUID, target_cluster_id: UUID
+) -> dict[str, Any] | None:
+    """Move an article into another cluster as a MEMBER. Both the article and the target
+    cluster must belong to the brand (returns None otherwise). If the article was the
+    pillar of whatever cluster it currently anchors, that slot is vacated — the old
+    cluster is left pillar-less until a new pillar is designated (a member move must
+    never leave content_clusters.pillar_article_id dangling at an article that left).
+    Idempotent-safe: moving into the cluster it's already in just re-asserts membership.
+    Returns the target cluster's fresh row."""
+    target = db.fetch_one(
+        "select id from public.content_clusters where id = %s and business_id = %s",
+        (target_cluster_id, business_id),
     )
-    return db.fetch_one(
-        "update public.content_clusters set pillar_article_id = %s, "
-        f"pillar_locked = true, updated_at = now() where id = %s returning {_COLUMNS}",
-        (article_id, cluster_id),
+    if target is None:
+        return None
+    art = db.fetch_one(
+        "select id from public.articles where id = %s and business_id = %s",
+        (article_id, business_id),
     )
+    if art is None:
+        return None
+    # One transaction: vacate any pillar slot this article holds, then re-home it. If it
+    # anchored its old cluster, that cluster becomes pillar-less (not half-detached).
+    with db.connection() as conn:
+        conn.execute(
+            "update public.content_clusters set pillar_article_id = null, "
+            "updated_at = now() where pillar_article_id = %s",
+            (article_id,),
+        )
+        conn.execute(
+            "update public.articles set cluster_id = %s, cluster_role = 'member' "
+            "where id = %s",
+            (target_cluster_id, article_id),
+        )
+    return get_cluster(db, target_cluster_id)
 
 
 # --- the architect agent ---
 CLUSTER_AGENT_NAME = "rankforge-cluster-architect"
-CLUSTER_MODEL = "claude-opus-4-7"
+# A bounded join-vs-found classification over a handful of candidate clusters — Sonnet at
+# medium effort handles it as well as Opus did, at a fraction of the cost (this runs per
+# opportunity/article and in a 25-item backfill loop).
+CLUSTER_MODEL = "claude-sonnet-4-6"
 
 _SYSTEM = """\
 You are RankForge's **content-cluster architect**. A brand's blog is organized into \

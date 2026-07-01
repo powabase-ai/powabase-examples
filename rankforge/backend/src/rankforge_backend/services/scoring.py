@@ -31,12 +31,18 @@ _AI_WORDS = (
     "underscoring", "foster", "fosters", "fostering", "harness", "harnessing",
     "elevate", "elevates", "elevating", "unlock", "unlocks", "unlocking",
     "embark", "embarking", "testament", "pivotal", "crucial", "vibrant",
-    "boasts", "boasting", "nestled",
+    "boasts", "boasting", "nestled", "genuinely",
 )
 _AI_WORD_RE = re.compile(r"(?<![a-z])(?:" + "|".join(_AI_WORDS) + r")(?![a-z])", re.I)
 _TELL_RE = re.compile(
-    r"it'?s not (?:just|merely)\b"
+    r"it['’]s not (?:just|merely)\b"
     r"|\bisn'?t (?:just|merely)\b"
+    # The antithesis reframe: "X isn't A. It's B" / "isn't about A, it's about B" —
+    # negate-then-reveal-the-real-truth. A heavy AI tic ("the way forward isn't more
+    # tools. It's better process."). Bounded span so it can't run away. REQUIRE the
+    # contraction apostrophe in the payoff so possessive "its" ("…isn't down, but its
+    # replacement is") isn't a false positive.
+    r"|\b(?:is|are|was|were)(?:n'?t| not)\b[^.!?\n]{0,70}[,.!?—–-]\s*it['’]s\b"
     r"|\bwhether you'?re an?\b"
     r"|\bin today'?s\b.{0,40}?\b(?:world|landscape|era|age)\b"
     r"|\blet'?s (?:dive in|explore|take a look|unpack)\b"
@@ -47,6 +53,20 @@ _TELL_RE = re.compile(
 )
 _EMPTY_TRANSITION_RE = re.compile(
     r"(?<![a-z])(?:moreover|furthermore|additionally|that said)(?![a-z])", re.I
+)
+# Detached brand voice: the brand's OWN blog referring to itself as a third party
+# ("the vendor asserts…") or hedging its own docs ("according to <Brand>'s own docs…").
+# ADVISORY only (not a gate): this signal can't see the brand/competitor names, and
+# third-person attribution + hedging is exactly what the writer prompt WANTS for
+# competitor comparisons ("Acme claims to be the fastest…"). So the broad patterns that
+# tripped on rivals — the generic "the {platform,company,…} {asserts,claims,…}"
+# attribution, the "allegedly/supposedly" hedges, and bare "claims to" — are dropped;
+# only the two lowest-false-positive self-reference tells remain. ("our own …" is
+# first-person and fine — excluded from the "according to … own" case.)
+_DETACHED_VOICE_RE = re.compile(
+    r"\bthe vendor\b"
+    r"|\baccording to\s+(?!(?:our|my|we|us)\b)[^.\n]{0,40}\bown\b",
+    re.I,
 )
 _BOLD_BULLET_RE = re.compile(r"^\s*[-*]\s+\*\*[^*]+\*\*\s*[:\-—]", re.MULTILINE)
 _BULLET_RE = re.compile(r"^\s*[-*]\s+\S", re.MULTILINE)
@@ -95,6 +115,11 @@ def _links(md: str) -> list[str]:
     return re.findall(r"\[[^\]]+\]\((https?://[^)]+)\)", md)
 
 
+def _link_host(url: str) -> str:
+    """Bare, www-stripped host of an outbound URL (for competitor matching)."""
+    return (urlparse(url).hostname or "").lower().removeprefix("www.")
+
+
 def _signal(key, label, score, weight, explanation, fixes, method="deterministic"):
     return {
         "key": key,
@@ -122,7 +147,13 @@ def _band(value: float, lo: float, hi: float, slack: float) -> float:
 
 
 # ---------- SEO ----------
-def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dict:
+def score_seo(
+    content_md: str,
+    title: str,
+    meta: str | None,
+    brief: dict,
+    competitor_hosts: set[str] | None = None,
+) -> dict:
     text = _clean(content_md)
     words = _words(text)
     wc = len(words)
@@ -218,9 +249,33 @@ def score_seo(content_md: str, title: str, meta: str | None, brief: dict) -> dic
 
     ext = len(links)
     sig.append(_signal(
-        "external_links", "Outbound citations", _band(ext, 3, 60, 6), 0.09,
+        "external_links", "Outbound citations", _band(ext, 3, 60, 6), 0.04,
         f"{ext} outbound link(s).",
         ["Cite a few authoritative sources."] if ext < 3 else []))
+
+    # Competitor links — the brand's own blog must never dofollow-link a rival (free
+    # authority to a competitor). Auto-stripped at generation/export, but the revise loop
+    # or a manual edit can reintroduce one, so this is a scored, refinable guardrail. When
+    # the brand has no competitors configured (or none is passed) it's a clean 100 no-op.
+    comp_hosts = competitor_hosts or set()
+
+    def _is_competitor(url: str) -> bool:
+        h = _link_host(url)
+        return bool(h) and any(h == d or h.endswith(f".{d}") for d in comp_hosts)
+
+    comp_links = [u for u in links if _is_competitor(u)]
+    comp_domains = sorted({_link_host(u) for u in comp_links})
+    n_comp = len(comp_links)
+    sig.append(_signal(
+        "competitor_links", "No competitor links",
+        100 if n_comp == 0 else max(0, 100 - n_comp * 50), 0.05,
+        "No outbound links to competitor domains."
+        if n_comp == 0 else
+        f"{n_comp} outbound link(s) to competitor domain(s) "
+        f"({', '.join(comp_domains)}) — passes link authority to a rival.",
+        [f"Unlink the competitor domain(s) ({', '.join(comp_domains)}): keep the anchor "
+         "text but remove the URL. Never dofollow-link a direct competitor."]
+        if n_comp else []))
 
     fl = _flesch(text)
     sig.append(_signal(
@@ -329,7 +384,7 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     ai_density = ai_hits / wc * 1000
     ai_score = max(0.0, 100.0 * (1 - max(0.0, ai_density - 1.5) / 7.5))
     sig.append(_signal(
-        "ai_vocabulary", "AI-tell vocabulary", ai_score, 0.18,
+        "ai_vocabulary", "AI-tell vocabulary", ai_score, 0.16,
         f"{ai_hits} flagged word(s) (~{ai_density:.1f}/1k) from the "
         "delve/leverage/robust/seamless/elevate register.",
         ["Swap the flagged words for plain language; never stack several in a "
@@ -338,10 +393,12 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     tell_hits = len(_TELL_RE.findall(content_md))
     tell_score = max(0.0, 100.0 - tell_hits * 25)
     sig.append(_signal(
-        "tell_phrases", "Formulaic constructions", tell_score, 0.16,
-        f"{tell_hits} AI-tell construction(s) (\"it's not just X…\", \"whether "
-        "you're a…\", \"in today's… world\", \"let's dive in\", \"in conclusion\").",
-        ["Rewrite the formulaic openers/closers in a natural voice."]
+        "tell_phrases", "Formulaic constructions", tell_score, 0.14,
+        f"{tell_hits} AI-tell construction(s) (\"it's not just X…\", the \"X isn't A, "
+        "it's B\" reframe, \"whether you're a…\", \"in today's… world\", \"let's dive "
+        "in\", \"in conclusion\").",
+        ["Rewrite the formulaic openers/closers in a natural voice; for \"X isn't A, "
+         "it's B\", just state what it is."]
         if tell_hits else []))
 
     em = content_md.count("—")
@@ -360,6 +417,18 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
         ["Cut the filler transitions; let the sentences connect directly."]
         if et else []))
 
+    detached = len(_DETACHED_VOICE_RE.findall(content_md))
+    sig.append(_signal(
+        "brand_voice", "First-person brand voice",
+        max(0.0, 100.0 - detached * 25), 0.10,
+        f"{detached} detached self-reference(s) (\"the vendor asserts…\", \"according "
+        "to <brand>'s own docs…\") — the brand's own blog should speak AS the brand, "
+        "not about it. (Advisory: third-person is fine for competitors.)",
+        ["Rewrite detached self-reference in the brand's first-person champion voice "
+         "(its name or \"we\"/\"our\", stated as fact); keep third-person for "
+         "competitors only."]
+        if detached else []))
+
     sl = [len(_words(s)) for s in sents]
     mean_sl = (sum(sl) / len(sl)) if sl else 0
     if len(sl) > 1 and mean_sl:
@@ -368,7 +437,7 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     else:
         cv = 0.0
     sig.append(_signal(
-        "rhythm", "Sentence-length variety", _band(cv, 0.5, 2.0, 0.5), 0.12,
+        "rhythm", "Sentence-length variety", _band(cv, 0.5, 2.0, 0.5), 0.10,
         f"Sentence length varies with CV ~{cv:.2f}; mechanical evenness reads "
         "as machine-made.",
         ["Mix short and long sentences; avoid uniform sentence/paragraph length."]
@@ -390,13 +459,13 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     _NEUTRAL = "Not evaluated (LLM judge unavailable)."
     sig.append(_signal(
         "human_voice", "Human voice",
-        llm.get("human_voice", 0) if llm else 50, 0.18,
+        llm.get("human_voice", 0) if llm else 50, 0.16,
         llm.get("human_voice_note", "LLM judgment of how human the writing reads.")
         if llm else _NEUTRAL,
         llm.get("human_voice_fixes", []) if llm else [], method="llm"))
     sig.append(_signal(
         "flow", "Flow & specificity",
-        llm.get("flow", 0) if llm else 50, 0.12,
+        llm.get("flow", 0) if llm else 50, 0.10,
         llm.get("flow_note", "LLM judgment of smoothness, rhythm, and specificity.")
         if llm else _NEUTRAL,
         llm.get("flow_fixes", []) if llm else [], method="llm"))
@@ -407,6 +476,9 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     # If any is egregious, the article can't be "met" — otherwise collect_issues
     # skips the whole (passing) readability axis and the reviser never hears about
     # it. Cap just below target so the gap-to-target stays small.
+    # brand_voice is deliberately NOT a gate key: it can't distinguish the brand's own
+    # detached self-reference from an encouraged competitor comparison, so a false
+    # positive must never force a whole-axis refine. It stays scored/advisory.
     _GATE_KEYS = {"em_dashes", "ai_vocabulary", "tell_phrases"}
     worst = min((s["score"] for s in sig if s["key"] in _GATE_KEYS), default=100)
     if worst < 40 and result["total"] >= READABILITY_TARGET:
@@ -417,7 +489,7 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
 
 JUDGE_AGENT_NAME = "rankforge-geo-judge"
 # Evaluation/judgment with short JSON output — top model + extended thinking.
-JUDGE_MODEL = "claude-opus-4-7"
+JUDGE_MODEL = "claude-opus-4-8"
 _JUDGE_SYSTEM = """\
 You are a **GEO (Generative Engine Optimization) auditor**. You rate how easily an \
 AI answer engine (ChatGPT, Perplexity, Google AI Overviews) could lift a passage \
@@ -485,7 +557,7 @@ async def judge_geo(client: PowabaseClient, content_md: str) -> dict | None:
 
 
 READ_JUDGE_AGENT_NAME = "rankforge-readability-judge"
-READ_JUDGE_MODEL = "claude-opus-4-7"
+READ_JUDGE_MODEL = "claude-opus-4-8"
 _READ_JUDGE_SYSTEM = """\
 You are a **human-writing auditor**. Search engines now penalize content that reads \
 as AI-generated, so you rate how human and natural an article reads. Your scores and \
@@ -556,14 +628,22 @@ async def score_and_store(
     brief = brief or {}
     # Resolve internal-link refs to real URLs so link signals are counted (and the LLM
     # judges see real links, not `rf:article/{id}` tokens). Local import avoids a cycle.
+    from . import business_profiles as brands_svc
     from . import linking
 
     md = linking.resolve_links(
         db, article.get("business_id"), article.get("content_md") or ""
     )
-
+    # The brand's competitors → hosts, so the competitor-link signal can flag any
+    # outbound link to a rival's domain.
+    brand = (
+        brands_svc.get_profile(db, article["business_id"])
+        if article.get("business_id")
+        else None
+    )
     seo = score_seo(md, article.get("meta_title") or article.get("title") or "",
-                    article.get("meta_description"), brief)
+                    article.get("meta_description"), brief,
+                    competitor_hosts=linking.competitor_hosts(brand))
     llm = await judge_geo(client, md)
     template = templates_svc.get_template(db, brief.get("article_type"))
     geo = score_geo(

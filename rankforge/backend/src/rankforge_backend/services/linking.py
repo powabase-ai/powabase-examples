@@ -15,6 +15,7 @@ auto-applied to published content); accepting one inserts the link and re-scores
 
 import re
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 from ..db import Database
@@ -215,6 +216,56 @@ _FENCED = re.compile(r"```.*?```", re.S)
 _INLINE_CODE = re.compile(r"`[^`]*`")
 _MD_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
 _HEADING = re.compile(r"(?m)^[ \t]*#{1,6} .*$")
+
+
+# A markdown link with a capturing http(s) URL — for rewriting, not just masking.
+_MD_LINK_CAPTURE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+
+
+def _bare_host(value: str) -> str:
+    """Lowercased, www-stripped host from a URL or a bare domain string
+    ('https://www.Rival.com/x' and 'Rival.com' both → 'rival.com')."""
+    v = (value or "").strip().lower()
+    if not v:
+        return ""
+    host = urlparse(v if "//" in v else f"//{v}").hostname or ""
+    return host.removeprefix("www.")
+
+
+def competitor_hosts(brand: dict[str, Any] | None) -> set[str]:
+    """Bare hostnames of the brand's configured competitors (for link-stripping)."""
+    return {
+        h
+        for c in ((brand or {}).get("competitors") or [])
+        if isinstance(c, dict) and (h := _bare_host(c.get("domain") or ""))
+    }
+
+
+def strip_competitor_links(md: str, hosts: set[str]) -> str:
+    """Unwrap any markdown link pointing at a competitor domain → keep the anchor text,
+    drop the URL. The brand's own blog must never pass link authority to a rival. Matches
+    a host exactly or as a subdomain (blog.rival.com under rival.com). Links inside fenced
+    code blocks are left untouched."""
+    if not md or not hosts:
+        return md
+    fences: list[str] = []
+
+    def _stash(m: "re.Match[str]") -> str:
+        fences.append(m.group(0))
+        return f"\x00F{len(fences) - 1}\x00"
+
+    guarded = _FENCED.sub(_stash, md)  # protect code blocks from rewriting
+
+    def _repl(m: "re.Match[str]") -> str:
+        host = _bare_host(m.group(2))
+        if host and any(host == d or host.endswith(f".{d}") for d in hosts):
+            return m.group(1)  # keep the anchor text, drop the link
+        return m.group(0)
+
+    out = _MD_LINK_CAPTURE.sub(_repl, guarded)
+    for i, frag in enumerate(fences):
+        out = out.replace(f"\x00F{i}\x00", frag)
+    return out
 
 
 def _linkable_mask(md: str) -> bytearray:

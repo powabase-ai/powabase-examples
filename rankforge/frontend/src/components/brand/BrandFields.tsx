@@ -18,6 +18,7 @@ export interface BrandFormState {
   competitors: string;
   sitemap_url: string;
   url_pattern: string;
+  default_author: string;
 }
 
 const csv = (xs?: string[]) => (xs ?? []).join(", ");
@@ -38,6 +39,7 @@ export const emptyBrandForm = (): BrandFormState => ({
   competitors: "",
   sitemap_url: "",
   url_pattern: "",
+  default_author: "",
 });
 
 export const brandToForm = (b: BusinessProfile): BrandFormState => ({
@@ -51,6 +53,7 @@ export const brandToForm = (b: BusinessProfile): BrandFormState => ({
   competitors: csv(b.competitors?.map((c) => c.domain)),
   sitemap_url: b.sitemap_url ?? "",
   url_pattern: b.url_pattern ?? "",
+  default_author: b.default_author ?? "",
 });
 
 export const formToPayload = (f: BrandFormState): BusinessProfileInput => ({
@@ -64,6 +67,7 @@ export const formToPayload = (f: BrandFormState): BusinessProfileInput => ({
   competitors: fromCsv(f.competitors).map((domain) => ({ domain })),
   sitemap_url: f.sitemap_url.trim() || null,
   url_pattern: f.url_pattern.trim() || null,
+  default_author: f.default_author.trim() || null,
 });
 
 export function BrandFields({
@@ -143,6 +147,21 @@ export function BrandFields({
               </span>
             </>
           )}
+        </p>
+      </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor="default_author">
+          Default author{" "}
+          <span className="text-muted-foreground">(byline for new articles)</span>
+        </Label>
+        <Input
+          id="default_author"
+          value={value.default_author}
+          onChange={set("default_author")}
+          placeholder="Acme Team"
+        />
+        <p className="text-xs text-muted-foreground">
+          The <code>author</code> in exported frontmatter. Any article can override it.
         </p>
       </div>
     </div>

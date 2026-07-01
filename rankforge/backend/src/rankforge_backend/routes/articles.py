@@ -14,9 +14,10 @@ from ..models.article import (
     ArticleUpdate,
     ArticleVersion,
     RefineRequest,
+    RemoveLinkResult,
 )
 from ..models.comment import Comment, CommentCreate, CommentUpdate
-from ..models.linking import BrokenLink, LinkSuggestion
+from ..models.linking import BrokenLink, LinkSuggestion, RemoveLinkRequest
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
 from ..ratelimit import rate_limit
@@ -164,28 +165,40 @@ async def _refine_and_finish(
     pb: PowabaseClient, db: Database, article_id: UUID,
     targets: list[str] | None = None,
 ) -> None:
+    failed = False
     try:
         await revise_svc.refine(pb, db, article_id, targets=targets)
-    finally:
-        # Always return the article to a terminal status, even if a pass failed.
-        # If there's no content (refine bailed on a failed/empty article), mark it
-        # failed rather than falsely reporting "done".
-        final = svc.get_article(db, article_id)
-        words = ((final or {}).get("content_md") or "").split()
-        terminal = "done" if words else "failed"
-        # Best-effort, BEFORE flipping to done: a refine pass rewrites the body and can
-        # introduce (or fix) links, so re-validate outbound links — dead URLs surface in
-        # the Links panel without a manual check. Never let it disturb the status.
-        if terminal == "done" and final and final.get("business_id"):
-            try:
-                await linkcheck_svc.check_article(db, final["business_id"], article_id)
-            except Exception:  # noqa: BLE001 — link check is advisory
-                log.exception("post-refine link check failed for %s", article_id)
+    except Exception:  # noqa: BLE001 — surface an infra failure, don't report a no-op
+        # refine() only propagates when a pass raised before doing ANY work (e.g. the
+        # reviser agent is misconfigured / unreachable). That's a real failure — mark it
+        # so the user sees an error instead of "refine complete" over an unchanged draft.
+        log.exception("refine pipeline failed for %s", article_id)
+        failed = True
+    # Return the article to a terminal status. Empty content (bailed on a broken article)
+    # or a propagated infra failure → 'failed'; otherwise 'done'.
+    final = svc.get_article(db, article_id)
+    words = ((final or {}).get("content_md") or "").split()
+    if failed or not words:
         svc._update(
             db, article_id,
-            generation_status=terminal,
-            progress={"phase": terminal, "word_count": len(words)},
+            generation_status="failed",
+            generation_error="refine failed — see server logs",
+            progress={"phase": "failed", "word_count": len(words)},
         )
+        return
+    # Best-effort, BEFORE flipping to done: a refine pass rewrites the body and can
+    # introduce (or fix) links, so re-validate outbound links — dead URLs surface in the
+    # Links panel without a manual check. Never let it disturb the status.
+    if final and final.get("business_id"):
+        try:
+            await linkcheck_svc.check_article(db, final["business_id"], article_id)
+        except Exception:  # noqa: BLE001 — link check is advisory
+            log.exception("post-refine link check failed for %s", article_id)
+    svc._update(
+        db, article_id,
+        generation_status="done",
+        progress={"phase": "done", "word_count": len(words)},
+    )
 
 
 @router.post(
@@ -457,6 +470,32 @@ def ignore_broken_link(
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "finding not found")
     return row
+
+
+@router.post(
+    "/{article_id}/links/health/{finding_id}/remove", response_model=RemoveLinkResult
+)
+async def remove_broken_link(
+    article_id: UUID,
+    finding_id: UUID,
+    body: RemoveLinkRequest | None = None,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fix a broken link in the prose: unlink (keep the words, instant) or remove it and
+    let an LLM mend the sentence. Versioned + the finding closed. Returns the updated
+    article plus a `repaired` flag ('unlinked'|'llm'|'mechanical'|'none') so the UI can
+    warn when a paragraph got a raw strip instead of a clean LLM mend."""
+    article = _guard_article(db, article_id, user)
+    _require_editor(user)
+    updated, repaired = await linkcheck_svc.remove_link(
+        pb, db, article["business_id"], article_id, finding_id,
+        keep_text=body.keep_text if body else True,
+    )
+    if updated is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "finding not found")
+    return {"article": updated, "repaired": repaired}
 
 
 # --- review comments ---

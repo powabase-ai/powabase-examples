@@ -7,6 +7,8 @@ feeds the failing signals' concrete fixes and the flagged grounding claims to a
 then re-runs fact-check → JSON-LD → scoring. Capped so it always terminates.
 """
 
+import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -20,10 +22,13 @@ from . import grounding
 from . import research as research_svc
 from .agents import ensure_agent
 
+log = logging.getLogger("rankforge.revise")
+
 REVISER_AGENT_NAME = "rankforge-reviser"
-# The "make it satisfactory" full-article rewrite — top model. Keep a low
-# temperature (faithful edits) rather than extended thinking, since this is a
-# large streamed output where thinking would add the most latency.
+# The "make it satisfactory" full-article rewrite. Opus 4.7 at low reasoning: matches
+# the writer model so revisions hold the same length/voice, and Opus respects the word
+# count better than Gemini 3.1 Pro did. Low temperature + low reasoning: faithful edits
+# over heavy thinking on a large streamed output where thinking would add most latency.
 REVISER_MODEL = "claude-opus-4-7"
 # Metadata is a trivial one-liner — a fast capable model is plenty.
 META_MODEL = "claude-sonnet-4-6"
@@ -36,6 +41,23 @@ _SIGNAL_FLOOR = 70  # on a FAILING axis, surface fixes for signals below this
 # 88). Matches scoring.py's readability "egregious tell" gate, so "critical" means the
 # same thing everywhere.
 _CRITICAL_FLOOR = 40
+# The fact-checker re-runs on every rewrite and its grounding_score wobbles a few points
+# run to run. Only revert a pass for a MEANINGFUL grounding drop, so ordinary judge noise
+# doesn't discard an otherwise-good revision — crucial when grounding already sits below
+# target, where a strict "any dip below target" guard would revert essentially every pass.
+_GROUNDING_SLACK = 6
+
+
+def _grounding_collapsed(prior_gr: Any, new_gr: Any) -> bool:
+    """True only if a rewrite MEANINGFULLY weakened factual grounding: it dropped more
+    than the fact-checker's run-to-run noise (_GROUNDING_SLACK) AND landed below target.
+    A small dip is tolerated so noise can't revert a pass that fixed the selected issues."""
+    return (
+        isinstance(prior_gr, (int, float))
+        and isinstance(new_gr, (int, float))
+        and new_gr < prior_gr - _GROUNDING_SLACK
+        and new_gr < GROUNDING_TARGET
+    )
 
 _SYSTEM = """\
 You are RankForge's **revising editor**. You take a full SEO/GEO blog article plus a \
@@ -56,6 +78,7 @@ accurate, not by puffing.
 
 ## Fix
 - Every issue in the provided list, using the supplied additional sources where relevant.
+- **Detached self-reference:** this is the brand's OWN blog, so rewrite any place it talks about itself as a third party ("the vendor asserts…", "the platform documents…", "the company claims…") into the brand's first-person champion voice — its name or "we"/"our", stating its own capabilities as fact ("Powabase's runtime has hard safeguards…", "Our documentation details the pitfalls…"). Drop attribution hedges (asserts, claims, purports, allegedly) applied to the brand's own features. Keep third-person/attribution only for competitors.
 
 ## Citations
 - Weave each link into a natural descriptive phrase — never the page title or a bare URL.
@@ -70,10 +93,10 @@ no exact URL, leave it unlinked rather than fabricating one.
 A draft that reads as AI-written is not "improved". As you revise, actively rewrite out every one of these:
 
 ### Overused words (worst when stacked)
-- delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant, "boasts", "nestled". Replace with plain words; never several in a paragraph.
+- delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant, "boasts", "nestled", "genuinely" (as an intensifier). Replace with plain words; never several in a paragraph.
 
 ### Constructions to delete
-- "It's not just X, it's Y"; "Whether you're a beginner or a seasoned pro"; "In today's fast-paced, ever-evolving world"; "Let's dive in / Let's explore"; reflexive rule-of-three triads; "From X to Y".
+- "It's not just X, it's Y"; the antithesis reframe "X isn't A, it's B" / "The way forward isn't X. It's Y" (negate-then-reveal — just say what it is); "Whether you're a beginner or a seasoned pro"; "In today's fast-paced, ever-evolving world"; "Let's dive in / Let's explore"; reflexive rule-of-three triads; "From X to Y".
 
 ### Rhythm and punctuation
 - Thin out em-dashes (prefer commas, periods, parentheses).
@@ -102,7 +125,9 @@ async def ensure_reviser_agent(client: PowabaseClient) -> str:
         system_prompt=_SYSTEM,
         # whole-article rewrites — a generous OUTPUT ceiling so a long article isn't
         # truncated (input is separate, on the context window). See ensure_writer_agent.
-        settings={"temperature": 0.2, "max_tokens": 32000},
+        settings={
+            "temperature": 0.2, "max_tokens": 32000, "reasoning_effort": "low"
+        },
     )
 
 
@@ -335,6 +360,18 @@ def _objective_total(
     return t + (g if isinstance(g, (int, float)) else 0)
 
 
+def _competitor_hosts_for(db: Database, article_id: UUID) -> set[str]:
+    """The article brand's competitor hostnames (empty if none) — for stripping any
+    outbound rival link a reviser rewrite might reintroduce, so content_md stays clean
+    for every consumer (public page, in-app preview, export, webhook)."""
+    from . import linking
+
+    art = gen_svc.get_article(db, article_id)
+    if not art or not art.get("business_id"):
+        return set()
+    return linking.competitor_hosts(brands.get_profile(db, art["business_id"]))
+
+
 def _met_regressed_badly(pairs: list[tuple[dict | None, dict | None]]) -> bool:
     """True if a previously-met axis fell more than _MET_TOLERANCE below target."""
     for old, new in pairs:
@@ -453,7 +490,7 @@ def _step(db: Database, article_id: UUID, i: int, step: str, total: int) -> None
 
 # --- editorial / de-AI loop (human-ness, judged by an LLM editor) ---
 EDITOR_AGENT_NAME = "rankforge-editor"
-EDITOR_MODEL = "claude-opus-4-7"
+EDITOR_MODEL = "claude-opus-4-8"
 MAX_EDITORIAL_PASSES = 2
 # reads_human at/above this = ship without another rewrite (the editor's call,
 # this is just a backstop if the model returns a score but a vague verdict).
@@ -470,13 +507,22 @@ to fix what reads as machine-made. You are not a proofreader and not an SEO chec
 a metronomic rhythm. Real writers vary deliberately.
 - Generic, hedged, safe phrasing where a specific number, name, version, or example \
 belongs. Vagueness is the strongest tell.
-- Formulaic constructions: "it's not just X, it's Y"; "whether you're a beginner or a \
-pro"; "in today's world"; "let's dive in"; reflexive rule-of-three triads; "from X to Y".
+- Formulaic constructions: "it's not just X, it's Y"; the antithesis reframe "X isn't \
+A, it's B" / "the way forward isn't X, it's Y" (negate-then-reveal); "whether you're a \
+beginner or a pro"; "in today's world"; "let's dive in"; reflexive rule-of-three \
+triads; "from X to Y".
 - Overused register: delve, leverage, robust, seamless, elevate, unlock, harness, \
-navigate (metaphor), foster, underscore, pivotal, crucial, vibrant, "boasts", "nestled".
+navigate (metaphor), foster, underscore, pivotal, crucial, vibrant, "boasts", "nestled", \
+"genuinely" (as an intensifier).
 - Empty transitions (Moreover, Furthermore, Additionally, That said), both-sidesing, \
 stating the obvious as insight, over-hedging, bolded bullet lead-ins, "In conclusion" \
 restatements.
+- Detached self-reference: this is the brand's OWN blog, so calling itself "the \
+vendor" / "the platform" / "the company" / "the tool", or hedging its own capabilities \
+with attribution verbs ("the vendor asserts…", "the platform claims…"), reads \
+impersonal and machine-made. Flag it to be rewritten in the brand's first-person \
+champion voice (its name or "we"/"our", stated as fact). Third-person is fine for \
+competitors, never for the brand itself.
 - Em-dashes: a skilled writer uses one occasionally for genuine effect. But when \
 they're a crutch — several per section, the default break between clauses, or the \
 automated em-dash score below ~60 — that is a tic, not craft. In that case **tell the \
@@ -604,10 +650,13 @@ async def _editorial_loop(
     rewrites against the editor's specific notes → accept only if the OBJECTIVE axes
     (SEO/GEO) don't regress → re-fact-check/optimize/score. Capped so it terminates.
     """
-    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+    from . import geo_optimize, linking, quality, scoring  # local: avoid import cycle
 
+    # Strip any competitor link the voice rewrite reintroduces (see _objective_loop).
+    comp_hosts = _competitor_hosts_for(db, article_id)
     editor_id: str | None = None
     reviser_id: str | None = None
+    did_work = False  # True once the reviser has responded (see _objective_loop)
     for i in range(MAX_EDITORIAL_PASSES):
         article = gen_svc.get_article(db, article_id)
         cur_md = (article.get("content_md") if article else "") or ""
@@ -643,8 +692,11 @@ async def _editorial_loop(
             new_md = await _revise_for_voice(
                 client, reviser_id, cur_md, notes, excerpts
             )
+            did_work = True  # the reviser agent responded (not an infra failure)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
+            if comp_hosts:
+                new_md = linking.strip_competitor_links(new_md, comp_hosts)
             # Guard the OBJECTIVE axes only — the editor owns human-ness.
             title = article.get("meta_title") or article.get("title") or ""
             meta = article.get("meta_description")
@@ -660,18 +712,18 @@ async def _editorial_loop(
             new_gr = ((refreshed or {}).get("grounding_report") or {}).get(
                 "grounding_score"
             )
-            if (
-                prior_gr is not None
-                and new_gr is not None
-                and new_gr < prior_gr
-                and new_gr < GROUNDING_TARGET
-            ):
+            if _grounding_collapsed(prior_gr, new_gr):
                 gen_svc._update(db, article_id, content_md=cur_md)  # revert
                 await quality.reflect(client, db, article_id)  # restore grounding
                 break
             await geo_optimize.optimize_and_store(client, db, article_id)
             await scoring.score_and_store(client, db, article_id)
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
+            # A first-pass reviser failure (it never responded) means the editorial pass
+            # did nothing — surface it instead of a silent "done". Later failures (and an
+            # editor-review failure, which raises before the try) fall through / break.
+            if not did_work:
+                raise
             break
 
 
@@ -693,10 +745,15 @@ async def _objective_loop(
     SEO/GEO pre-check would veto every grounding fix that costs a point of a thin-margin
     axis. We keep a pass only if it raised SEO+GEO+grounding overall without wrecking a
     met axis; otherwise we revert (restoring the cached scores — no extra fact-check)."""
-    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+    from . import geo_optimize, linking, quality, scoring  # local: avoid import cycle
 
     _SNAP = ("seo_score", "geo_score", "grounding_report", "readability_score", "json_ld")
+    # The reviser can reintroduce a competitor link while chasing SEO/GEO (its prompt only
+    # forbids it for the writer). Strip any on every accepted pass so content_md — and thus
+    # the public page/preview — never carries a rival link.
+    comp_hosts = _competitor_hosts_for(db, article_id)
     agent_id: str | None = None
+    did_work = False  # True once the reviser has responded (see _targeted_loop)
     for i in range(MAX_REVISIONS):
         article = gen_svc.get_article(db, article_id)
         seo = article.get("seo_score")
@@ -717,8 +774,11 @@ async def _objective_loop(
             )
             cur_md = article["content_md"] or ""
             new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
+            did_work = True  # the reviser agent responded (not an infra failure)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
+            if comp_hosts:
+                new_md = linking.strip_competitor_links(new_md, comp_hosts)
             before = _objective_total(seo, geo, gr)
             snap = {k: article.get(k) for k in _SNAP}
             gen_svc._update(db, article_id, content_md=new_md)
@@ -739,6 +799,10 @@ async def _objective_loop(
                 gen_svc._update(db, article_id, content_md=cur_md, **snap)
                 break
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
+            # A first-pass agent failure (the reviser never responded) means refine did
+            # nothing — surface it instead of a silent no-op. Later failures are swallowed.
+            if not did_work:
+                raise
             break
 
 
@@ -823,6 +887,132 @@ def _selected_total(article: dict, targets: list[str]) -> float:
     return total
 
 
+# --- surgical, deterministic fixes for the localized readability tells ----------------
+# These signals flag SPECIFIC text (an em-dash, a formulaic phrase, an AI-register word,
+# a filler transition) — so we fix them by rewriting ONLY the paragraphs that contain
+# them, not the whole article. That's both more reliable (the model isn't asked to
+# re-derive the entire piece) and far less collateral damage to sibling signals.
+_LOCALIZED_TELL_KEYS = frozenset(
+    {"em_dashes", "tell_phrases", "ai_vocabulary", "transitions", "brand_voice"}
+)
+_EM_DASH_RE = re.compile(r"—")
+_TELL_INSTRUCTION = {
+    "brand_voice": "Rewrite detached self-reference into the brand's FIRST-PERSON "
+                   'champion voice: "the vendor asserts…"/"the platform documents…"/'
+                   '"according to <brand>\'s own docs…" become the brand naming itself '
+                   'or "we"/"our", stating its own capabilities as fact (e.g. '
+                   '"Powabase\'s runtime has hard safeguards…", "Our documentation '
+                   'details the pitfalls…"). Keep third-person only for competitors.',
+    "em_dashes": "Remove every em-dash (—); use a comma, period, or parentheses "
+                 "instead. Do not leave a single em-dash.",
+    "tell_phrases": 'Rewrite formulaic AI constructions in a natural voice: "X isn\'t '
+                    'A, it\'s B" / "the way forward isn\'t…, it\'s…", "whether you\'re '
+                    'a…", "in today\'s … world", "let\'s dive in", "in conclusion", "at '
+                    'the end of the day".',
+    "ai_vocabulary": "Replace AI-register words (delve, leverage, robust, seamless, "
+                     "navigate, underscore, foster, harness, elevate, unlock, embark, "
+                     "testament, pivotal, crucial, vibrant, boasts, nestled, genuinely) "
+                     "with plain, specific language.",
+    "transitions": "Cut filler transitions (Moreover, Furthermore, Additionally, That "
+                   "said); let the sentences connect directly.",
+}
+
+
+def _localized_targets(targets: list[str]) -> set[str]:
+    """Selected signal keys that are localized readability tells (surgically fixable)."""
+    keys = set()
+    for t in targets:
+        axis, _, key = t.partition(":")
+        if axis == "readability" and key in _LOCALIZED_TELL_KEYS:
+            keys.add(key)
+    return keys
+
+
+def _has_nonlocalized_target(targets: list[str]) -> bool:
+    """True if any selected target is NOT a localized readability tell (so the whole-
+    article reviser is still needed — e.g. SEO links, keyword density, grounding)."""
+    for t in targets:
+        axis, _, key = t.partition(":")
+        if t.startswith("grounding:"):
+            return True
+        if axis in _AXIS_SCORE_KEY and not (
+            axis == "readability" and key in _LOCALIZED_TELL_KEYS
+        ):
+            return True
+    return False
+
+
+def _thin_em_dashes(text: str) -> str:
+    """Deterministic backstop: replace em-dashes with commas (guarantees the em-dash
+    tell drops regardless of the model's cooperation), then tidy the punctuation."""
+    out = _EM_DASH_RE.sub(", ", text)
+    out = re.sub(r"\s*,\s*,", ",", out)  # collapse a doubled comma
+    out = re.sub(r"\s+([.,;:!?])", r"\1", out)  # no space before punctuation
+    return re.sub(r"[ \t]{2,}", " ", out)
+
+
+def _tell_instructions(keys: set[str]) -> str:
+    return "\n".join(
+        f"- {_TELL_INSTRUCTION[k]}" for k in _TELL_INSTRUCTION if k in keys
+    )
+
+
+async def _rewrite_block_for_tells(
+    client: PowabaseClient, agent_id: str, block: str, instructions: str
+) -> str:
+    """Rewrite ONE paragraph to fix the listed tells, preserving everything else."""
+    from . import linking  # local: avoid import cycle
+
+    masked, refmap = linking.mask_refs(block)
+    msg = (
+        "Rewrite the paragraph below to fix ONLY these issues, leaving everything else "
+        "(facts, links, citations, names, numbers, meaning, and roughly the length) "
+        "intact:\n"
+        f"{instructions}\n\n"
+        "Output ONLY the revised paragraph in Markdown — no preamble, no code fences.\n\n"
+        f"---PARAGRAPH---\n{masked}"
+    )
+    res = await client.run_agent(agent_id, msg)
+    out = (res.get("content") or "").strip()
+    if out.startswith("```"):
+        out = re.sub(r"^```[a-z]*\n?|\n?```$", "", out).strip()
+    return linking.restore_refs(out, refmap) if out else block
+
+
+async def _surgical_tell_rewrite(
+    client: PowabaseClient, agent_id: str, md: str, keys: set[str]
+) -> str:
+    """Fix the selected localized tells by rewriting only the offending paragraphs, with
+    a deterministic em-dash backstop so that tell is guaranteed to drop when selected."""
+    from . import scoring  # local: avoid import cycle
+
+    detectors = {
+        "em_dashes": _EM_DASH_RE,
+        "tell_phrases": scoring._TELL_RE,
+        "ai_vocabulary": scoring._AI_WORD_RE,
+        "transitions": scoring._EMPTY_TRANSITION_RE,
+        "brand_voice": scoring._DETACHED_VOICE_RE,
+    }
+    active = [detectors[k] for k in keys if k in detectors]
+    if not active:
+        return md
+    instructions = _tell_instructions(keys)
+    blocks = md.split("\n\n")
+    for i, block in enumerate(blocks):
+        if not any(rx.search(block) for rx in active):
+            continue
+        try:
+            block = await _rewrite_block_for_tells(
+                client, agent_id, block, instructions
+            )
+        except Exception:  # noqa: BLE001 — a failed block keeps its prior text
+            log.exception("surgical tell rewrite failed for a paragraph")
+        if "em_dashes" in keys:
+            block = _thin_em_dashes(block)  # guaranteed drop, even if the model balked
+        blocks[i] = block
+    return "\n\n".join(blocks)
+
+
 async def _targeted_loop(
     client: PowabaseClient,
     db: Database,
@@ -836,13 +1026,30 @@ async def _targeted_loop(
     """Drive ONLY the user-selected issues via the reviser. Unlike the objective loop,
     this WILL fix deterministic readability tells (em-dashes, AI vocabulary, formulaic
     constructions) when the user selects them — they no longer depend on the editorial
-    LLM's discretion. Each pass is kept only if the selected issues' combined score rose,
-    no met objective axis regressed badly, and factual grounding wasn't quietly weakened
-    (the grounding guard — see _editorial_loop); otherwise content + scores are reverted."""
-    from . import geo_optimize, quality, scoring  # local: avoid import cycle
+    LLM's discretion. A pass is kept unless it made the SELECTED issues worse; collateral
+    changes to unselected axes (SEO/GEO/grounding) are NOT vetoed — they're surfaced in
+    the scores and grounding report for the user to fix, per the user's choice to trade
+    them for the fixes they asked for. (The fact-checker still flags any newly-unsupported
+    claim; and grounding, when selected, is protected via _selected_total.)"""
+    from . import geo_optimize, linking, quality, scoring  # local: avoid import cycle
 
     _SNAP = ("seo_score", "geo_score", "grounding_report", "readability_score", "json_ld")
+    # competitor_links is fixed DETERMINISTICALLY (unlink rivals) — the whole-article
+    # reviser can't be trusted to remove a competitor link, so when the user selects that
+    # issue we strip it ourselves, guaranteeing the signal improves. Resolve hosts once.
+    comp_selected = "seo:competitor_links" in targets
+    comp_hosts: set[str] = set()
+    if comp_selected:
+        _first = gen_svc.get_article(db, article_id)
+        if _first and _first.get("business_id"):
+            comp_hosts = linking.competitor_hosts(
+                brands.get_profile(db, _first["business_id"])
+            )
     agent_id: str | None = None
+    # Loop-scoped: True once ANY pass's reviser call has responded. If the very first pass
+    # fails at the agent call (infra), we re-raise; a later failure after real work is
+    # swallowed.
+    did_work = False
     for i in range(MAX_REVISIONS):
         article = gen_svc.get_article(db, article_id)
         if not article:
@@ -858,15 +1065,35 @@ async def _targeted_loop(
         try:
             if agent_id is None:
                 agent_id = await ensure_reviser_agent(client)
-            excerpts = await _diverse_excerpts(
-                client, kb_id, brief, source_ids, url_by_source
-            )
-            new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
+            # Localized readability tells (em-dashes, formulaic phrasing, AI vocabulary,
+            # filler transitions) are fixed SURGICALLY — only the offending paragraphs
+            # are rewritten, with a deterministic em-dash backstop — so the selected
+            # signals reliably improve. Anything else (SEO/GEO/grounding) still goes
+            # through the whole-article reviser.
+            loc_keys = _localized_targets(targets)
+            if loc_keys and not _has_nonlocalized_target(targets):
+                new_md = await _surgical_tell_rewrite(
+                    client, agent_id, cur_md, loc_keys
+                )
+            else:
+                excerpts = await _diverse_excerpts(
+                    client, kb_id, brief, source_ids, url_by_source
+                )
+                new_md = await _revise_once(client, agent_id, cur_md, issues, excerpts)
+                # The whole-article path has no surgical backstop, so guarantee the
+                # em-dash tell drops here when it's among the selected localized keys
+                # (otherwise it depends entirely on the reviser's cooperation).
+                if new_md and "em_dashes" in loc_keys:
+                    new_md = _thin_em_dashes(new_md)
+            did_work = True  # the reviser agent responded (not an infra failure)
             if not new_md or len(new_md) < 0.6 * len(cur_md):
                 break
+            # Guaranteed competitor-link removal when that issue is selected — enforced
+            # deterministically on top of whatever the reviser did, so the signal (and
+            # thus the selected-total) reliably improves instead of depending on the LLM.
+            if comp_selected and comp_hosts:
+                new_md = linking.strip_competitor_links(new_md, comp_hosts)
             before = _selected_total(article, targets)
-            seo, geo = article.get("seo_score"), article.get("geo_score")
-            prior_gr = (article.get("grounding_report") or {}).get("grounding_score")
             gen_svc._update(db, article_id, content_md=new_md)
             wrote_new = True
             _step(db, article_id, i, "fact-checking", MAX_REVISIONS)
@@ -876,26 +1103,15 @@ async def _targeted_loop(
             _step(db, article_id, i, "scoring", MAX_REVISIONS)
             await scoring.score_and_store(client, db, article_id)
             a2 = gen_svc.get_article(db, article_id) or {}
-            improved = _selected_total(a2, targets) > before
-            # Grounding guard: even a readability-only target must not silently weaken
-            # factual grounding. If new grounding fell below target AND below prior,
-            # revert — regardless of whether grounding was an explicit target.
-            new_gr = (a2.get("grounding_report") or {}).get("grounding_score")
-            grounding_lost = (
-                prior_gr is not None
-                and new_gr is not None
-                and new_gr < prior_gr
-                and new_gr < GROUNDING_TARGET
-            )
-            if (
-                not improved
-                or grounding_lost
-                or _met_regressed_badly(
-                    [(seo, a2.get("seo_score")), (geo, a2.get("geo_score"))]
-                )
-            ):
-                # Didn't move the selected issues, lost grounding, or wrecked a met
-                # axis — revert content + the cached scores.
+            # Keep the pass unless it made the issues YOU SELECTED worse. Targeted refine
+            # fixes exactly what you checked, so collateral changes to OTHER axes are NOT
+            # vetoed here — an SEO/GEO/grounding regression on an unselected axis is
+            # surfaced in the scores and the grounding report (the fact-checker flags any
+            # new unsupported claim regardless) for you to fix, not silently reverted. A
+            # flat pass is kept too, so you always see the attempt. (When grounding IS one
+            # of your selected targets it's part of _selected_total, so this same check
+            # protects it.)
+            if _selected_total(a2, targets) < before:
                 gen_svc._update(db, article_id, content_md=cur_md, **snap)
                 break
         except Exception:  # noqa: BLE001 — a failed pass shouldn't wedge the draft
@@ -904,6 +1120,12 @@ async def _targeted_loop(
             # restore the prior content + snapshot before bailing.
             if wrote_new:
                 gen_svc._update(db, article_id, content_md=cur_md, **snap)
+            # If the reviser agent never even responded (e.g. a Gemini routing/credential
+            # misconfig) the refine accomplished nothing — surface it as a failure rather
+            # than reporting a silent no-op "done". A LATER pass failing after earlier work
+            # succeeded is still swallowed (a good result shouldn't be wedged).
+            if not did_work:
+                raise
             break
 
 

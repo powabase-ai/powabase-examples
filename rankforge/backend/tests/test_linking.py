@@ -26,6 +26,42 @@ SUGGESTION = {
 }
 
 
+# --- competitor link stripping (unit) ---
+def test_competitor_hosts_normalizes_domains():
+    brand = {"competitors": [
+        {"name": "Rival", "domain": "https://www.Rival.com/pricing"},
+        {"name": "Two", "domain": "two.io"},
+        {"name": "NoDomain"},  # no domain → skipped
+    ]}
+    assert linking.competitor_hosts(brand) == {"rival.com", "two.io"}
+
+
+def test_strip_competitor_links_unwraps_rival_keeps_others():
+    hosts = {"rival.com"}
+    md = (
+        "Compare [Rival](https://rival.com/x) and [our guide](/p/123). "
+        "Also [Rival blog](https://blog.rival.com/post) and "
+        "[a source](https://research.org/y)."
+    )
+    out = linking.strip_competitor_links(md, hosts)
+    assert "rival.com" not in out  # both the apex and subdomain link are unwrapped
+    assert "Rival" in out and "Rival blog" in out  # anchor text is preserved
+    assert "[our guide](/p/123)" in out  # internal link untouched
+    assert "[a source](https://research.org/y)" in out  # non-competitor kept
+
+
+def test_strip_competitor_links_leaves_code_blocks_alone():
+    hosts = {"rival.com"}
+    md = "Text.\n\n```\nsee [Rival](https://rival.com/x)\n```\n"
+    out = linking.strip_competitor_links(md, hosts)
+    assert "[Rival](https://rival.com/x)" in out  # inside a fence → not rewritten
+
+
+def test_strip_competitor_links_noop_without_hosts():
+    md = "[Rival](https://rival.com/x)"
+    assert linking.strip_competitor_links(md, set()) == md
+
+
 # --- deterministic anchor logic (unit) ---
 def test_linkable_mask_blocks_links_code_and_headings():
     md = "# Heading here\n\nplain text and `code` then [anchor](/p/x) end."

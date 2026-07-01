@@ -19,7 +19,7 @@ from .agents import ensure_agent
 FACTCHECK_AGENT_NAME = "rankforge-factcheck"
 # Highest-stakes correctness gate (catching hallucinations). Top model + extended
 # thinking; short output makes the reasoning cheap relative to its value.
-FACTCHECK_MODEL = "claude-opus-4-7"
+FACTCHECK_MODEL = "claude-opus-4-8"
 
 _SYSTEM = """\
 You are RankForge's **grounding fact-checker** — the pipeline's hallucination gate. \

@@ -208,3 +208,15 @@ export function useIgnoreBrokenLink(id: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["link-health", id] }),
   });
 }
+
+export function useRemoveBrokenLink(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { findingId: string; keepText: boolean }) =>
+      articlesApi.removeBrokenLink(id, vars.findingId, vars.keepText),
+    onSuccess: ({ article }) => {
+      qc.setQueryData(["article", id], article); // body changed → refresh the preview
+      qc.invalidateQueries({ queryKey: ["link-health", id] });
+    },
+  });
+}

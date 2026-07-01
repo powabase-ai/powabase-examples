@@ -23,9 +23,23 @@ from uuid import UUID
 import httpx
 
 from ..db import Database
+from ..powabase import PowabaseClient
 from . import generation as gen_svc
+from .agents import ensure_agent
 
 log = logging.getLogger("rankforge.linkcheck")
+
+# Surgical, paragraph-scoped copy editor for removing a broken link and mending the
+# sentence. A small fast model is plenty — it edits one paragraph, not the article.
+_LINK_EDITOR_AGENT = "rankforge-link-editor"
+_LINK_EDITOR_MODEL = "claude-sonnet-4-6"
+_LINK_EDITOR_SYSTEM = """\
+You are a careful copy editor. A markdown link in the given paragraph is broken and \
+must be removed. Remove that link AND its anchor words, then repair the text so it \
+reads naturally and grammatically — as if the link had never been there. Do NOT add a \
+replacement link, a new URL, new facts, or any commentary. Preserve every OTHER link, \
+citation, number, name, and the original meaning and roughly the length. Output ONLY \
+the revised paragraph in Markdown — no preamble, no code fences."""
 
 _COLUMNS = (
     "id, business_id, article_id, url, anchor_text, kind, http_status, reason, "
@@ -146,6 +160,151 @@ def ignore_finding(
         f"where id = %s and business_id = %s returning {_COLUMNS}",
         (finding_id, business_id),
     )
+
+
+async def ensure_link_editor_agent(client: PowabaseClient) -> str:
+    return await ensure_agent(
+        client,
+        name=_LINK_EDITOR_AGENT,
+        model=_LINK_EDITOR_MODEL,
+        system_prompt=_LINK_EDITOR_SYSTEM,
+        settings={"temperature": 0.2},
+    )
+
+
+def _mechanical_strip(text: str, link_re: "re.Pattern[str]") -> str:
+    """Delete the link markup and tidy the spacing — the no-LLM fallback."""
+    out = link_re.sub("", text)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    return re.sub(r" +([.,;:!?])", r"\1", out)
+
+
+async def _rephrase_block(
+    client: PowabaseClient, agent_id: str, block: str, url: str
+) -> str:
+    """LLM-rewrite one paragraph to drop the broken link and mend the sentence."""
+    from . import linking  # local: avoid import cycle
+
+    # Mask OTHER internal-link refs so the rewrite can't mangle their UUIDs — unless the
+    # link we're removing IS a ref (then it must stay visible for the model to remove).
+    is_ref = url.startswith(("rf:article/", "/p/"))
+    masked, refmap = (block, {}) if is_ref else linking.mask_refs(block)
+    msg = (
+        "Remove the broken markdown link from the paragraph below — both the link and "
+        "its anchor words — and repair the text so it reads naturally, as if the link "
+        "had never been there. Do not add a replacement link or new facts.\n\n"
+        f"Broken link to remove (this exact URL): {url}\n\n"
+        "Output ONLY the revised paragraph in Markdown.\n\n"
+        f"---PARAGRAPH---\n{masked}"
+    )
+    res = await client.run_agent(agent_id, msg)
+    out = (res.get("content") or "").strip()
+    if out.startswith("```"):  # strip an accidental code fence
+        out = re.sub(r"^```[a-z]*\n?|\n?```$", "", out).strip()
+    if not out:
+        raise RuntimeError("empty rephrase")
+    return linking.restore_refs(out, refmap)
+
+
+async def _excise_link(
+    client: PowabaseClient, md: str, url: str, link_re: "re.Pattern[str]"
+) -> tuple[str, int, int]:
+    """Remove every `[text](url)` for `url`, repairing each affected paragraph with an
+    LLM so the prose still flows. Per-paragraph fallback to a mechanical strip if the
+    model is unavailable or leaves the link in. Returns
+    (new_md, occurrences_removed, blocks_mechanically_stripped) — the last count lets the
+    caller tell the UI a paragraph got a raw strip (rough seam) rather than an LLM mend."""
+    blocks = md.split("\n\n")
+    total = 0
+    mechanical = 0
+    agent_id: str | None = None
+    for i, block in enumerate(blocks):
+        if not link_re.search(block):
+            continue
+        total += len(link_re.findall(block))
+        rewritten: str | None = None
+        try:
+            if agent_id is None:
+                agent_id = await ensure_link_editor_agent(client)
+            rewritten = await _rephrase_block(client, agent_id, block, url)
+        except Exception:  # noqa: BLE001 — never wedge on a model/parse failure
+            log.exception("link-removal rephrase failed; using mechanical strip")
+        # Accept the rewrite only if it actually dropped the link; else mechanical strip.
+        if rewritten and not link_re.search(rewritten):
+            blocks[i] = rewritten
+        else:
+            blocks[i] = _mechanical_strip(block, link_re)
+            mechanical += 1
+    return "\n\n".join(blocks), total, mechanical
+
+
+async def remove_link(
+    client: PowabaseClient,
+    db: Database,
+    business_id: UUID,
+    article_id: UUID,
+    finding_id: UUID,
+    *,
+    keep_text: bool,
+) -> tuple[dict[str, Any] | None, str]:
+    """One-click remedy for a broken link. `keep_text=True` UNLINKS instantly (keeps the
+    anchor words, drops the URL). `False` REMOVES the link and uses an LLM to excise the
+    phrase and repair the sentence so it reads naturally. The edit is versioned (undoable
+    via history) and the finding is closed.
+
+    Returns (article, repaired) where `repaired` is one of 'unlinked' | 'llm' |
+    'mechanical' | 'none' (see RemoveLinkResult). `(None, 'none')` if the finding doesn't
+    belong to this article/brand."""
+    finding = db.fetch_one(
+        f"select {_COLUMNS} from public.link_health "
+        "where id = %s and business_id = %s and article_id = %s",
+        (finding_id, business_id, article_id),
+    )
+    if finding is None:
+        return None, "none"
+    article = gen_svc.get_article(db, article_id)
+    if article is None:
+        return None, "none"
+    url = finding["url"]
+    md = article.get("content_md") or ""
+    # Match every [text](url) for this EXACT url (tolerating <...>/surrounding spaces,
+    # exactly as _extract_links found it). re.escape so the url can't act as a pattern.
+    link_re = re.compile(r"\[([^\]]*)\]\(\s*<?" + re.escape(url) + r">?\s*\)")
+    mechanical = 0
+    if keep_text:
+        new_md, n = link_re.subn(r"\1", md)  # instant unlink — keep the words
+        repaired = "unlinked"
+    else:
+        new_md, n, mechanical = await _excise_link(client, md, url, link_re)
+        repaired = "mechanical" if mechanical else "llm"
+    if n:
+        gen_svc.update_article(db, article_id, {"content_md": new_md})
+        # The link was actually removed → close the finding.
+        db.execute(
+            "update public.link_health set status = 'resolved', updated_at = now() "
+            "where id = %s and business_id = %s",
+            (finding_id, business_id),
+        )
+        if mechanical:
+            # The graceful LLM mend failed on >=1 paragraph and fell back to a raw strip,
+            # which can leave a dangling fragment. Surface it (the API flags `mechanical`
+            # so the UI can prompt a human) and log with the ids for discoverability.
+            log.warning(
+                "remove_link: %d block(s) mechanically stripped for %s in article %s "
+                "(finding %s) — prose may need a human eyeball",
+                mechanical, url, article_id, finding_id,
+            )
+    else:
+        # The URL isn't in the body (a stale finding, an out-of-band edit, or a URL-form
+        # mismatch after ref resolution). Do NOT close it — marking a still-broken link
+        # 'resolved' would drop it from the flagged list without fixing anything. Leave it
+        # open so it stays visible, and log the desync so it's discoverable.
+        repaired = "none"
+        log.warning(
+            "remove_link: no occurrence of %s in article %s — finding %s left open",
+            url, article_id, finding_id,
+        )
+    return gen_svc.get_article(db, article_id), repaired
 
 
 def _record_broken(

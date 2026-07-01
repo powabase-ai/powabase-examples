@@ -55,6 +55,7 @@ async def create_research(
             topic=payload.topic,
             locale=payload.locale,
             depth=payload.depth,
+            evaluate_sources=payload.evaluate_sources,
         )
     )
     return run

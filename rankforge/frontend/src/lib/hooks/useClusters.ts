@@ -31,6 +31,36 @@ export function useSetPillar(clusterId: string) {
   });
 }
 
+export function useCreateCluster(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { label: string; theme?: string }) =>
+      clustersApi.create(businessId, data),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["clusters", businessId] }),
+  });
+}
+
+export function useMoveArticle(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      toClusterId,
+      articleId,
+    }: {
+      toClusterId: string;
+      articleId: string;
+    }) => clustersApi.moveArticle(toClusterId, articleId),
+    // The article left one cluster and joined another — both detail views and the list
+    // (member counts, pillar rows) are now stale. The source cluster id isn't returned,
+    // so refresh the whole set rather than surgically patch two caches.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["clusters", businessId] });
+      qc.invalidateQueries({ queryKey: ["cluster"] });
+    },
+  });
+}
+
 export function useAnalyzeGaps() {
   return useMutation({
     mutationFn: (clusterId: string) => clustersApi.analyzeGaps(clusterId),
