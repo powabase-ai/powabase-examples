@@ -846,10 +846,16 @@ def _selected_total(article: dict, targets: list[str]) -> float:
 # them, not the whole article. That's both more reliable (the model isn't asked to
 # re-derive the entire piece) and far less collateral damage to sibling signals.
 _LOCALIZED_TELL_KEYS = frozenset(
-    {"em_dashes", "tell_phrases", "ai_vocabulary", "transitions"}
+    {"em_dashes", "tell_phrases", "ai_vocabulary", "transitions", "brand_voice"}
 )
 _EM_DASH_RE = re.compile(r"—")
 _TELL_INSTRUCTION = {
+    "brand_voice": "Rewrite detached self-reference into the brand's FIRST-PERSON "
+                   'champion voice: "the vendor asserts…"/"the platform documents…"/'
+                   '"according to <brand>\'s own docs…" become the brand naming itself '
+                   'or "we"/"our", stating its own capabilities as fact (e.g. '
+                   '"Powabase\'s runtime has hard safeguards…", "Our documentation '
+                   'details the pitfalls…"). Keep third-person only for competitors.',
     "em_dashes": "Remove every em-dash (—); use a comma, period, or parentheses "
                  "instead. Do not leave a single em-dash.",
     "tell_phrases": 'Rewrite formulaic AI constructions in a natural voice: "X isn\'t '
@@ -938,6 +944,7 @@ async def _surgical_tell_rewrite(
         "tell_phrases": scoring._TELL_RE,
         "ai_vocabulary": scoring._AI_WORD_RE,
         "transitions": scoring._EMPTY_TRANSITION_RE,
+        "brand_voice": scoring._DETACHED_VOICE_RE,
     }
     active = [detectors[k] for k in keys if k in detectors]
     if not active:

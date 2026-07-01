@@ -539,8 +539,9 @@ def test_thin_em_dashes_removes_every_em_dash():
 
 def test_localized_vs_nonlocalized_target_classification():
     assert revise._localized_targets(
-        ["readability:em_dashes", "readability:tell_phrases"]
-    ) == {"em_dashes", "tell_phrases"}
+        ["readability:em_dashes", "readability:tell_phrases", "readability:brand_voice"]
+    ) == {"em_dashes", "tell_phrases", "brand_voice"}
+    assert not revise._has_nonlocalized_target(["readability:brand_voice"])
     assert revise._localized_targets(["readability:rhythm"]) == set()  # global, not local
     assert not revise._has_nonlocalized_target(["readability:em_dashes"])
     assert revise._has_nonlocalized_target(["seo:internal_links"])

@@ -52,6 +52,20 @@ _TELL_RE = re.compile(
 _EMPTY_TRANSITION_RE = re.compile(
     r"(?<![a-z])(?:moreover|furthermore|additionally|that said)(?![a-z])", re.I
 )
+# Detached brand voice: the brand's OWN blog referring to itself as a third party
+# ("the vendor asserts…", "the platform documents…") or hedging its own capabilities
+# ("according to <Brand>'s own docs…", "allegedly"). High-precision phrases that read
+# impersonal on a champion blog; third-person + attribution belongs to competitors only.
+# ("our own …" is first-person and fine — excluded from the "according to … own" case.)
+_DETACHED_VOICE_RE = re.compile(
+    r"\bthe vendor\b"
+    r"|\bthe (?:vendor|platform|company|tool|product|service|framework)\s+"
+    r"(?:asserts|claims|purports|maintains|contends|alleges|documents|states|reportedly)\b"
+    r"|\baccording to\s+(?!(?:our|my|we|us)\b)[^.\n]{0,40}\bown\b"
+    r"|\b(?:allegedly|supposedly|purportedly)\b"
+    r"|\bclaims to\b",
+    re.I,
+)
 _BOLD_BULLET_RE = re.compile(r"^\s*[-*]\s+\*\*[^*]+\*\*\s*[:\-—]", re.MULTILINE)
 _BULLET_RE = re.compile(r"^\s*[-*]\s+\S", re.MULTILINE)
 
@@ -366,6 +380,18 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
         ["Cut the filler transitions; let the sentences connect directly."]
         if et else []))
 
+    detached = len(_DETACHED_VOICE_RE.findall(content_md))
+    sig.append(_signal(
+        "brand_voice", "First-person brand voice",
+        max(0.0, 100.0 - detached * 25), 0.10,
+        f"{detached} detached self-reference(s) (\"the vendor asserts…\", \"the "
+        "platform documents…\", \"according to <brand>'s own docs…\") — the brand's "
+        "own blog should speak AS the brand, not about it.",
+        ["Rewrite detached self-reference in the brand's first-person champion voice "
+         "(its name or \"we\"/\"our\", stated as fact); keep third-person for "
+         "competitors only."]
+        if detached else []))
+
     sl = [len(_words(s)) for s in sents]
     mean_sl = (sum(sl) / len(sl)) if sl else 0
     if len(sl) > 1 and mean_sl:
@@ -413,7 +439,7 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     # If any is egregious, the article can't be "met" — otherwise collect_issues
     # skips the whole (passing) readability axis and the reviser never hears about
     # it. Cap just below target so the gap-to-target stays small.
-    _GATE_KEYS = {"em_dashes", "ai_vocabulary", "tell_phrases"}
+    _GATE_KEYS = {"em_dashes", "ai_vocabulary", "tell_phrases", "brand_voice"}
     worst = min((s["score"] for s in sig if s["key"] in _GATE_KEYS), default=100)
     if worst < 40 and result["total"] >= READABILITY_TARGET:
         result["total"] = READABILITY_TARGET - 1

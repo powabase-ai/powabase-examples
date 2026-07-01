@@ -150,6 +150,30 @@ def test_antithesis_detector_ignores_plain_negation():
     assert scoring._TELL_RE.search(clean) is None
 
 
+def test_readability_flags_detached_brand_voice():
+    # The brand's own blog talking about itself as a third party / hedging its own
+    # capabilities (the exact phrasing that shipped uncaught).
+    md = (
+        "According to Powabase's own vendor documentation, each project is isolated. "
+        "The vendor asserts its runtime has hard safeguards. "
+        "The platform documents specific pitfalls so the model can be primed."
+    )
+    sigs = {s["key"]: s for s in scoring.score_readability(md, None)["signals"]}
+    assert sigs["brand_voice"]["score"] < 40  # 3 detached refs → dinged hard
+    assert sigs["brand_voice"]["fixes"]  # actionable fix offered
+    # A gate key: egregious detached voice keeps the axis from silently "meeting" target.
+    assert not scoring.score_readability(md, {"human_voice": 95, "flow": 95})["met"]
+
+
+def test_detached_voice_ignores_first_person_and_neutral_verbs():
+    # First-person ("our own") and neutral verbs ("supports") must NOT trip it.
+    clean = (
+        "According to our own benchmarks, Powabase isolates each project. "
+        "Our runtime enforces step limits. The platform supports batching."
+    )
+    assert scoring._DETACHED_VOICE_RE.search(clean) is None
+
+
 def test_readability_uses_llm_human_voice_when_present():
     s = scoring.score_readability("Some prose.", {"human_voice": 90, "flow": 80})
     by = {x["key"]: x for x in s["signals"]}
