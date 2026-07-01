@@ -11,6 +11,7 @@ import html as _html
 import ipaddress
 import json
 import socket
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -106,7 +107,11 @@ def render_markdown(article: dict[str, Any]) -> str:
         f"title: {json.dumps(article.get('title') or '')}",
         f"description: {json.dumps(article.get('meta_description') or '')}",
     ]
-    published = _fm_date(article.get("updated_at") or article.get("created_at"))
+    published = _fm_date(
+        article.get("published_date")
+        or article.get("updated_at")
+        or article.get("created_at")
+    )
     if published:
         fm.append(f"publishedDate: {published}")
     if article.get("author"):
@@ -331,13 +336,21 @@ def export(db: Database, article_id: UUID, fmt: str) -> tuple[str, str] | None:
         "select keywords from public.articles where id = %s", (article_id,)
     )
     brand_name = (brand or {}).get("name")
+    # Author resolves: per-article override → brand default → "<Brand> Team" fallback.
+    author = (
+        article.get("author")
+        or (brand or {}).get("default_author")
+        or (f"{brand_name} Team" if brand_name else None)
+    )
     article = {
         **article,
         "content_md": linking.resolve_links(
             db, article["business_id"], article.get("content_md") or ""
         ),
         "keywords": (kw_row or {}).get("keywords") or [],
-        "author": f"{brand_name} Team" if brand_name else None,
+        "author": author,
+        # publishedDate defaults to the export date.
+        "published_date": datetime.now(UTC).date().isoformat(),
     }
     if fmt == "markdown":
         return render_markdown(article), "text/markdown"

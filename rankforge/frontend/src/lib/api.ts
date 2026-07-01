@@ -49,6 +49,7 @@ export interface BusinessProfile {
   brand_kb_id?: string | null;
   sitemap_url?: string | null;
   url_pattern?: string | null;
+  default_author?: string | null;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
@@ -66,6 +67,7 @@ export interface BusinessProfileInput {
   brand_kb_id?: string | null;
   sitemap_url?: string | null;
   url_pattern?: string | null;
+  default_author?: string | null;
 }
 
 async function request<T>(
@@ -410,6 +412,7 @@ export interface Article extends ArticleSummary {
   json_ld?: Record<string, unknown> | null;
   grounding_report?: GroundingReport | null;
   canonical_url?: string | null;
+  author?: string | null;
   cluster_id?: string | null;
   cluster_role?: "pillar" | "member" | null;
   created_at: string;
@@ -859,6 +862,7 @@ export interface ArticleUpdate {
   meta_description?: string;
   status?: string;
   canonical_url?: string;
+  author?: string;
 }
 
 // --- Brief (Stage B) ---

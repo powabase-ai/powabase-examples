@@ -57,7 +57,9 @@ def test_render_markdown_published_is_dated_and_not_draft():
     assert "draft: false" in out
 
 
-def test_export_markdown_fills_author_and_tags_from_brand_and_keywords(monkeypatch):
+def test_export_markdown_fills_author_and_tags_and_export_date(monkeypatch):
+    from datetime import UTC, datetime
+
     from rankforge_backend.services import business_profiles as brands
 
     db = MagicMock()
@@ -65,16 +67,45 @@ def test_export_markdown_fills_author_and_tags_from_brand_and_keywords(monkeypat
     monkeypatch.setattr(
         svc.gen_svc, "get_article",
         lambda d, aid: {**ARTICLE, "business_id": BID, "status": "published",
-                        "updated_at": "2026-06-25T00:00:00Z"},
+                        "author": None, "updated_at": "2026-06-25T00:00:00Z"},
     )
     monkeypatch.setattr(brands, "get_profile", lambda d, bid: {"name": "Acme"})
     monkeypatch.setattr(svc.linking, "resolve_links", lambda d, bid, md: md)
 
     content, media = svc.export(db, AID, "markdown")
     assert media == "text/markdown"
-    assert 'author: "Acme Team"' in content  # brand name → byline
+    assert 'author: "Acme Team"' in content  # no override / default → "<Brand> Team"
     assert '"auth"' in content and '"sso"' in content  # keywords → tags
-    assert "publishedDate: 2026-06-25" in content and "draft: false" in content
+    assert "draft: false" in content
+    # publishedDate defaults to the EXPORT date (today), not the article's updated_at.
+    today = datetime.now(UTC).date().isoformat()
+    assert f"publishedDate: {today}" in content
+
+
+def test_export_author_override_beats_brand_default(monkeypatch):
+    from rankforge_backend.services import business_profiles as brands
+
+    db = MagicMock()
+    db.fetch_one.return_value = {"keywords": []}
+    monkeypatch.setattr(svc.linking, "resolve_links", lambda d, bid, md: md)
+    monkeypatch.setattr(
+        brands, "get_profile",
+        lambda d, bid: {"name": "Acme", "default_author": "Acme Editorial"},
+    )
+    # No per-article override → brand default_author.
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        lambda d, aid: {**ARTICLE, "business_id": BID, "author": None},
+    )
+    content, _ = svc.export(db, AID, "markdown")
+    assert 'author: "Acme Editorial"' in content
+    # Per-article override wins over the brand default.
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        lambda d, aid: {**ARTICLE, "business_id": BID, "author": "Jane Doe"},
+    )
+    content2, _ = svc.export(db, AID, "markdown")
+    assert 'author: "Jane Doe"' in content2
 
 
 # --- webhook SSRF guard ---

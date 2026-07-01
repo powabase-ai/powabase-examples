@@ -26,6 +26,7 @@ class ArticleUpdate(BaseModel):
     meta_description: str | None = None
     status: str | None = None  # draft|in_review|approved|published|archived
     canonical_url: str | None = None  # override for where this article lives
+    author: str | None = None  # per-article override of the brand's default author
 
 
 class Article(BaseModel):
@@ -53,6 +54,7 @@ class Article(BaseModel):
     # here too, not as inert markdown text the reviewer can't catch).
     content_html: str | None = None
     canonical_url: str | None = None
+    author: str | None = None
     cluster_id: UUID | None = None
     cluster_role: str | None = None
     created_at: datetime

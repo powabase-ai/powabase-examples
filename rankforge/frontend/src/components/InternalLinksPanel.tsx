@@ -132,6 +132,8 @@ export function InternalLinksPanel({
 
       <CanonicalUrlField articleId={articleId} brand={brand.data} />
 
+      <AuthorField articleId={articleId} brand={brand.data} />
+
       {brand.data && !hasPattern ? (
         <div className="rounded-md border border-[rgb(var(--ember))]/30 bg-[rgb(var(--ember))]/[0.06] px-3 py-2.5 text-xs">
           Set your{" "}
@@ -345,6 +347,72 @@ function CanonicalUrlField({
           </>
         ) : (
           "Set a blog URL pattern in settings, or enter an explicit URL."
+        )}
+      </p>
+    </div>
+  );
+}
+
+/** Per-article author byline for export frontmatter — overrides the brand default. */
+function AuthorField({
+  articleId,
+  brand,
+}: {
+  articleId: string;
+  brand?: BusinessProfile;
+}) {
+  const { profile } = useAuth();
+  const canEdit = canApprove(profile?.role);
+  const { data: article } = useArticle(articleId);
+  const update = useUpdateArticle(articleId);
+  const [value, setValue] = React.useState("");
+  React.useEffect(() => setValue(article?.author ?? ""), [article?.author]);
+
+  if (!canEdit) return null;
+  const fallback =
+    brand?.default_author || (brand?.name ? `${brand.name} Team` : "");
+  const dirty = value.trim() !== (article?.author ?? "");
+
+  return (
+    <div className="space-y-1.5 rounded-md border border-border p-2.5">
+      <label className="text-xs font-medium text-muted-foreground">
+        Author (this article)
+      </label>
+      <div className="flex gap-2">
+        <Input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={fallback || "Acme Team"}
+          className="h-8 text-xs"
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            update.mutate(
+              { author: value.trim() }, // "" clears the override → brand default
+              {
+                onSuccess: () => toast.success("Author saved"),
+                onError: (e) =>
+                  toast.error(e instanceof Error ? e.message : "Save failed"),
+              }
+            )
+          }
+          disabled={!dirty || update.isPending}
+        >
+          {update.isPending && <Loader2 className="animate-spin" />}
+          Save
+        </Button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        {value.trim() ? (
+          "Overrides the brand default for this article."
+        ) : fallback ? (
+          <>
+            Uses the brand default: <span className="font-data">{fallback}</span>
+          </>
+        ) : (
+          "Set a default author in brand settings, or enter one here."
         )}
       </p>
     </div>

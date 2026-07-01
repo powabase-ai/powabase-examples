@@ -11,6 +11,7 @@ from ..models.business import BusinessProfileCreate, BusinessProfileUpdate
 _COLUMNS = (
     "id, org_id, name, domain, description, niche, audience, seed_topics, "
     "target_keywords, competitors, brand_kb_id, sitemap_url, url_pattern, "
+    "default_author, "
     "materials_kb_id, materials_progress, cluster_kb_id, created_by, "
     "created_at, updated_at"
 )
@@ -58,8 +59,8 @@ def create_profile(
         insert into public.business_profiles
             (org_id, name, domain, description, niche, audience,
              seed_topics, target_keywords, competitors, brand_kb_id, sitemap_url,
-             url_pattern)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             url_pattern, default_author)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         returning {_COLUMNS}
         """,
         (
@@ -75,6 +76,7 @@ def create_profile(
             data.brand_kb_id,
             data.sitemap_url,
             data.url_pattern,
+            data.default_author,
         ),
     )
 

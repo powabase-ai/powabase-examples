@@ -28,6 +28,7 @@ class BusinessProfileCreate(BaseModel):
     brand_kb_id: str | None = Field(default=None, max_length=200)
     sitemap_url: str | None = Field(default=None, max_length=2_000)
     url_pattern: str | None = Field(default=None, max_length=2_000)
+    default_author: str | None = Field(default=None, max_length=200)
 
 
 class BusinessProfileUpdate(BaseModel):
@@ -42,6 +43,7 @@ class BusinessProfileUpdate(BaseModel):
     brand_kb_id: str | None = Field(default=None, max_length=200)
     sitemap_url: str | None = Field(default=None, max_length=2_000)
     url_pattern: str | None = Field(default=None, max_length=2_000)
+    default_author: str | None = Field(default=None, max_length=200)
 
 
 class BusinessProfile(BaseModel):
@@ -57,6 +59,7 @@ class BusinessProfile(BaseModel):
     brand_kb_id: str | None = None
     sitemap_url: str | None = None
     url_pattern: str | None = None
+    default_author: str | None = None
     materials_progress: dict = {}
     created_by: UUID | None = None
     created_at: datetime
