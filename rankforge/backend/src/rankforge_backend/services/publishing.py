@@ -87,16 +87,37 @@ def render_standalone_html(article: dict[str, Any]) -> str:
 """
 
 
+def _fm_date(val: Any) -> str:
+    """YYYY-MM-DD from a datetime (psycopg) or an ISO-ish string."""
+    if hasattr(val, "date"):
+        return val.date().isoformat()
+    return str(val or "")[:10]
+
+
 def render_markdown(article: dict[str, Any]) -> str:
-    """Portable Markdown with YAML front matter (title/description/keywords)."""
-    fm_lines = ["---", f"title: {json.dumps(article.get('title') or '')}"]
-    if article.get("meta_description"):
-        fm_lines.append(f"description: {json.dumps(article['meta_description'])}")
-    kws = article.get("keywords") or []
-    if kws:
-        fm_lines.append(f"keywords: {json.dumps(kws)}")
-    fm_lines.append("---\n")
-    return "\n".join(fm_lines) + (article.get("content_md") or "")
+    """Export as a blog `.mdx`: YAML frontmatter + the Markdown body.
+
+    Matches the target blog's `content/blog/<slug>.mdx` shape — title, description,
+    publishedDate, author, tags, draft — followed by a blank line and the body. Strings
+    are JSON-quoted so a title/description containing a colon, `#`, etc. stays valid
+    YAML. `draft: true` for anything not yet published (hides it on the live site)."""
+    fm = [
+        "---",
+        f"title: {json.dumps(article.get('title') or '')}",
+        f"description: {json.dumps(article.get('meta_description') or '')}",
+    ]
+    published = _fm_date(article.get("updated_at") or article.get("created_at"))
+    if published:
+        fm.append(f"publishedDate: {published}")
+    if article.get("author"):
+        fm.append(f"author: {json.dumps(article['author'])}")
+    tags = article.get("keywords") or []
+    if tags:
+        fm.append("tags:")
+        fm.extend(f"  - {json.dumps(t)}" for t in tags)
+    fm.append(f"draft: {'false' if article.get('status') == 'published' else 'true'}")
+    fm.append("---")
+    return "\n".join(fm) + "\n\n" + (article.get("content_md") or "")
 
 
 # --- publishing ---
@@ -297,11 +318,26 @@ def export(db: Database, article_id: UUID, fmt: str) -> tuple[str, str] | None:
     article = gen_svc.get_article(db, article_id)
     if article is None:
         return None
+    # Enrich for the frontmatter: keywords → tags (not in the default article select),
+    # and an author byline derived from the brand name. Local import avoids a cycle.
+    from . import business_profiles as brands_svc
+
+    brand = (
+        brands_svc.get_profile(db, article["business_id"])
+        if article.get("business_id")
+        else None
+    )
+    kw_row = db.fetch_one(
+        "select keywords from public.articles where id = %s", (article_id,)
+    )
+    brand_name = (brand or {}).get("name")
     article = {
         **article,
         "content_md": linking.resolve_links(
             db, article["business_id"], article.get("content_md") or ""
         ),
+        "keywords": (kw_row or {}).get("keywords") or [],
+        "author": f"{brand_name} Team" if brand_name else None,
     }
     if fmt == "markdown":
         return render_markdown(article), "text/markdown"

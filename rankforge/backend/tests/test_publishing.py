@@ -39,10 +39,42 @@ def test_render_standalone_escapes_jsonld():
     assert "\\u003c/script>" in doc  # closing-tag escaped
 
 
-def test_render_markdown_has_frontmatter():
+def test_render_markdown_frontmatter_shape():
     out = svc.render_markdown(ARTICLE)
-    assert out.startswith("---")
-    assert "title:" in out and "# Heading" in out
+    assert out.startswith("---\n")
+    assert 'title: "Title"' in out
+    assert 'description: "A description."' in out
+    assert "tags:\n  - " in out and '"kw"' in out
+    assert "draft: true" in out  # ARTICLE has no status → not published
+    assert "---\n\n# Heading" in out  # blank line between frontmatter and body
+
+
+def test_render_markdown_published_is_dated_and_not_draft():
+    out = svc.render_markdown(
+        {**ARTICLE, "status": "published", "updated_at": "2026-06-25T12:00:00Z"}
+    )
+    assert "publishedDate: 2026-06-25" in out
+    assert "draft: false" in out
+
+
+def test_export_markdown_fills_author_and_tags_from_brand_and_keywords(monkeypatch):
+    from rankforge_backend.services import business_profiles as brands
+
+    db = MagicMock()
+    db.fetch_one.return_value = {"keywords": ["auth", "sso"]}  # the keywords select
+    monkeypatch.setattr(
+        svc.gen_svc, "get_article",
+        lambda d, aid: {**ARTICLE, "business_id": BID, "status": "published",
+                        "updated_at": "2026-06-25T00:00:00Z"},
+    )
+    monkeypatch.setattr(brands, "get_profile", lambda d, bid: {"name": "Acme"})
+    monkeypatch.setattr(svc.linking, "resolve_links", lambda d, bid, md: md)
+
+    content, media = svc.export(db, AID, "markdown")
+    assert media == "text/markdown"
+    assert 'author: "Acme Team"' in content  # brand name → byline
+    assert '"auth"' in content and '"sso"' in content  # keywords → tags
+    assert "publishedDate: 2026-06-25" in content and "draft: false" in content
 
 
 # --- webhook SSRF guard ---
@@ -250,8 +282,10 @@ def test_publish_route(monkeypatch):
     assert resp.json()["status"] == "success"
 
 
-def test_export_route_sets_download_header(monkeypatch):
+def test_export_route_sets_slug_mdx_filename(monkeypatch):
     monkeypatch.setattr(svc, "export", lambda db, aid, fmt: ("# md", "text/markdown"))
     resp = _client(_brand_db()).get(f"/api/articles/{AID}/export?format=markdown")
     assert resp.status_code == 200
-    assert "attachment" in resp.headers.get("content-disposition", "")
+    cd = resp.headers.get("content-disposition", "")
+    assert "attachment" in cd
+    assert 'filename="title.mdx"' in cd  # <slug>.mdx
