@@ -61,6 +61,7 @@ accurate, not by puffing.
 
 ## Fix
 - Every issue in the provided list, using the supplied additional sources where relevant.
+- **Detached self-reference:** this is the brand's OWN blog, so rewrite any place it talks about itself as a third party ("the vendor asserts…", "the platform documents…", "the company claims…") into the brand's first-person champion voice — its name or "we"/"our", stating its own capabilities as fact ("Powabase's runtime has hard safeguards…", "Our documentation details the pitfalls…"). Drop attribution hedges (asserts, claims, purports, allegedly) applied to the brand's own features. Keep third-person/attribution only for competitors.
 
 ## Citations
 - Weave each link into a natural descriptive phrase — never the page title or a bare URL.
@@ -487,6 +488,12 @@ navigate (metaphor), foster, underscore, pivotal, crucial, vibrant, "boasts", "n
 - Empty transitions (Moreover, Furthermore, Additionally, That said), both-sidesing, \
 stating the obvious as insight, over-hedging, bolded bullet lead-ins, "In conclusion" \
 restatements.
+- Detached self-reference: this is the brand's OWN blog, so calling itself "the \
+vendor" / "the platform" / "the company" / "the tool", or hedging its own capabilities \
+with attribution verbs ("the vendor asserts…", "the platform claims…"), reads \
+impersonal and machine-made. Flag it to be rewritten in the brand's first-person \
+champion voice (its name or "we"/"our", stated as fact). Third-person is fine for \
+competitors, never for the brand itself.
 - Em-dashes: a skilled writer uses one occasionally for genuine effect. But when \
 they're a crutch — several per section, the default break between clauses, or the \
 automated em-dash score below ~60 — that is a tic, not craft. In that case **tell the \
