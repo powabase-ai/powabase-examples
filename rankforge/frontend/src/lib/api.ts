@@ -111,8 +111,42 @@ export async function getBackendHealth(): Promise<{ status: string }> {
   return request("/health");
 }
 
+/** Multipart upload of a brand logo → public storage; returns the updated brand.
+ *  Mirrors uploadMaterial()'s auth + 401→refresh→retry. */
+async function uploadBrandLogo(
+  id: string,
+  file: File,
+  retry = false
+): Promise<BusinessProfile> {
+  const form = new FormData();
+  form.append("file", file);
+  const token = getAccessToken();
+  const res = await fetch(`${API_BASE_URL}/api/business-profiles/${id}/logo`, {
+    method: "POST",
+    cache: "no-store",
+    body: form,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return uploadBrandLogo(id, file, true);
+  }
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      const body = await res.json();
+      detail = body.detail ?? JSON.stringify(body);
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, friendlyMessage(res.status, detail));
+  }
+  return res.json();
+}
+
 export const brandsApi = {
   list: () => request<BusinessProfile[]>("/api/business-profiles"),
+  uploadLogo: (id: string, file: File) => uploadBrandLogo(id, file),
   get: (id: string) => request<BusinessProfile>(`/api/business-profiles/${id}`),
   create: (data: BusinessProfileInput) =>
     request<BusinessProfile>("/api/business-profiles", {

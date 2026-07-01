@@ -1,13 +1,14 @@
 """business_profiles routes — hermetic, Database mocked at the boundary."""
 
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
-from conftest import ADMIN_USER, with_auth
+from conftest import ADMIN_ORG, ADMIN_USER, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
 from rankforge_backend.routes import business_profiles as bp_route
-from rankforge_backend.routes.business_profiles import get_db
+from rankforge_backend.routes.business_profiles import get_db, get_powabase
 
 ROW = {
     "id": "11111111-1111-1111-1111-111111111111",
@@ -27,10 +28,57 @@ ROW = {
 }
 
 
-def make_client(db: MagicMock) -> TestClient:
+def make_client(db: MagicMock, pb: MagicMock | None = None) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_powabase] = lambda: pb or MagicMock()
     return TestClient(with_auth(app))
+
+
+LOGO_ROUTE = f"/api/business-profiles/{ROW['id']}/logo"
+
+
+def test_upload_logo_rejects_non_image():
+    resp = make_client(MagicMock()).post(
+        LOGO_ROUTE, files={"file": ("notes.txt", b"hi", "text/plain")}
+    )
+    assert resp.status_code == 400
+
+
+def test_upload_logo_uploads_to_storage_and_stores_url(monkeypatch):
+    monkeypatch.setattr(
+        bp_route.svc, "get_profile",
+        lambda d, pid: {**ROW, "org_id": UUID(ADMIN_ORG)},
+    )
+    monkeypatch.setattr(
+        bp_route.svc, "update_profile",
+        lambda d, pid, payload, org: {**ROW, "logo_url": payload.logo_url},
+    )
+    pb = MagicMock()
+    pub = f"https://proj/storage/v1/object/public/brand-logos/{ROW['id']}.png"
+    pb.upload_public_object = AsyncMock(return_value=pub)
+
+    resp = make_client(MagicMock(), pb).post(
+        LOGO_ROUTE, files={"file": ("logo.png", b"\x89PNG\r\n", "image/png")}
+    )
+    assert resp.status_code == 200
+    pb.upload_public_object.assert_awaited_once()
+    assert resp.json()["logo_url"].startswith(pub)  # stored URL (+ cache-buster)
+
+
+def test_upload_logo_404_when_brand_in_another_org(monkeypatch):
+    # Brand exists but in a different org → 404, and nothing is uploaded.
+    monkeypatch.setattr(
+        bp_route.svc, "get_profile",
+        lambda d, pid: {**ROW, "org_id": UUID("00000000-0000-0000-0000-0000000000ff")},
+    )
+    pb = MagicMock()
+    pb.upload_public_object = AsyncMock()
+    resp = make_client(MagicMock(), pb).post(
+        LOGO_ROUTE, files={"file": ("logo.png", b"\x89PNG", "image/png")}
+    )
+    assert resp.status_code == 404
+    pb.upload_public_object.assert_not_awaited()
 
 
 def test_create_inserts_and_returns_201():

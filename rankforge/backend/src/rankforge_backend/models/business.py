@@ -29,9 +29,9 @@ class BusinessProfileCreate(BaseModel):
     sitemap_url: str | None = Field(default=None, max_length=2_000)
     url_pattern: str | None = Field(default=None, max_length=2_000)
     default_author: str | None = Field(default=None, max_length=200)
-    # A small downscaled data URL (or an http URL). Bounded so a client can't store an
-    # unbounded blob in the brand row / list response.
-    logo_url: str | None = Field(default=None, max_length=500_000)
+    # Public storage URL for the brand logo (set via POST /{id}/logo). Client can also
+    # clear it by PATCHing null.
+    logo_url: str | None = Field(default=None, max_length=2_000)
 
 
 class BusinessProfileUpdate(BaseModel):
@@ -47,9 +47,9 @@ class BusinessProfileUpdate(BaseModel):
     sitemap_url: str | None = Field(default=None, max_length=2_000)
     url_pattern: str | None = Field(default=None, max_length=2_000)
     default_author: str | None = Field(default=None, max_length=200)
-    # A small downscaled data URL (or an http URL). Bounded so a client can't store an
-    # unbounded blob in the brand row / list response.
-    logo_url: str | None = Field(default=None, max_length=500_000)
+    # Public storage URL for the brand logo (set via POST /{id}/logo). Client can also
+    # clear it by PATCHing null.
+    logo_url: str | None = Field(default=None, max_length=2_000)
 
 
 class BusinessProfile(BaseModel):

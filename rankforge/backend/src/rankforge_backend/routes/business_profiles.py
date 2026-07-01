@@ -1,8 +1,17 @@
 """business_profiles CRUD endpoints."""
 
+import time
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 
 from ..auth import get_current_user, require_admin, require_editor
 from ..db import Database
@@ -12,9 +21,18 @@ from ..models.business import (
     BusinessProfileUpdate,
 )
 from ..models.profile import CurrentUser
+from ..powabase import PowabaseClient
 from ..services import business_profiles as svc
 from ..services import source_refs
 from .deps import get_db, get_powabase  # re-exported for callers/tests
+
+_LOGO_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/svg+xml": "svg",
+    "image/webp": "webp",
+}
+_MAX_LOGO_BYTES = 5 * 1024 * 1024
 
 __all__ = ["router", "get_db", "get_powabase"]
 
@@ -66,6 +84,44 @@ def update_business_profile(
     user: CurrentUser = Depends(require_editor),
 ):
     row = svc.update_profile(db, profile_id, payload, user.org_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "business profile not found")
+    return row
+
+
+@router.post("/{profile_id}/logo", response_model=BusinessProfile)
+async def upload_business_logo(
+    profile_id: UUID,
+    file: UploadFile = File(...),
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Upload a brand logo to public storage and store its URL on the brand."""
+    ext = _LOGO_EXT.get(file.content_type or "")
+    if ext is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "logo must be a PNG, JPG, SVG, or WebP image"
+        )
+    content = await file.read()
+    if not content or len(content) > _MAX_LOGO_BYTES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "logo must be non-empty and under 5 MB"
+        )
+    # Confirm the brand is in the caller's org before uploading anything to storage.
+    brand = svc.get_profile(db, profile_id)
+    if brand is None or brand.get("org_id") != user.org_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "business profile not found")
+    url = await pb.upload_public_object(
+        "brand-logos", f"{profile_id}.{ext}", content, file.content_type or "image/png"
+    )
+    # Cache-bust: the object path is stable (brand id), so a fresh ?v refreshes the img.
+    row = svc.update_profile(
+        db,
+        profile_id,
+        BusinessProfileUpdate(logo_url=f"{url}?v={int(time.time())}"),
+        user.org_id,
+    )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "business profile not found")
     return row

@@ -284,6 +284,29 @@ class PowabaseClient:
             "POST", f"/api/workflows/{workflow_id}/execute", json={"inputs": inputs}
         )
 
+    # --- storage (small public assets: brand logos, etc.) ---
+    async def upload_public_object(
+        self, bucket: str, path: str, content: bytes, mime: str
+    ) -> str:
+        """Upload bytes to a PUBLIC storage bucket (creating it if absent) and return
+        the object's public URL. For small brand assets like the workspace logo."""
+        # Ensure the bucket exists; a repeat call 4xxs with "already exists" — ignore it.
+        await self._client.post(
+            "/storage/v1/bucket", json={"id": bucket, "name": bucket, "public": True}
+        )
+        resp = await self._client.post(
+            f"/storage/v1/object/{bucket}/{path}",
+            content=content,
+            headers={**self._headers, "Content-Type": mime, "x-upsert": "true"},
+        )
+        if resp.status_code >= 400:
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            raise PowabaseError(resp.status_code, body)
+        return f"{self._base_url}/storage/v1/object/public/{bucket}/{path}"
+
     # --- knowledge bases / sources (brand grounding) ---
     async def upload_source(self, file_name: str, content: bytes, mime: str) -> Any:
         """Upload a source file (multipart). Poll get_source() until `extracted`."""

@@ -53,6 +53,18 @@ export function useUpdateBrand() {
   });
 }
 
+export function useUploadBrandLogo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, file }: { id: string; file: File }) =>
+      brandsApi.uploadLogo(id, file),
+    onSuccess: (_data, { id }) => {
+      qc.invalidateQueries({ queryKey: KEY });
+      qc.invalidateQueries({ queryKey: ["business-profile", id] });
+    },
+  });
+}
+
 export function useDeleteBrand() {
   const qc = useQueryClient();
   return useMutation({
