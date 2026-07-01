@@ -539,7 +539,7 @@ export default function ArticleView({
     try {
       await update.mutateAsync({ content_md: draft });
       setEditing(false);
-      toast.success("Saved — re-optimizing");
+      toast.success("Saved — rescoring");
       optimize.mutate();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Save failed");
@@ -566,7 +566,7 @@ export default function ArticleView({
     try {
       await restore.mutateAsync(versionId);
       setShowHistory(false);
-      toast.success("Restored — re-optimizing");
+      toast.success("Restored — rescoring");
       optimize.mutate();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Restore failed");
@@ -729,7 +729,7 @@ export default function ArticleView({
                   ) : (
                     <RefreshCw />
                   )}
-                  Re-optimize & score
+                  Rescore
                 </Button>
               </div>
             )}
