@@ -196,8 +196,10 @@ migration idempotently, and tracks applied ones in `public.schema_migrations`.
 
 > Running `psql -f schema/0001_init.sql` alone is **not** enough — the app needs
 > organizations, content clusters, scouts, link health, the signup gate, and more,
-> all in later migrations. No `uv`? Apply them all by hand in order:
+> all in later migrations. No `uv`? Load the DB URL from `backend/.env` into your shell
+> (it lives in the dotenv file, not your shell), then apply them all in order:
 > ```bash
+> set -a; . backend/.env; set +a      # export POWABASE_DATABASE_URL for psql
 > for f in backend/schema/0*.sql; do psql "$POWABASE_DATABASE_URL" -f "$f"; done
 > ```
 
@@ -244,7 +246,7 @@ never ship that key, the **JWT secret**, or the **Database URL** to the browser.
 Powabase runs agent DB tools as the DB superuser (**RLS bypassed**), so the
 agent/generation endpoints must stay server-side. End-user auth uses GoTrue; the
 frontend gets only the **Anon (Publishable)** key. App tables enable RLS from
-`0001_init.sql`. See [`docs/architecture.md`](docs/architecture.md#security).
+`0001_init.sql`. See [`docs/architecture.md`](docs/architecture.md#5-security).
 
 ## Troubleshooting
 
@@ -269,4 +271,5 @@ frontend gets only the **Anon (Publishable)** key. App tables enable RLS from
 
 ## License
 
-**MIT** — an open-source Powabase example app, free to clone, modify, and ship.
+**MIT** — see [`LICENSE`](../LICENSE). An open-source Powabase example app, free to
+clone, modify, and ship.

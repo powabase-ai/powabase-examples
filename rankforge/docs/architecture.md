@@ -98,7 +98,7 @@ events (SSE) to the UI for per-stage progress. Stage outputs land in `research_r
 > real (use `starter` / `response`). Confirm the block graph against the live docs
 > when we build M2.
 
-## 5. Security {#security}
+## 5. Security
 
 - **Service Role key, JWT secret, Database URL: server-side only.** Never reach the
   browser. The frontend gets only the **Anon (Publishable)** key, used for GoTrue
