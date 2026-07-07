@@ -5,7 +5,9 @@ from uuid import UUID
 
 from ..db import Database
 
-_PROFILE_COLS = "id, email, display_name, role, created_at, updated_at"
+_PROFILE_COLS = (
+    "id, email, display_name, role, invite_verified, created_at, updated_at"
+)
 
 
 def list_members(db: Database, org_id: UUID) -> list[dict[str, Any]]:
@@ -20,6 +22,16 @@ def list_members(db: Database, org_id: UUID) -> list[dict[str, Any]]:
 def get_profile(db: Database, user_id: UUID) -> dict[str, Any] | None:
     return db.fetch_one(
         f"select {_PROFILE_COLS} from public.profiles where id = %s", (user_id,)
+    )
+
+
+def mark_invite_verified(db: Database, user_id: UUID) -> dict[str, Any] | None:
+    """Flip the caller's signup gate to verified (idempotent). Called once, after the
+    account presents the correct shared invite code."""
+    return db.fetch_one(
+        f"update public.profiles set invite_verified = true, updated_at = now() "
+        f"where id = %s returning {_PROFILE_COLS}",
+        (user_id,),
     )
 
 

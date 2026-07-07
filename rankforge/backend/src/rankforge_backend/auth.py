@@ -25,7 +25,7 @@ from .db import Database
 from .models.profile import CurrentUser
 from .routes.deps import get_db
 
-_PROFILE_COLS = "id, email, display_name, role, org_id"
+_PROFILE_COLS = "id, email, display_name, role, org_id, invite_verified"
 
 
 def _decode(token: str) -> dict:
@@ -95,10 +95,13 @@ def ensure_profile(db: Database, user_id: str, email: str | None) -> dict:
         return cur.fetchone()
 
 
-def get_current_user(
+def get_current_user_unverified(
     authorization: str | None = Header(default=None),
     db: Database = Depends(get_db),
 ) -> CurrentUser:
+    """Resolve the caller from a valid GoTrue token WITHOUT enforcing the signup invite
+    gate. Only the two endpoints that must work before verification depend on this:
+    `GET /api/me` (so the frontend can learn it needs a code) and the redeem endpoint."""
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer token")
     token = authorization.split(" ", 1)[1].strip()
@@ -112,7 +115,28 @@ def get_current_user(
         email=profile.get("email"),
         role=profile["role"],
         org_id=profile["org_id"],
+        invite_verified=bool(profile.get("invite_verified", True)),
     )
+
+
+def signup_gate_active() -> bool:
+    """The invite gate is enforced only when a shared code is configured (SIGNUP_INVITE_
+    CODE). Empty = open signup (dev/default), so unset envs keep working as before."""
+    return bool(get_settings().signup_invite_code)
+
+
+def get_current_user(
+    user: CurrentUser = Depends(get_current_user_unverified),
+) -> CurrentUser:
+    """The default auth dependency for every feature route. Enforces the signup invite
+    gate: a registered-but-unredeemed account is refused until it redeems the code once.
+    403 (not 401) so the client keeps its session and can show the code screen."""
+    if signup_gate_active() and not user.invite_verified:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "invite code required to complete signup",
+        )
+    return user
 
 
 def require_editor(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:

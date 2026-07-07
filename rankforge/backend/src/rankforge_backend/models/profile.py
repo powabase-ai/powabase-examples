@@ -26,6 +26,9 @@ class CurrentUser(BaseModel):
     email: str | None = None
     role: str
     org_id: UUID
+    # Whether this account has cleared the signup invite gate. Defaults True so any code
+    # path that builds a CurrentUser without it (and dev with no gate) is never blocked.
+    invite_verified: bool = True
 
 
 class Profile(BaseModel):
@@ -33,8 +36,14 @@ class Profile(BaseModel):
     email: str | None = None
     display_name: str | None = None
     role: str
+    # Effective gate status the frontend reads: true when verified OR the gate is off.
+    invite_verified: bool = True
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class InviteRedeem(BaseModel):
+    code: str = Field(min_length=1, max_length=200)
 
 
 class RoleUpdate(BaseModel):

@@ -54,6 +54,21 @@ def rate_limit(scope: str):
     return _dep
 
 
+def check(scope: str, user_id: str, limit: int | None = None) -> None:
+    """Imperative rate-limit for a caller resolved OUTSIDE the `rate_limit` dependency
+    (which pins get_current_user). Used by the invite-redeem endpoint, whose caller comes
+    from the unverified auth dep. Raises 429 when the per-window cap is exceeded."""
+    settings = get_settings()
+    lim = settings.rate_limit_expensive if limit is None else limit
+    window = settings.rate_limit_window_seconds
+    if not _allow((scope, user_id), lim, window):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "too many attempts; slow down",
+            headers={"Retry-After": str(int(window))},
+        )
+
+
 def reset() -> None:
     """Clear all buckets (test helper)."""
     with _lock:

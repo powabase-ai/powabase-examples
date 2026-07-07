@@ -654,6 +654,9 @@ export interface Profile {
   email?: string | null;
   display_name?: string | null;
   role: Role;
+  // Effective signup-gate status: true when verified OR the gate is disabled. When
+  // false, the app shows the invite-code screen before anything else.
+  invite_verified: boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -665,6 +668,11 @@ export const accountApi = {
     request<Profile>(`/api/members/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ role }),
+    }),
+  redeemInvite: (code: string) =>
+    request<Profile>("/api/auth/redeem-invite", {
+      method: "POST",
+      body: JSON.stringify({ code }),
     }),
 };
 

@@ -30,7 +30,9 @@ def _token(secret: str = SECRET, **claims) -> str:
 @pytest.fixture(autouse=True)
 def _secret(monkeypatch):
     monkeypatch.setattr(
-        auth, "get_settings", lambda: SimpleNamespace(powabase_jwt_secret=SECRET)
+        auth,
+        "get_settings",
+        lambda: SimpleNamespace(powabase_jwt_secret=SECRET, signup_invite_code=""),
     )
 
 
