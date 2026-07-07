@@ -87,12 +87,10 @@ Three things to stand up, in order:
   as it goes open-source.)
 - **Docker + Docker Compose** for the one-command stack. *(Or, for hot-reload dev:
   Python 3.13 + [`uv`](https://docs.astral.sh/uv/) and Node 20+.)*
-- An **Anthropic API key** to paste **into the Powabase project** (BYOK) — RankForge's
-  agents default to Anthropic Claude models. This is the only key you supply. (If you
-  re-point the models in `backend/src/rankforge_backend/services/*` to another provider,
-  supply that provider's key instead.)
-  - You do **not** supply Exa/Firecrawl keys for web search & scrape — on managed
-    Powabase those tools are platform-provided and billed as credits (see §1 step 3).
+- A Powabase project with **credits**. RankForge's AI — LLM generation *and* the web
+  search/scrape research tools — runs on the platform and is billed as **credits**;
+  there are **no LLM or tool API keys to set up**. (Optionally you can bring your own
+  Anthropic key — see §1 step 2.)
 
 ## 1. Create & configure a Powabase project
 
@@ -101,19 +99,22 @@ In the [Powabase Studio](https://app.powabase.ai):
 1. **Create a new project.** Note its name — it's your "current project" for the rest
    of these steps. Everything below happens inside it.
 
-2. **Add your LLM provider key (BYOK).** In **Project Settings → LLM Provider Keys**, add
-   an **Anthropic** API key — RankForge's agents call Claude by bare model IDs
-   (`claude-opus-4-8`, `claude-opus-4-7`, `claude-sonnet-4-6`). Powabase supports BYOK
-   for `openai` / `anthropic` / `google` / `openrouter`; RankForge defaults to Anthropic
-   (re-point the `*_MODEL` constants in `backend/src/rankforge_backend/services/` to use a
-   different provider). Without a valid key, agents can be created but every
-   generation/research/scoring call fails at runtime.
+2. **LLM access — nothing to set up.** RankForge's agents use Anthropic Claude models
+   (`claude-opus-4-8`, `claude-opus-4-7`, `claude-sonnet-4-6`), which the Powabase
+   platform provides — calls route through Powabase and are billed as **credits**
+   (upstream cost + a small markup). You do **not** add an LLM key. *(Optional BYOK: to
+   run on your own key and skip the LLM credit markup, add an **Anthropic** key under
+   **Project Settings → LLM Provider Keys** — RankForge calls Claude by bare model IDs,
+   and Powabase supports BYOK for `openai` / `anthropic` / `google` / `openrouter`.)*
 
 3. **Web search & scrape — nothing to set up.** RankForge's research and scouts use
-   Powabase's built-in `web_search` (Exa) and `web_scrape` (Firecrawl) tools. On managed
-   Powabase these are **platform-provided and billed as credits per call** — you do
-   **not** configure `EXA_API_KEY` / `FIRECRAWL_API_KEY` yourself (there's no Studio
-   field for them). Just make sure the project has credits.
+   Powabase's built-in `web_search` (Exa) and `web_scrape` (Firecrawl) tools. These are
+   **platform-provided and billed as credits per call** — you do **not** configure
+   `EXA_API_KEY` / `FIRECRAWL_API_KEY` yourself (there's no Studio field for them; they're
+   platform-managed).
+
+   > **In short: the only thing your project needs for RankForge's AI to work is
+   > credits.** LLM generation, web search, and web scrape are all metered as credits.
 
 4. **Check the Auth email setting.** Powabase **auto-confirms email by default**, so
    sign-up returns an active session immediately — which is what RankForge needs. If
@@ -262,11 +263,11 @@ frontend gets only the **Anon (Publishable)** key. App tables enable RLS from
 - **Sign-up doesn't return a session / login hangs.** Email confirmation is enabled on
   your project (auto-confirm is the default) — turn it back off in the Auth settings, or
   configure an SMTP provider so confirmation emails actually send.
-- **Generation fails at runtime** (agents created, then error). Usually a missing or
-  invalid **LLM Provider Key** (Anthropic) on the project.
+- **Generation / research fails at runtime** (agents created, then error). Almost always
+  the project is **out of credits** (see `402` below) — LLM and web tools are metered as
+  credits. If you added a **BYOK** Anthropic key, double-check it's valid.
 - **Web search/scrape returns "currently unavailable."** The platform's Exa/Firecrawl
-  integration is down or your project is out of credits (these tools are platform-paid —
-  see §1 step 3). Top up credits and retry.
+  integration is down, or your project is out of credits. Top up and retry.
 - **CORS errors in the browser.** `CORS_ALLOW_ORIGINS` (backend) must include the exact
   frontend origin, and `NEXT_PUBLIC_API_BASE_URL` (frontend) must point at the backend.
 - **`402 insufficient_credits`.** Your Powabase project is out of credits — top up;
