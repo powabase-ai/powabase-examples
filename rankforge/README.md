@@ -82,7 +82,7 @@ Three things to stand up, in order:
 
 ## Prerequisites
 
-- A **Powabase account** — sign in at the [Studio](https://powabase.ai) and you can
+- A **Powabase account** — sign in at the [Studio](https://app.powabase.ai) and you can
   create projects. (Powabase is the managed AI BaaS today; self-hosting is on the way
   as it goes open-source.)
 - **Docker + Docker Compose** for the one-command stack. *(Or, for hot-reload dev:
@@ -97,36 +97,41 @@ Three things to stand up, in order:
 
 ## 1. Create & configure a Powabase project
 
-In the [Powabase Studio](https://powabase.ai):
+In the [Powabase Studio](https://app.powabase.ai):
 
 1. **Create a new project.** Note its name — it's your "current project" for the rest
    of these steps. Everything below happens inside it.
 
-2. **Set your LLM provider key.** **Project Settings → LLM Provider Keys** → add your
-   **Anthropic API key** (BYOK). Without this, agents can be created but every
+2. **Add your LLM provider key (BYOK).** In the project's **AI Provider Keys** settings,
+   add an **Anthropic** API key — RankForge's agents call Claude by bare model IDs
+   (`claude-opus-4-8`, `claude-opus-4-7`, `claude-sonnet-4-6`). Powabase supports BYOK
+   for `openai` / `anthropic` / `google` / `openrouter`; RankForge defaults to Anthropic
+   (re-point the `*_MODEL` constants in `backend/src/rankforge_backend/services/` to use a
+   different provider). Without a valid key, agents can be created but every
    generation/research/scoring call fails at runtime.
 
-3. **Set the research tool keys.** **Project Settings → Tools** →
-   set **`EXA_API_KEY`** (web search) and **`FIRECRAWL_API_KEY`** (web scrape).
-   Research and scouts won't function without these.
+3. **Set the research tool keys.** In the project's **Tools** settings, set
+   **`EXA_API_KEY`** (powers `web_search`) and **`FIRECRAWL_API_KEY`** (powers
+   `web_scrape`). Research and scouts won't function without these.
 
-4. **Enable auto-confirm email.** **Auth → Advanced Settings → Auto-confirm Email → ON.**
-   Without it, sign-up returns a "check your email" state instead of an active session,
-   and RankForge can't complete login. *(For a real production deployment you'd instead
-   configure an email/SMTP provider and leave confirmation on.)*
+4. **Check the Auth email setting.** Powabase **auto-confirms email by default**, so
+   sign-up returns an active session immediately — which is what RankForge needs. If
+   you've enabled email confirmation on the project, either turn it back off for
+   local/testing or configure an SMTP provider; otherwise sign-up returns a "check your
+   email" state and login can't complete.
 
-5. **Collect the project credentials** you'll paste into RankForge's env files. Open
-   **Connect** (top of the Studio) and **Project Settings → API**:
+5. **Collect the project credentials** for RankForge's env files. Click **Connect** in
+   your project header (top-right) — everything is in that modal:
 
-   | Value | Where in Studio | Used by |
+   | Value | Where in the Connect modal | Used by |
    |---|---|---|
-   | **Project URL** | Connect → API | backend + frontend |
-   | **Anon / Publishable key** | Connect → API | frontend (browser-safe) |
-   | **Service Role (Secret) key** | Connect → API (reveal) | backend only — **secret** |
-   | **Database URL** (direct/psql connection string) | Connect → Connection Strings | backend + migrations — **secret** |
-   | **JWT Secret** | Project Settings → API → JWT Settings | backend only — **secret** |
+   | **Project URL** | API Keys tab | backend + frontend |
+   | **Anon / Publishable key** | API Keys tab | frontend (browser-safe) |
+   | **Service Role (Secret) key** | API Keys tab (reveal) | backend only — **secret** |
+   | **JWT Secret** | API Keys tab | backend only — **secret** |
+   | **Database URL** (direct / psql connection string) | Connection Strings tab | backend + migrations — **secret** |
 
-   > ⚠️ The **Service Role key**, **Database URL**, and **JWT Secret** are
+   > ⚠️ The **Service Role key**, **JWT Secret**, and **Database URL** are
    > **server-side only** — never put them in the frontend or commit them. The frontend
    > gets only the **Anon** key. See [Security](#security-notes).
 
@@ -251,8 +256,9 @@ frontend gets only the **Anon (Publishable)** key. App tables enable RLS from
   from **Project Settings → Database**.
 - **Connection string ignored / falls back to a local socket.** You wrapped
   `POWABASE_DATABASE_URL` in quotes — remove them.
-- **Sign-up doesn't return a session / login hangs.** Turn on **Auth → Advanced
-  Settings → Auto-confirm Email**.
+- **Sign-up doesn't return a session / login hangs.** Email confirmation is enabled on
+  your project (auto-confirm is the default) — turn it back off in the Auth settings, or
+  configure an SMTP provider so confirmation emails actually send.
 - **Research/generation fails at runtime** (agents created, then error). A project key
   is missing: **LLM Provider Key** (Anthropic), **`EXA_API_KEY`**, or
   **`FIRECRAWL_API_KEY`**.
