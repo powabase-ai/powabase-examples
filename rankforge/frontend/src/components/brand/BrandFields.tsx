@@ -108,15 +108,15 @@ export function BrandFields({
       </div>
       <div className="grid gap-1.5">
         <Label htmlFor="seed_topics">Seed topics <span className="text-muted-foreground">(comma-separated)</span></Label>
-        <Input id="seed_topics" value={value.seed_topics} onChange={set("seed_topics")} placeholder="product analytics, churn, retention" />
+        <Textarea id="seed_topics" className="min-h-[112px] resize-y" value={value.seed_topics} onChange={set("seed_topics")} placeholder="product analytics, churn, retention" />
       </div>
       <div className="grid gap-1.5">
         <Label htmlFor="target_keywords">Target keywords <span className="text-muted-foreground">(comma-separated)</span></Label>
-        <Input id="target_keywords" value={value.target_keywords} onChange={set("target_keywords")} placeholder="product analytics tools, churn rate" />
+        <Textarea id="target_keywords" className="min-h-[112px] resize-y" value={value.target_keywords} onChange={set("target_keywords")} placeholder="product analytics tools, churn rate" />
       </div>
       <div className="grid gap-1.5">
         <Label htmlFor="competitors">Competitor domains <span className="text-muted-foreground">(comma-separated)</span></Label>
-        <Input id="competitors" value={value.competitors} onChange={set("competitors")} placeholder="mixpanel.com, amplitude.com" />
+        <Textarea id="competitors" className="min-h-[88px] resize-y" value={value.competitors} onChange={set("competitors")} placeholder="mixpanel.com, amplitude.com" />
       </div>
       <div className="grid gap-1.5">
         <Label htmlFor="sitemap_url">Sitemap URL</Label>
