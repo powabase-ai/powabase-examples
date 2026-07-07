@@ -87,13 +87,12 @@ Three things to stand up, in order:
   as it goes open-source.)
 - **Docker + Docker Compose** for the one-command stack. *(Or, for hot-reload dev:
   Python 3.13 + [`uv`](https://docs.astral.sh/uv/) and Node 20+.)*
-- API keys you'll paste **into the Powabase project** (not into RankForge):
-  - An **LLM provider key** — RankForge's agents default to **Anthropic Claude**
-    models, so an **Anthropic API key**. (If you re-point the models in
-    `backend/src/rankforge_backend/services/*`, set the matching provider's key
-    instead.)
-  - **`EXA_API_KEY`** — powers `web_search` (SERP/research/scouts).
-  - **`FIRECRAWL_API_KEY`** — powers `web_scrape` (competitor teardown, source capture).
+- An **Anthropic API key** to paste **into the Powabase project** (BYOK) — RankForge's
+  agents default to Anthropic Claude models. This is the only key you supply. (If you
+  re-point the models in `backend/src/rankforge_backend/services/*` to another provider,
+  supply that provider's key instead.)
+  - You do **not** supply Exa/Firecrawl keys for web search & scrape — on managed
+    Powabase those tools are platform-provided and billed as credits (see §1 step 3).
 
 ## 1. Create & configure a Powabase project
 
@@ -102,17 +101,19 @@ In the [Powabase Studio](https://app.powabase.ai):
 1. **Create a new project.** Note its name — it's your "current project" for the rest
    of these steps. Everything below happens inside it.
 
-2. **Add your LLM provider key (BYOK).** In the project's **AI Provider Keys** settings,
-   add an **Anthropic** API key — RankForge's agents call Claude by bare model IDs
+2. **Add your LLM provider key (BYOK).** In **Project Settings → LLM Provider Keys**, add
+   an **Anthropic** API key — RankForge's agents call Claude by bare model IDs
    (`claude-opus-4-8`, `claude-opus-4-7`, `claude-sonnet-4-6`). Powabase supports BYOK
    for `openai` / `anthropic` / `google` / `openrouter`; RankForge defaults to Anthropic
    (re-point the `*_MODEL` constants in `backend/src/rankforge_backend/services/` to use a
    different provider). Without a valid key, agents can be created but every
    generation/research/scoring call fails at runtime.
 
-3. **Set the research tool keys.** In the project's **Tools** settings, set
-   **`EXA_API_KEY`** (powers `web_search`) and **`FIRECRAWL_API_KEY`** (powers
-   `web_scrape`). Research and scouts won't function without these.
+3. **Web search & scrape — nothing to set up.** RankForge's research and scouts use
+   Powabase's built-in `web_search` (Exa) and `web_scrape` (Firecrawl) tools. On managed
+   Powabase these are **platform-provided and billed as credits per call** — you do
+   **not** configure `EXA_API_KEY` / `FIRECRAWL_API_KEY` yourself (there's no Studio
+   field for them). Just make sure the project has credits.
 
 4. **Check the Auth email setting.** Powabase **auto-confirms email by default**, so
    sign-up returns an active session immediately — which is what RankForge needs. If
@@ -261,9 +262,11 @@ frontend gets only the **Anon (Publishable)** key. App tables enable RLS from
 - **Sign-up doesn't return a session / login hangs.** Email confirmation is enabled on
   your project (auto-confirm is the default) — turn it back off in the Auth settings, or
   configure an SMTP provider so confirmation emails actually send.
-- **Research/generation fails at runtime** (agents created, then error). A project key
-  is missing: **LLM Provider Key** (Anthropic), **`EXA_API_KEY`**, or
-  **`FIRECRAWL_API_KEY`**.
+- **Generation fails at runtime** (agents created, then error). Usually a missing or
+  invalid **LLM Provider Key** (Anthropic) on the project.
+- **Web search/scrape returns "currently unavailable."** The platform's Exa/Firecrawl
+  integration is down or your project is out of credits (these tools are platform-paid —
+  see §1 step 3). Top up credits and retry.
 - **CORS errors in the browser.** `CORS_ALLOW_ORIGINS` (backend) must include the exact
   frontend origin, and `NEXT_PUBLIC_API_BASE_URL` (frontend) must point at the backend.
 - **`402 insufficient_credits`.** Your Powabase project is out of credits — top up;
