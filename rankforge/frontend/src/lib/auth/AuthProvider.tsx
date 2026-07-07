@@ -29,6 +29,9 @@ interface AuthValue {
     password: string
   ) => Promise<{ needsConfirm: boolean }>;
   signOut: () => Promise<void>;
+  /** Re-fetch the profile (e.g. after redeeming the signup invite code) so the app
+   *  re-evaluates the invite gate without a full reload. */
+  refreshProfile: () => Promise<void>;
 }
 
 const Ctx = createContext<AuthValue | null>(null);
@@ -107,9 +110,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     qc.clear(); // belt-and-suspenders: drop the previous tenant's cached data
   }, [qc]);
 
+  const refreshProfile = useCallback(async () => {
+    const me = await accountApi.me();
+    setProfile(me);
+  }, []);
+
   return (
     <Ctx.Provider
-      value={{ session, profile, loading, signIn, signUp, signOut }}
+      value={{
+        session,
+        profile,
+        loading,
+        signIn,
+        signUp,
+        signOut,
+        refreshProfile,
+      }}
     >
       {children}
     </Ctx.Provider>

@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     # / optimize / score / scout-run / opportunity-draft): N requests per window.
     rate_limit_expensive: int = 30
     rate_limit_window_seconds: float = 60.0
+    # Attempts per window a single (authenticated) account may make against the signup
+    # invite-code endpoint — brute-force protection for the shared code. Kept low.
+    rate_limit_invite: int = 10
+
+    # --- Signup gate ---
+    # Shared invite code that a newly-registered account must redeem once before it can
+    # use the app. When EMPTY the gate is DISABLED (open signup) — set this in production
+    # to close signups. Treat it like a password; rotate by changing the env value.
+    signup_invite_code: str = ""
 
     @property
     def cors_origins(self) -> list[str]:
