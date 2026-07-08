@@ -267,9 +267,29 @@ def test_public_article_renders_fresh_from_markdown(monkeypatch):
             "json_ld": {"@type": "BlogPosting"}, "updated_at": "2026-06-20T00:00:00Z",
         },
     )
-    resp = _client(MagicMock(), auth=False).get(f"/api/public/articles/{AID}")
+    # The public view resolves the brand + first-publication date; with fetch_one → None
+    # there's no brand (author None) and no prior publication (published_at falls back to
+    # updated_at). content_md stays out of the response; content_html is rendered fresh.
+    db = MagicMock()
+    db.fetch_one.return_value = None
+    resp = _client(db, auth=False).get(f"/api/public/articles/{AID}")
     assert resp.status_code == 200
-    assert "<h1>Live Heading</h1>" in resp.json()["content_html"]
+    data = resp.json()
+    assert "<h1>Live Heading</h1>" in data["content_html"]
+    # meta_description surfaces as the guaranteed social `description`.
+    assert data["description"] == "d"
+    assert data["published_at"] == "2026-06-20T00:00:00Z"
+
+
+def test_excerpt_strips_markdown_and_truncates():
+    from rankforge_backend.services.publishing import _excerpt
+
+    md = "# Heading\n\nRead the [full guide](https://x.io) here before the rest of the body."
+    ex = _excerpt(md, limit=40)
+    assert "Heading" not in ex  # leading H1 (the title) removed
+    assert "full guide" in ex  # link anchor text kept
+    assert "http" not in ex and "](" not in ex  # URL + link syntax dropped
+    assert ex.endswith("…")  # truncated past the limit
 
 
 def test_publish_requires_editor(monkeypatch):

@@ -83,6 +83,22 @@ export function useUpdateArticle(id: string) {
   });
 }
 
+export function useUploadOgImage(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => articlesApi.uploadOgImage(id, file),
+    onSuccess: (data) => qc.setQueryData(["article", id], data),
+  });
+}
+
+export function useRemoveOgImage(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => articlesApi.removeOgImage(id),
+    onSuccess: (data) => qc.setQueryData(["article", id], data),
+  });
+}
+
 export function useOptimizeArticle(id: string) {
   const qc = useQueryClient();
   return useMutation({

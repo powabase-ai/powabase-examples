@@ -1,9 +1,10 @@
 """Article (Stage C) endpoints — async generation + status polling."""
 
 import logging
+import time
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
@@ -46,6 +47,16 @@ router = APIRouter(
 # (un-approve / un-publish / take a live article down) is an editorial decision —
 # writers may only move between their own states (draft, in_review).
 _EDITORIAL_STATUSES = {"approved", "published"}
+
+# Raster only (same rationale as the brand logo): the OG image lands in a PUBLIC bucket
+# with a guessable URL, so an SVG opened directly would execute its embedded script in
+# the storage origin. PNG/JPG/WebP cover every social card.
+_OG_IMAGE_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+}
+_MAX_OG_IMAGE_BYTES = 5 * 1024 * 1024
 
 
 def _guard_article(db: Database, article_id: UUID, user: CurrentUser) -> dict:
@@ -292,6 +303,61 @@ def update_article(
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     return row
+
+
+@router.post("/{article_id}/og-image", response_model=Article)
+async def upload_og_image(
+    article_id: UUID,
+    file: UploadFile = File(...),
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Upload a custom social-share (Open Graph) image for an article. Stored in public
+    storage; its URL overrides the generated OG card on the public page."""
+    ext = _OG_IMAGE_EXT.get(file.content_type or "")
+    if ext is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "image must be a PNG, JPG, or WebP"
+        )
+    content = await file.read()
+    if not content or len(content) > _MAX_OG_IMAGE_BYTES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "image must be non-empty and under 5 MB"
+        )
+    # Confirm the article is in the caller's org before uploading anything to storage.
+    _guard_article(db, article_id, user)
+    # Namespace by org so a guessable article-id path in the shared public bucket can't
+    # let an editor of another org overwrite (x-upsert) this org's image.
+    url = await pb.upload_public_object(
+        "og-images",
+        f"{user.org_id}/{article_id}.{ext}",
+        content,
+        file.content_type or "image/png",
+    )
+    # Cache-bust: the object path is stable (article id), so a fresh ?v refreshes it.
+    row = svc.update_article(
+        db, article_id, {"og_image_url": f"{url}?v={int(time.time())}"}
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    return row
+
+
+@router.delete("/{article_id}/og-image", response_model=Article)
+def remove_og_image(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Clear the custom OG image so the public page falls back to the generated card."""
+    _guard_article(db, article_id, user)
+    db.execute(
+        "update public.articles set og_image_url = null, updated_at = now() "
+        "where id = %s",
+        (article_id,),
+    )
+    return svc.get_article(db, article_id)
 
 
 @router.delete("/{article_id}", status_code=status.HTTP_204_NO_CONTENT)

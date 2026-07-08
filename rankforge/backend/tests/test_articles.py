@@ -266,6 +266,52 @@ def test_editor_can_unpublish_via_patch():
     assert _status_patch("editor", "published", "draft").status_code == 200
 
 
+# --- custom OG (social share) image upload ---
+def test_upload_og_image_stores_url(monkeypatch):
+    monkeypatch.setattr(svc, "get_article", lambda db, aid: {**ARTICLE, "business_id": BID})
+    monkeypatch.setattr(
+        svc, "update_article",
+        lambda db, aid, fields: {**ARTICLE, "og_image_url": fields["og_image_url"]},
+    )
+    pb = MagicMock()
+    pub = f"https://proj/storage/v1/object/public/og-images/{ADMIN_ORG}/{ARTICLE['id']}.png"
+    pb.upload_public_object = AsyncMock(return_value=pub)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: pb
+    resp = TestClient(with_auth(app)).post(
+        f"/api/articles/{ARTICLE['id']}/og-image",
+        files={"file": ("card.png", b"\x89PNG\r\n", "image/png")},
+    )
+    assert resp.status_code == 200
+    pb.upload_public_object.assert_awaited_once()
+    # Object key namespaced by org (no cross-org overwrite in the shared public bucket).
+    bucket, path = pb.upload_public_object.await_args.args[:2]
+    assert bucket == "og-images"
+    assert path == f"{ADMIN_ORG}/{ARTICLE['id']}.png"
+    assert resp.json()["og_image_url"].startswith(pub)  # stored URL (+ cache-buster)
+
+
+def test_upload_og_image_rejects_non_image():
+    resp = make_client().post(
+        f"/api/articles/{ARTICLE['id']}/og-image",
+        files={"file": ("notes.txt", b"hi", "text/plain")},
+    )
+    assert resp.status_code == 400
+
+
+def test_upload_og_image_forbidden_for_writer():
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    resp = TestClient(with_auth(app, writer)).post(
+        f"/api/articles/{ARTICLE['id']}/og-image",
+        files={"file": ("card.png", b"\x89PNG", "image/png")},
+    )
+    assert resp.status_code == 403
+
+
 # --- auto link-check after refine (broken/fabricated URLs surface without a manual run) ---
 async def test_refine_and_finish_revalidates_links_before_done(monkeypatch):
     from rankforge_backend.routes import articles as art_routes

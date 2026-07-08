@@ -7,6 +7,7 @@ import {
   Check,
   Crown,
   ExternalLink,
+  ImagePlus,
   Link2,
   Loader2,
   Scissors,
@@ -33,8 +34,10 @@ import {
   useIgnoreBrokenLink,
   useLinkSuggestions,
   useRemoveBrokenLink,
+  useRemoveOgImage,
   useSuggestLinks,
   useUpdateArticle,
+  useUploadOgImage,
 } from "@/lib/hooks/useArticles";
 import { useBrand } from "@/lib/hooks/useBrands";
 import { useCluster } from "@/lib/hooks/useClusters";
@@ -133,6 +136,8 @@ export function InternalLinksPanel({
       <CanonicalUrlField articleId={articleId} brand={brand.data} />
 
       <AuthorField articleId={articleId} brand={brand.data} />
+
+      <SocialImageField articleId={articleId} />
 
       {brand.data && !hasPattern ? (
         <div className="rounded-md border border-[rgb(var(--ember))]/30 bg-[rgb(var(--ember))]/[0.06] px-3 py-2.5 text-xs">
@@ -414,6 +419,109 @@ function AuthorField({
         ) : (
           "Set a default author in brand settings, or enter one here."
         )}
+      </p>
+    </div>
+  );
+}
+
+/** Per-article social-share (Open Graph) image. Upload a custom card to Powabase
+ *  storage, or leave it and the public page serves a branded card generated on the fly. */
+function SocialImageField({ articleId }: { articleId: string }) {
+  const { profile } = useAuth();
+  const canEdit = canApprove(profile?.role);
+  const { data: article } = useArticle(articleId);
+  const upload = useUploadOgImage(articleId);
+  const removeImg = useRemoveOgImage(articleId);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  if (!canEdit) return null;
+  const current = article?.og_image_url ?? null;
+
+  function onPick(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // let the user re-pick the same file after an error
+    if (!file) return;
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      toast.error("Use a PNG, JPG, or WebP image");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Image must be under 5 MB");
+      return;
+    }
+    upload.mutate(file, {
+      onSuccess: () => toast.success("Share image updated"),
+      onError: (err) =>
+        toast.error(err instanceof Error ? err.message : "Upload failed"),
+    });
+  }
+
+  return (
+    <div className="space-y-1.5 rounded-md border border-border p-2.5">
+      <label className="text-xs font-medium text-muted-foreground">
+        Social share image
+      </label>
+      {current ? (
+        // Storage-hosted preview; next/image would need remote-host config for a
+        // user-controlled origin, so a plain <img> is the pragmatic choice here.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={current}
+          alt="Social share preview"
+          className="aspect-[1200/630] w-full rounded border border-border object-cover"
+        />
+      ) : (
+        <div className="flex aspect-[1200/630] w-full items-center justify-center rounded border border-dashed border-border bg-muted/40 text-[11px] text-muted-foreground">
+          Auto-generated branded card
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          className="hidden"
+          onChange={onPick}
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => inputRef.current?.click()}
+          disabled={upload.isPending}
+        >
+          {upload.isPending ? (
+            <Loader2 className="animate-spin" />
+          ) : (
+            <ImagePlus className="size-3.5" />
+          )}
+          {current ? "Replace" : "Upload"}
+        </Button>
+        {current && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() =>
+              removeImg.mutate(undefined, {
+                onSuccess: () => toast.success("Reverted to generated card"),
+                onError: (err) =>
+                  toast.error(err instanceof Error ? err.message : "Remove failed"),
+              })
+            }
+            disabled={removeImg.isPending}
+          >
+            {removeImg.isPending ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Trash2 className="size-3.5" />
+            )}
+            Remove
+          </Button>
+        )}
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        {current
+          ? "Shown when this article is shared on social and in chat unfurls."
+          : "A branded card is generated automatically — upload one to override it. 1200×630, PNG/JPG/WebP, under 5 MB."}
       </p>
     </div>
   );

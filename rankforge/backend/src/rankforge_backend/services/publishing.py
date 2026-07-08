@@ -337,10 +337,69 @@ def get_published(db: Database, article_id: UUID) -> dict[str, Any] | None:
     never serves stale HTML and sanitization is guaranteed at render time."""
     return db.fetch_one(
         "select id, business_id, title, slug, meta_title, meta_description, "
-        "content_md, json_ld, updated_at from public.articles "
-        "where id = %s and status = 'published'",
+        "content_md, json_ld, canonical_url, og_image_url, author, updated_at "
+        "from public.articles where id = %s and status = 'published'",
         (article_id,),
     )
+
+
+# Markdown noise to strip when deriving a plain-text social description from the body.
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")  # keep the anchor text, drop the URL
+_MD_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_MD_INLINE_RE = re.compile(r"[`*_>#~]|^\s*[-*+]\s+", re.MULTILINE)
+_WS_RE = re.compile(r"\s+")
+
+
+def _excerpt(content_md: str, limit: int = 155) -> str:
+    """A plain-text, single-line excerpt from a Markdown body — used as the social /
+    meta description fallback when meta_description is empty. Strips the leading '# H1'
+    (the title, rendered separately), code fences, images, and inline formatting, then
+    truncates on a word boundary with an ellipsis."""
+    text = _strip_leading_h1(content_md or "")
+    text = _MD_FENCE_RE.sub(" ", text)
+    text = _MD_IMAGE_RE.sub(" ", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _MD_INLINE_RE.sub(" ", text)
+    text = _WS_RE.sub(" ", text).strip()
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit].rsplit(" ", 1)[0].rstrip(",.;:—- ")
+    return f"{clipped}…"
+
+
+def public_article_view(db: Database, row: dict[str, Any]) -> dict[str, Any]:
+    """Enrich a published-article row into the public SSR payload: sanitized HTML (refs
+    resolved), a guaranteed description, the live canonical URL, a resolved byline, and
+    the first-published date — everything the page's OG/Twitter/canonical metadata needs."""
+    from . import business_profiles as brands_svc
+
+    business_id = row.get("business_id")
+    brand = brands_svc.get_profile(db, business_id) if business_id else None
+    resolved = linking.resolve_links(db, business_id, row.get("content_md") or "")
+    description = (row.get("meta_description") or "").strip() or _excerpt(
+        row.get("content_md") or ""
+    )
+    brand_name = (brand or {}).get("name")
+    author = (
+        row.get("author")
+        or (brand or {}).get("default_author")
+        or (f"{brand_name} Team" if brand_name else None)
+    )
+    first = db.fetch_one(
+        "select min(published_at) as first from public.publications "
+        "where article_id = %s and published_at is not null",
+        (row["id"],),
+    )
+    published_at = (first or {}).get("first") or row.get("updated_at")
+    return {
+        **row,
+        "content_html": render_body_html(resolved),
+        "description": description or None,
+        "canonical_url": linking.canonical_url(brand, row),
+        "author": author,
+        "published_at": published_at,
+    }
 
 
 def _export_published_date(db: Database, article_id: UUID, status: str | None) -> str:
