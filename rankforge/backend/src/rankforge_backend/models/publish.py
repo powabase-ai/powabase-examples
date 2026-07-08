@@ -25,13 +25,25 @@ class Publication(BaseModel):
 
 
 class PublicArticle(BaseModel):
-    """The public, server-rendered view of a published article."""
+    """The public, server-rendered view of a published article — everything the SSR
+    page needs to build crawlable, share-ready metadata (OG/Twitter/canonical/JSON-LD)."""
 
     id: UUID
     title: str
     slug: str | None = None
     meta_title: str | None = None
     meta_description: str | None = None
+    # A guaranteed non-empty social description: meta_description → a body excerpt →
+    # the title (final fallback), so a share card / <meta name=description> is never
+    # blank even when the body is only an H1 / images / code.
+    description: str | None = None
     content_html: str | None = None
     json_ld: dict | None = None
+    # Where the article actually lives (canonical_url override → brand url_pattern),
+    # for <link rel=canonical> and og:url. None if the brand has no url_pattern.
+    canonical_url: str | None = None
+    # Uploaded social-share image; when null the page uses the generated OG card.
+    og_image_url: str | None = None
+    author: str | None = None
+    published_at: datetime | None = None
     updated_at: datetime

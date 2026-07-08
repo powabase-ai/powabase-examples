@@ -56,6 +56,9 @@ class Article(BaseModel):
     content_html: str | None = None
     canonical_url: str | None = None
     author: str | None = None
+    # Uploaded per-article social-share image (Powabase public storage). Overrides the
+    # dynamically-generated OG card on the public page.
+    og_image_url: str | None = None
     cluster_id: UUID | None = None
     cluster_role: str | None = None
     created_at: datetime

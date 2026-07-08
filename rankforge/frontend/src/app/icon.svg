@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="RankForge">
+  <rect width="64" height="64" rx="14" fill="#191C22"/>
+  <text x="32" y="34" text-anchor="middle" dominant-baseline="central"
+        font-family="'Space Grotesk', 'Segoe UI', system-ui, -apple-system, sans-serif"
+        font-size="33" font-weight="700" letter-spacing="-1.5">
+    <tspan fill="#F0F2F5">R</tspan><tspan fill="#EE4D2D">F</tspan>
+  </text>
+</svg>

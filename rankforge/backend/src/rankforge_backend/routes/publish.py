@@ -16,7 +16,6 @@ from ..models.article import Article
 from ..models.profile import CurrentUser
 from ..models.publish import PublicArticle, Publication, PublishRequest
 from ..services import generation as gen_svc
-from ..services import linking as linking_svc
 from ..services import publishing as svc
 from .deps import get_db
 
@@ -118,9 +117,7 @@ def public_article(article_id: UUID, db: Database = Depends(get_db)):
     row = svc.get_published(db, article_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
-    # Resolve internal-link refs to live URLs, then render + sanitize fresh from
-    # content_md (response_model drops content_md).
-    resolved = linking_svc.resolve_links(
-        db, row["business_id"], row.get("content_md") or ""
-    )
-    return {**row, "content_html": svc.render_body_html(resolved)}
+    # Enrich into the public payload: refs resolved + sanitized HTML, a guaranteed
+    # description, live canonical URL, resolved byline, first-published date. The
+    # response_model drops content_md, so the body is only exposed as sanitized HTML.
+    return svc.public_article_view(db, row)

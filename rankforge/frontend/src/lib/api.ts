@@ -458,6 +458,9 @@ export interface Article extends ArticleSummary {
   grounding_report?: GroundingReport | null;
   canonical_url?: string | null;
   author?: string | null;
+  // Custom social-share image (Powabase public storage). When set it overrides the
+  // generated OG card on the public page.
+  og_image_url?: string | null;
   cluster_id?: string | null;
   cluster_role?: "pillar" | "member" | null;
   created_at: string;
@@ -487,10 +490,46 @@ export interface ArticleVersion {
   word_count?: number | null;
 }
 
+/** Multipart upload of an article's custom OG image → public storage; returns the
+ *  updated article. Mirrors uploadBrandLogo()'s auth + 401→refresh→retry. */
+async function uploadOgImage(
+  id: string,
+  file: File,
+  retry = false
+): Promise<Article> {
+  const form = new FormData();
+  form.append("file", file);
+  const token = getAccessToken();
+  const res = await fetch(`${API_BASE_URL}/api/articles/${id}/og-image`, {
+    method: "POST",
+    cache: "no-store",
+    body: form,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return uploadOgImage(id, file, true);
+  }
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      const body = await res.json();
+      detail = body.detail ?? JSON.stringify(body);
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, friendlyMessage(res.status, detail));
+  }
+  return res.json();
+}
+
 export const articlesApi = {
   listByBrand: (businessId: string) =>
     request<ArticleSummary[]>(`/api/articles?business_id=${businessId}`),
   get: (id: string) => request<Article>(`/api/articles/${id}`),
+  uploadOgImage: (id: string, file: File) => uploadOgImage(id, file),
+  removeOgImage: (id: string) =>
+    request<Article>(`/api/articles/${id}/og-image`, { method: "DELETE" }),
   generate: (briefId: string) =>
     request<Article>("/api/articles", {
       method: "POST",
