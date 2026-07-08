@@ -462,8 +462,9 @@ function SocialImageField({ articleId }: { articleId: string }) {
         Social share image
       </label>
       {current ? (
-        // Storage-hosted preview; next/image would need remote-host config for a
-        // user-controlled origin, so a plain <img> is the pragmatic choice here.
+        // Preview from a fixed Powabase storage origin (only the object path varies).
+        // next/image would still need that remote host allow-listed in next.config, so a
+        // plain <img> is the pragmatic choice for this small preview.
         // eslint-disable-next-line @next/next/no-img-element
         <img
           src={current}

@@ -335,7 +335,8 @@ async def upload_og_image(
         content,
         file.content_type or "image/png",
     )
-    # Cache-bust: the object path is stable (article id), so a fresh ?v refreshes it.
+    # Cache-bust: the object key ({org_id}/{article_id}.{ext}) is stable across
+    # re-uploads, so a fresh ?v is what actually refreshes a cached CDN/scraper copy.
     row = svc.update_article(
         db, article_id, {"og_image_url": f"{url}?v={int(time.time())}"}
     )
@@ -357,7 +358,12 @@ def remove_og_image(
         "where id = %s",
         (article_id,),
     )
-    return svc.get_article(db, article_id)
+    # Guard the narrow race where the article is deleted between the access check and
+    # the reload — a None here would 500 against response_model=Article, not 404.
+    row = svc.get_article(db, article_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    return row
 
 
 @router.delete("/{article_id}", status_code=status.HTTP_204_NO_CONTENT)

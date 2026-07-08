@@ -16,6 +16,11 @@ export async function GET(
   const { id } = await params;
   let title = "RankForge";
   let author: string | null = null;
+  // A transient backend failure must NOT be cached: social scrapers keep a 200 for
+  // days/weeks, so a blip during an article's launch could pin the generic card. On a
+  // 404 (article gone/unpublished) the brand card is genuinely correct and cacheable;
+  // on a network error or 5xx we render the fallback but mark it no-store + log it.
+  let degraded = false;
   try {
     const res = await fetch(`${API}/api/public/articles/${id}`, {
       cache: "no-store",
@@ -28,9 +33,13 @@ export async function GET(
       };
       title = a.meta_title || a.title || title;
       author = a.author ?? null;
+    } else if (res.status !== 404) {
+      degraded = true;
+      console.error(`OG card: article fetch ${res.status} for ${id}`);
     }
-  } catch {
-    /* fall back to the bare brand card */
+  } catch (err) {
+    degraded = true;
+    console.error(`OG card: article fetch failed for ${id}`, err);
   }
   // Keep the headline to a readable size on the card.
   const headline = title.length > 140 ? `${title.slice(0, 137)}…` : title;
@@ -99,6 +108,10 @@ export async function GET(
         </div>
       </div>
     ),
-    { ...size }
+    {
+      ...size,
+      // Don't let a scraper pin a degraded (headline-less) card; a good card can cache.
+      headers: degraded ? { "Cache-Control": "no-store, max-age=0" } : undefined,
+    }
   );
 }

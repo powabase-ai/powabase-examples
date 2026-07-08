@@ -292,6 +292,52 @@ def test_excerpt_strips_markdown_and_truncates():
     assert ex.endswith("…")  # truncated past the limit
 
 
+def test_excerpt_edge_cases():
+    from rankforge_backend.services.publishing import _excerpt
+
+    assert _excerpt("# Just a title") == ""  # body is only an H1 → empty
+    assert _excerpt("") == ""
+    # Structural strip only — identifiers with '_' / mid-word '#' survive.
+    ex = _excerpt("# H\n\nUse snake_case and C# freely in the prose here.")
+    assert "snake_case" in ex and "C#" in ex
+    # Code fences are dropped.
+    assert "print" not in _excerpt("# H\n\n```\nprint(1)\n```\n")
+
+
+def test_public_article_view_fills_fallbacks(monkeypatch):
+    """Excerpt-from-body description, the brand-default author, url_pattern canonical,
+    and the first-publication date — all the fallback branches the happy-path test
+    doesn't touch."""
+    from rankforge_backend.services import business_profiles as brands_svc
+
+    monkeypatch.setattr(
+        svc, "get_published",
+        lambda db, aid: {
+            "id": AID, "business_id": AID, "title": "Deep Dive", "slug": "deep-dive",
+            "meta_title": None, "meta_description": "",  # empty → excerpt fallback
+            "content_md": "# Deep Dive\n\nThe opening paragraph explains everything.",
+            "json_ld": None, "canonical_url": None, "og_image_url": None,
+            "author": None, "updated_at": "2026-06-20T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        brands_svc, "get_profile",
+        lambda db, bid: {
+            "id": AID, "name": "Acme", "url_pattern": "https://blog.acme.com/{slug}",
+            "default_author": "Acme Editorial", "competitors": [],
+        },
+    )
+    db = MagicMock()
+    db.fetch_one.return_value = {"first": "2026-06-18T00:00:00Z"}  # first publication
+    resp = _client(db, auth=False).get(f"/api/public/articles/{AID}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["description"].startswith("The opening paragraph")  # excerpt fallback
+    assert data["author"] == "Acme Editorial"  # brand default
+    assert data["canonical_url"] == "https://blog.acme.com/deep-dive"  # url_pattern
+    assert data["published_at"] == "2026-06-18T00:00:00Z"  # min(published_at)
+
+
 def test_publish_requires_editor(monkeypatch):
     from rankforge_backend.models.profile import CurrentUser
 

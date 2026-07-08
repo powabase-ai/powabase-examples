@@ -10,3 +10,13 @@ export const PENDING_INVITE_KEY = "rankforge:pendingInvite";
 export const SITE_URL = (
   process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3007"
 ).replace(/\/+$/, "");
+
+if (process.env.NODE_ENV === "production" && !process.env.NEXT_PUBLIC_SITE_URL) {
+  // A prod build without this ships canonicals + OG image URLs pointing at localhost.
+  // Warn loudly (rather than fail the build, which would hard-block an example-app
+  // deploy) — set NEXT_PUBLIC_SITE_URL to the real origin to silence it.
+  console.warn(
+    "[rankforge] NEXT_PUBLIC_SITE_URL is not set — canonical + Open Graph URLs fall " +
+      "back to http://localhost:3007. Set it to the deployed origin."
+  );
+}

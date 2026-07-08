@@ -33,8 +33,9 @@ class PublicArticle(BaseModel):
     slug: str | None = None
     meta_title: str | None = None
     meta_description: str | None = None
-    # A guaranteed non-empty social description: meta_description, else an excerpt
-    # derived from the body (so a share card / <meta name=description> is never blank).
+    # A guaranteed non-empty social description: meta_description → a body excerpt →
+    # the title (final fallback), so a share card / <meta name=description> is never
+    # blank even when the body is only an H1 / images / code.
     description: str | None = None
     content_html: str | None = None
     json_ld: dict | None = None

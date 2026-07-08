@@ -289,7 +289,9 @@ def test_upload_og_image_stores_url(monkeypatch):
     bucket, path = pb.upload_public_object.await_args.args[:2]
     assert bucket == "og-images"
     assert path == f"{ADMIN_ORG}/{ARTICLE['id']}.png"
-    assert resp.json()["og_image_url"].startswith(pub)  # stored URL (+ cache-buster)
+    url = resp.json()["og_image_url"]
+    assert url.startswith(pub)
+    assert "?v=" in url  # the cache-buster suffix is actually appended
 
 
 def test_upload_og_image_rejects_non_image():
@@ -298,6 +300,21 @@ def test_upload_og_image_rejects_non_image():
         files={"file": ("notes.txt", b"hi", "text/plain")},
     )
     assert resp.status_code == 400
+
+
+def test_upload_og_image_rejects_empty_and_oversize():
+    # Empty and >5 MB are both rejected before any storage write.
+    empty = make_client().post(
+        f"/api/articles/{ARTICLE['id']}/og-image",
+        files={"file": ("card.png", b"", "image/png")},
+    )
+    assert empty.status_code == 400
+    big = b"\x89PNG\r\n" + b"0" * (5 * 1024 * 1024 + 1)
+    oversize = make_client().post(
+        f"/api/articles/{ARTICLE['id']}/og-image",
+        files={"file": ("card.png", big, "image/png")},
+    )
+    assert oversize.status_code == 400
 
 
 def test_upload_og_image_forbidden_for_writer():
@@ -310,6 +327,37 @@ def test_upload_og_image_forbidden_for_writer():
         files={"file": ("card.png", b"\x89PNG", "image/png")},
     )
     assert resp.status_code == 403
+
+
+def test_remove_og_image_clears_via_raw_update(monkeypatch):
+    monkeypatch.setattr(
+        svc, "get_article", lambda db, aid: {**ARTICLE, "business_id": BID, "og_image_url": None}
+    )
+    db = _brand_db()
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    resp = TestClient(with_auth(app)).delete(f"/api/articles/{ARTICLE['id']}/og-image")
+    assert resp.status_code == 200
+    assert resp.json()["og_image_url"] is None
+    # A raw UPDATE nulls it — update_article would strip the None and silently no-op.
+    sql = db.execute.call_args.args[0].lower()
+    assert "og_image_url = null" in sql
+
+
+def test_remove_og_image_404_when_article_vanishes(monkeypatch):
+    # Article present at the guard, gone on the reload (deleted mid-request) → 404, not
+    # a 500 from response_model validating a None body.
+    monkeypatch.setattr(
+        svc, "get_article",
+        MagicMock(side_effect=[{**ARTICLE, "business_id": BID}, None]),
+    )
+    db = _brand_db()
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    resp = TestClient(with_auth(app)).delete(f"/api/articles/{ARTICLE['id']}/og-image")
+    assert resp.status_code == 404
 
 
 # --- auto link-check after refine (broken/fabricated URLs surface without a manual run) ---

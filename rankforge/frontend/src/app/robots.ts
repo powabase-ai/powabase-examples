@@ -9,7 +9,8 @@ export default function robots(): MetadataRoute.Robots {
     rules: {
       userAgent: "*",
       allow: "/",
-      disallow: ["/brands/", "/login", "/accept-invite"],
+      // No trailing slash → the prefix also covers the bare /brands index.
+      disallow: ["/brands", "/login", "/accept-invite"],
     },
   };
 }

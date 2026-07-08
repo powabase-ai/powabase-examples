@@ -347,7 +347,13 @@ def get_published(db: Database, article_id: UUID) -> dict[str, Any] | None:
 _MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")  # keep the anchor text, drop the URL
 _MD_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
-_MD_INLINE_RE = re.compile(r"[`*_>#~]|^\s*[-*+]\s+", re.MULTILINE)
+# Strip structural markers at line start (headings, list bullets, blockquotes) and
+# inline emphasis/code marks anywhere — but NOT '_' or a mid-word '#', so identifiers
+# like snake_case and C# survive in the excerpt.
+_MD_INLINE_RE = re.compile(
+    r"^\s{0,3}#{1,6}\s+|^\s*[-*+]\s+|^\s*>\s?|[`*~]",
+    re.MULTILINE,
+)
 _WS_RE = re.compile(r"\s+")
 
 
@@ -377,8 +383,13 @@ def public_article_view(db: Database, row: dict[str, Any]) -> dict[str, Any]:
     business_id = row.get("business_id")
     brand = brands_svc.get_profile(db, business_id) if business_id else None
     resolved = linking.resolve_links(db, business_id, row.get("content_md") or "")
-    description = (row.get("meta_description") or "").strip() or _excerpt(
-        row.get("content_md") or ""
+    # Guaranteed non-empty: meta_description → a body excerpt → the title. The final
+    # title fallback matters when the body is only an H1 / images / code, so the SSR
+    # page never ships an empty <meta description>/og:description.
+    description = (
+        (row.get("meta_description") or "").strip()
+        or _excerpt(row.get("content_md") or "")
+        or row.get("title")
     )
     brand_name = (brand or {}).get("name")
     author = (
@@ -395,7 +406,7 @@ def public_article_view(db: Database, row: dict[str, Any]) -> dict[str, Any]:
     return {
         **row,
         "content_html": render_body_html(resolved),
-        "description": description or None,
+        "description": description,  # non-empty (title is the final fallback)
         "canonical_url": linking.canonical_url(brand, row),
         "author": author,
         "published_at": published_at,
