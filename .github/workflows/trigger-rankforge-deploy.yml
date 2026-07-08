@@ -27,5 +27,6 @@ jobs:
         run: |
           gh workflow run deploy-rankforge.yml \
             -R powabase-ai/agentic-monorepo \
+            --ref main \
             -f deploy=all
           echo "Dispatched rankforge deploy=all (triggered by ${{ github.sha }})."
