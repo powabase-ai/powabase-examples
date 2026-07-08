@@ -64,6 +64,32 @@ export function refreshGrant(refreshToken: string): Promise<Session> {
   });
 }
 
+/** Set a new password for the signed-in user (requires a valid access token).
+ *  GoTrue's PUT /user doesn't itself require the old password — callers verify the
+ *  current password first (via signInWithPassword) as an app-level guard. */
+export async function updatePassword(
+  accessToken: string,
+  password: string
+): Promise<GoTrueUser> {
+  const res = await fetch(`${URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: ANON,
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg =
+      data.error_description || data.msg || data.error ||
+      `Password update failed (${res.status})`;
+    throw new Error(msg);
+  }
+  return data as GoTrueUser;
+}
+
 export async function signOutRequest(accessToken: string): Promise<void> {
   await fetch(`${URL}/auth/v1/logout`, {
     method: "POST",
