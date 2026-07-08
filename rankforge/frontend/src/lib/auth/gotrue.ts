@@ -23,6 +23,17 @@ export interface Session {
   user: GoTrueUser;
 }
 
+/** Carries the HTTP status so callers can distinguish a credential rejection
+ *  (400/401) from a transient failure (429 rate-limit, 5xx, network). */
+export class GoTrueError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "GoTrueError";
+    this.status = status;
+  }
+}
+
 async function authPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${URL}/auth/v1/${path}`, {
     method: "POST",
@@ -38,7 +49,7 @@ async function authPost<T>(path: string, body: unknown): Promise<T> {
     const msg =
       data.error_description || data.msg || data.error ||
       `Authentication failed (${res.status})`;
-    throw new Error(msg);
+    throw new GoTrueError(res.status, msg);
   }
   return data as T;
 }
@@ -62,6 +73,41 @@ export function refreshGrant(refreshToken: string): Promise<Session> {
   return authPost<Session>("token?grant_type=refresh_token", {
     refresh_token: refreshToken,
   });
+}
+
+/** Set a new password for the signed-in user (requires a valid access token).
+ *  GoTrue's `PUT /auth/v1/user` doesn't itself require the old password — callers
+ *  verify the current password first (via signInWithPassword) as an app-level guard. */
+export async function updatePassword(
+  accessToken: string,
+  password: string
+): Promise<GoTrueUser> {
+  const res = await fetch(`${URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: ANON,
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ password }),
+  });
+  // Read the body as text first so a non-JSON error page (gateway 502/504) is kept
+  // for diagnostics rather than collapsing to a bare status code.
+  const raw = await res.text();
+  let data: Record<string, unknown> = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    /* non-JSON body — keep `raw` for the log below */
+  }
+  if (!res.ok) {
+    console.error("updatePassword failed:", res.status, raw);
+    const msg =
+      (data.error_description as string) || (data.msg as string) ||
+      (data.error as string) || `Password update failed (${res.status})`;
+    throw new GoTrueError(res.status, msg);
+  }
+  return data as unknown as GoTrueUser;
 }
 
 export async function signOutRequest(accessToken: string): Promise<void> {

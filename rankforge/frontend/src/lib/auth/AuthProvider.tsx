@@ -11,7 +11,13 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 
 import { accountApi, ApiError, type Profile } from "@/lib/api";
-import { signInWithPassword, signUp as gtSignUp, type Session } from "./gotrue";
+import {
+  GoTrueError,
+  signInWithPassword,
+  signUp as gtSignUp,
+  updatePassword,
+  type Session,
+} from "./gotrue";
 import {
   loadSession,
   setSession,
@@ -32,6 +38,9 @@ interface AuthValue {
   /** Re-fetch the profile (e.g. after redeeming the signup invite code) so the app
    *  re-evaluates the invite gate without a full reload. */
   refreshProfile: () => Promise<void>;
+  /** Change the signed-in user's password. Verifies `currentPassword` first
+   *  (app-level guard), then sets the new one. Throws with a friendly message. */
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
 }
 
 const Ctx = createContext<AuthValue | null>(null);
@@ -115,6 +124,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setProfile(me);
   }, []);
 
+  const changePassword = useCallback(
+    async (currentPassword: string, newPassword: string) => {
+      const email = session?.user?.email;
+      if (!email) throw new Error("You're not signed in.");
+      let fresh: Session;
+      try {
+        // Re-authenticate to prove the caller knows the current password. This also
+        // mints a fresh session we then use for the update.
+        fresh = await signInWithPassword(email, currentPassword);
+      } catch (err) {
+        // Only a genuine credential rejection means the password was wrong. A
+        // rate-limit (429), server error (5xx), or network failure must surface as-is
+        // — otherwise a user with the CORRECT password is told it's wrong and retypes
+        // it repeatedly (worsening any rate-limit).
+        if (err instanceof GoTrueError && (err.status === 400 || err.status === 401)) {
+          throw new Error("Current password is incorrect.");
+        }
+        throw err;
+      }
+      await updatePassword(fresh.access_token, newPassword);
+      // Adopt the fresh (still-valid) session. Caveat: if the GoTrue project is set to
+      // revoke sibling sessions on password change, another open tab hard-logs-out on
+      // its next silent refresh — inherent to the token model, not handled here.
+      setSession(fresh);
+    },
+    [session]
+  );
+
   return (
     <Ctx.Provider
       value={{
@@ -125,6 +162,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signUp,
         signOut,
         refreshProfile,
+        changePassword,
       }}
     >
       {children}

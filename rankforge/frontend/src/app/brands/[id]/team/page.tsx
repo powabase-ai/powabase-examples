@@ -1,11 +1,15 @@
 "use client";
 
-import { Loader2, Users } from "lucide-react";
+import * as React from "react";
+import { Copy, Loader2, Trash2, UserPlus, Users } from "lucide-react";
 import { toast } from "sonner";
 
-import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import { useMembers, useSetRole } from "@/lib/hooks/useAccount";
+import { useCreateInvite, useInvites, useRevokeInvite } from "@/lib/hooks/useOrg";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import type { Role } from "@/lib/api";
 
@@ -14,6 +18,21 @@ const ROLES: { value: Role; blurb: string }[] = [
   { value: "editor", blurb: "Approve & publish" },
   { value: "admin", blurb: "Manage roles" },
 ];
+
+/** The out-of-band accept link an admin shares with an invitee. */
+function inviteLink(token: string): string {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  return `${origin}/accept-invite?token=${encodeURIComponent(token)}`;
+}
+
+async function copyInviteLink(token: string, msg = "Invite link copied") {
+  try {
+    await navigator.clipboard.writeText(inviteLink(token));
+    toast.success(msg);
+  } catch {
+    toast.error("Couldn't copy the link — copy it from the address manually");
+  }
+}
 
 export default function TeamPage() {
   const { data: members, isLoading } = useMembers();
@@ -41,8 +60,10 @@ export default function TeamPage() {
         <span className="font-medium">writers</span> draft and submit,{" "}
         <span className="font-medium">editors</span> approve and publish, and{" "}
         <span className="font-medium">admins</span> manage roles.
-        {!isAdmin && " Only admins can change roles."}
+        {!isAdmin && " Only admins can invite teammates or change roles."}
       </p>
+
+      {isAdmin && <InviteTeammates />}
 
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
 
@@ -98,5 +119,139 @@ export default function TeamPage() {
       </div>
       </PageBody>
     </Page>
+  );
+}
+
+/** Admin-only. Create/list/revoke teammate invites. Mounted only for admins so the
+ *  admin-gated /api/org/invites list never fires for non-admins. */
+function InviteTeammates() {
+  const { data: invites } = useInvites();
+  const create = useCreateInvite();
+  const revoke = useRevokeInvite();
+  const [email, setEmail] = React.useState("");
+  const [role, setRole] = React.useState<Role>("writer");
+
+  const pending = (invites ?? []).filter((i) => !i.accepted_at);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const value = email.trim();
+    if (!value) return;
+    create.mutate(
+      { email: value, role },
+      {
+        onSuccess: (inv) => {
+          setEmail("");
+          if (inv.token) {
+            copyInviteLink(
+              inv.token,
+              `Invite created for ${inv.email} — link copied. Share it with them.`
+            );
+          }
+        },
+        onError: (err) =>
+          toast.error(
+            err instanceof Error ? err.message : "Could not create invite"
+          ),
+      }
+    );
+  }
+
+  function doRevoke(id: string) {
+    revoke.mutate(id, {
+      onSuccess: () => toast.success("Invite revoked"),
+      onError: (e) =>
+        toast.error(e instanceof Error ? e.message : "Revoke failed"),
+    });
+  }
+
+  return (
+    <Card className="mb-6">
+      <CardHeader>
+        <CardTitle className="text-base">Invite a teammate</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <form onSubmit={submit} className="flex flex-wrap items-end gap-2">
+          <div className="grid min-w-[220px] flex-1 gap-1.5">
+            <label htmlFor="invite_email" className="text-xs text-muted-foreground">
+              Email
+            </label>
+            <Input
+              id="invite_email"
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="teammate@company.com"
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <label htmlFor="invite_role" className="text-xs text-muted-foreground">
+              Role
+            </label>
+            <select
+              id="invite_role"
+              value={role}
+              onChange={(e) => setRole(e.target.value as Role)}
+              className="h-9 rounded-md border border-input bg-card px-2 text-sm font-medium capitalize text-foreground outline-none focus:ring-1 focus:ring-[rgb(var(--ember))]"
+            >
+              {ROLES.map((r) => (
+                <option key={r.value} value={r.value}>
+                  {r.value}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Button type="submit" variant="gold" disabled={create.isPending || !email.trim()}>
+            {create.isPending ? <Loader2 className="animate-spin" /> : <UserPlus />}
+            Create invite
+          </Button>
+        </form>
+
+        <p className="text-xs text-muted-foreground">
+          Creating an invite gives you a private link to share directly with your
+          teammate — no email is sent. They sign up (or sign in), open the link, and
+          join this workspace with the role you picked.
+        </p>
+
+        {pending.length > 0 && (
+          <div className="divide-y divide-border rounded-md border border-border">
+            {pending.map((i) => (
+              <div
+                key={i.id}
+                className="flex items-center justify-between gap-3 px-3 py-2.5"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{i.email}</div>
+                  <div className="text-xs capitalize text-muted-foreground">
+                    {i.role} · pending
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  {i.token && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => copyInviteLink(i.token!)}
+                    >
+                      <Copy /> Copy link
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => doRevoke(i.id)}
+                    disabled={revoke.isPending}
+                    aria-label={`Revoke invite for ${i.email}`}
+                  >
+                    <Trash2 />
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

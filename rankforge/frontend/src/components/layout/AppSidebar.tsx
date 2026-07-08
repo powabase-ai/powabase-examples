@@ -110,7 +110,11 @@ export function AppSidebar({ brandId }: { brandId: string }) {
 
       <div className="mt-auto border-t border-[rgb(var(--iron-line))]">
         <div className="flex items-center justify-between gap-2 px-5 py-3.5">
-          <div className="min-w-0">
+          <Link
+            href={`/brands/${brandId}/profile`}
+            title="Your profile"
+            className="-mx-1 min-w-0 rounded-md px-1 py-0.5 transition-colors hover:bg-[rgb(var(--iron-hover))]"
+          >
             <div className="truncate text-xs font-medium text-[rgb(var(--iron-strong))]">
               {profile?.email ?? "—"}
             </div>
@@ -119,7 +123,7 @@ export function AppSidebar({ brandId }: { brandId: string }) {
                 {profile.role}
               </div>
             )}
-          </div>
+          </Link>
           <button
             onClick={() => signOut()}
             title="Sign out"
