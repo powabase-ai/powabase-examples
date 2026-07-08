@@ -18,6 +18,9 @@ COPY src ./src
 RUN uv sync --no-dev
 
 COPY schema ./schema
+# scripts/ ships the forward-only migration runner (apply_schema.py) that the
+# rankforge deploy's one-shot `migrate` compose service runs.
+COPY scripts ./scripts
 
 EXPOSE 8000
 
