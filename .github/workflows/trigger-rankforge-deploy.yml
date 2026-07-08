@@ -1,0 +1,31 @@
+name: Trigger RankForge deploy
+
+# When rankforge app code lands on main, dispatch the deploy workflow that lives in
+# the private powabase-ai/agentic-monorepo (it builds the images from THIS repo and
+# ships them to the rankforge EC2 host). GitHub does not cross repos on its own, so
+# this fires deploy-rankforge.yml's existing workflow_dispatch via the GH API.
+#
+# Requires secret RANKFORGE_DEPLOY_DISPATCH_TOKEN: a fine-grained PAT (or GitHub App
+# token) scoped to powabase-ai/agentic-monorepo with "Actions: read and write" — the
+# default GITHUB_TOKEN cannot reach another repo. Path filter is code-only so docs /
+# README merges don't redeploy.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rankforge/backend/**'
+      - 'rankforge/frontend/**'
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch deploy-rankforge.yml in agentic-monorepo
+        env:
+          GH_TOKEN: ${{ secrets.RANKFORGE_DEPLOY_DISPATCH_TOKEN }}
+        run: |
+          gh workflow run deploy-rankforge.yml \
+            -R powabase-ai/agentic-monorepo \
+            -f deploy=all
+          echo "Dispatched rankforge deploy=all (triggered by ${{ github.sha }})."
