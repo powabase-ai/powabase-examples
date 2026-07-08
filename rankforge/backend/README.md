@@ -39,3 +39,6 @@ For now, app schema is raw SQL in `schema/`. Add `schema/000N_*.sql` and apply t
 whole set (in order, idempotently, tracked in `public.schema_migrations`) with
 `uv run python scripts/apply_schema.py` — not a single `psql -f`, which would leave a
 fresh DB missing every other migration. We may move to Alembic once it stabilizes.
+
+<!-- ci: auto-deploy pipeline smoke test (2026-07-08) — invisible in render, safe to remove -->
+
