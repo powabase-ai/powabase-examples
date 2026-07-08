@@ -11,7 +11,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { useAcceptInvite } from "@/lib/hooks/useOrg";
-import { PENDING_INVITE_KEY } from "@/lib/constants";
+import { clearPendingInvite, stashPendingInvite } from "@/lib/auth/pendingInvite";
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -46,19 +46,29 @@ function AcceptInviteInner() {
   const { session, profile, loading, refreshProfile } = useAuth();
   const accept = useAcceptInvite();
 
-  // Stash the token so it survives the sign-in / sign-up round-trip (the login page
-  // resumes it after auth).
+  // Bridge the token across a sign-in / sign-up round-trip only when signed OUT (the
+  // login page resumes it). When signed in we use the URL token directly, so drop any
+  // stash to avoid a stale token lingering on a shared browser.
   React.useEffect(() => {
-    if (token) localStorage.setItem(PENDING_INVITE_KEY, token);
-  }, [token]);
+    if (!token) return;
+    if (session) clearPendingInvite();
+    else stashPendingInvite(token);
+  }, [token, session]);
 
   function onAccept() {
     accept.mutate(token, {
       onSuccess: async (org) => {
-        localStorage.removeItem(PENDING_INVITE_KEY);
-        // Org changed → the caller's role + every cached tenant list are now stale.
-        qc.clear();
-        await refreshProfile();
+        // The join succeeded server-side and the token is now spent, so we MUST land
+        // the user regardless of any post-join hiccup. Refresh the profile (role/org
+        // changed) and drop the old tenant's cache best-effort — a stale cache
+        // self-heals on the next load.
+        try {
+          qc.clear();
+          await refreshProfile();
+        } catch {
+          /* join is done; navigate anyway */
+        }
+        clearPendingInvite();
         toast.success(`You've joined ${org.name}.`);
         router.replace("/");
       },

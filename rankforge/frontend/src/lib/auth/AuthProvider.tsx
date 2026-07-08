@@ -12,6 +12,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { accountApi, ApiError, type Profile } from "@/lib/api";
 import {
+  GoTrueError,
   signInWithPassword,
   signUp as gtSignUp,
   updatePassword,
@@ -132,11 +133,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Re-authenticate to prove the caller knows the current password. This also
         // mints a fresh session we then use for the update.
         fresh = await signInWithPassword(email, currentPassword);
-      } catch {
-        throw new Error("Current password is incorrect.");
+      } catch (err) {
+        // Only a genuine credential rejection means the password was wrong. A
+        // rate-limit (429), server error (5xx), or network failure must surface as-is
+        // — otherwise a user with the CORRECT password is told it's wrong and retypes
+        // it repeatedly (worsening any rate-limit).
+        if (err instanceof GoTrueError && (err.status === 400 || err.status === 401)) {
+          throw new Error("Current password is incorrect.");
+        }
+        throw err;
       }
       await updatePassword(fresh.access_token, newPassword);
-      setSession(fresh); // adopt the fresh (still-valid) session
+      // Adopt the fresh (still-valid) session. Caveat: if the GoTrue project is set to
+      // revoke sibling sessions on password change, another open tab hard-logs-out on
+      // its next silent refresh — inherent to the token model, not handled here.
+      setSession(fresh);
     },
     [session]
   );

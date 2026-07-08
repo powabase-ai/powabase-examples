@@ -9,14 +9,11 @@ export function useOrg() {
   return useQuery({ queryKey: ["org"], queryFn: orgApi.get });
 }
 
-/** Pending teammate invites (admin-only endpoint). Pass `enabled: isAdmin` so a
- *  non-admin never fires the request and 403s. */
-export function useInvites(enabled = true) {
-  return useQuery({
-    queryKey: ["org-invites"],
-    queryFn: orgApi.listInvites,
-    enabled,
-  });
+/** Pending teammate invites. Hits the admin-only /api/org/invites endpoint, so only
+ *  the component that calls it should be rendered for admins — the Team page mounts
+ *  <InviteTeammates/> behind `isAdmin`, so a non-admin never fires this request. */
+export function useInvites() {
+  return useQuery({ queryKey: ["org-invites"], queryFn: orgApi.listInvites });
 }
 
 export function useCreateInvite() {

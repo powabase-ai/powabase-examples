@@ -9,13 +9,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/lib/auth/AuthProvider";
-import { PENDING_INVITE_KEY } from "@/lib/constants";
+import { takePendingInvite } from "@/lib/auth/pendingInvite";
 
 /** After auth, resume a pending teammate-invite accept if a token is stashed
- *  (from opening an /accept-invite link while signed out); else go home. */
+ *  (from opening an /accept-invite link while signed out); else go home.
+ *  `takePendingInvite` consumes the token (once, with a TTL) so a stale one can't
+ *  steer a later user's login on a shared browser. */
 function postAuthDest(): string {
   if (typeof window === "undefined") return "/";
-  const token = localStorage.getItem(PENDING_INVITE_KEY);
+  const token = takePendingInvite();
   return token ? `/accept-invite?token=${encodeURIComponent(token)}` : "/";
 }
 
