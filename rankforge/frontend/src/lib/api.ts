@@ -676,6 +676,43 @@ export const accountApi = {
     }),
 };
 
+// --- Organization + teammate invites ---
+export interface Organization {
+  id: string;
+  name: string;
+  created_at?: string;
+}
+
+/** A pending teammate invite. `token` (returned only from create) is the secret
+ *  join credential — build the accept link from it and share it out-of-band. */
+export interface OrgInvite {
+  id: string;
+  org_id: string;
+  email: string;
+  role: Role;
+  token?: string | null;
+  invited_by?: string | null;
+  created_at?: string;
+  accepted_at?: string | null;
+}
+
+export const orgApi = {
+  get: () => request<Organization>("/api/org"),
+  listInvites: () => request<OrgInvite[]>("/api/org/invites"),
+  createInvite: (email: string, role: Role) =>
+    request<OrgInvite>("/api/org/invites", {
+      method: "POST",
+      body: JSON.stringify({ email, role }),
+    }),
+  revokeInvite: (id: string) =>
+    request<void>(`/api/org/invites/${id}`, { method: "DELETE" }),
+  acceptInvite: (token: string) =>
+    request<Organization>("/api/org/invites/accept", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+};
+
 // --- Review comments ---
 export interface Comment {
   id: string;
