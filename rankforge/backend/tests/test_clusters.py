@@ -154,6 +154,93 @@ async def test_update_cluster_returns_none_when_missing(monkeypatch):
     assert out is None
 
 
+async def test_update_cluster_keeps_old_doc_when_index_build_fails(monkeypatch):
+    current = {
+        "id": CID, "business_id": BID, "label": "Auth", "theme": "old",
+        "index_doc_id": "olddoc",
+    }
+    db = MagicMock()
+    monkeypatch.setattr(clusters, "get_cluster", lambda d, cid: current)
+    db.fetch_one.return_value = {**current, "theme": "new"}
+    monkeypatch.setattr(clusters, "ensure_cluster_kb", AsyncMock(return_value="kb1"))
+    monkeypatch.setattr(clusters, "_index_doc", AsyncMock(return_value=None))  # build failed
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+    out = await clusters.update_cluster(client, db, CID, theme="new")
+    # Edit persists; cluster keeps pointing at the old doc; the old doc is NOT retired.
+    assert out["theme"] == "new"
+    assert out["index_doc_id"] == "olddoc"
+    assert not any("set index_doc_id" in c.args[0] for c in db.execute.call_args_list)
+    client.remove_source_from_kb.assert_not_awaited()
+    client.delete_source.assert_not_awaited()
+
+
+async def test_update_cluster_keeps_source_when_still_referenced(monkeypatch):
+    current = {
+        "id": CID, "business_id": BID, "label": "Auth", "theme": "old",
+        "index_doc_id": "olddoc",
+    }
+    db = MagicMock()
+    monkeypatch.setattr(clusters, "get_cluster", lambda d, cid: current)
+    db.fetch_one.return_value = {**current, "theme": "new"}
+    monkeypatch.setattr(clusters, "ensure_cluster_kb", AsyncMock(return_value="kb1"))
+    monkeypatch.setattr(clusters, "_index_doc", AsyncMock(return_value="newdoc"))
+    monkeypatch.setattr(clusters, "_pillar_title", lambda d, c: "Auth Guide")
+    monkeypatch.setattr(clusters, "indexed_source_id", AsyncMock(return_value="idx"))
+    monkeypatch.setattr(clusters.source_refs, "source_reference_count", lambda d, doc: 2)
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+    await clusters.update_cluster(client, db, CID, theme="new")
+    # Old doc is de-indexed from THIS cluster's KB, but the Source is kept (still referenced).
+    client.remove_source_from_kb.assert_awaited_once()
+    client.delete_source.assert_not_awaited()
+
+
+async def test_update_cluster_clears_theme(monkeypatch):
+    current = {
+        "id": CID, "business_id": BID, "label": "Auth", "theme": "authentication",
+        "index_doc_id": "d",
+    }
+    db = MagicMock()
+    monkeypatch.setattr(clusters, "get_cluster", lambda d, cid: current)
+    db.fetch_one.return_value = {**current, "theme": ""}
+    monkeypatch.setattr(clusters, "ensure_cluster_kb", AsyncMock(return_value="kb1"))
+    monkeypatch.setattr(clusters, "_index_doc", AsyncMock(return_value="newdoc"))
+    monkeypatch.setattr(clusters, "_pillar_title", lambda d, c: "Auth")
+    monkeypatch.setattr(clusters, "indexed_source_id", AsyncMock(return_value="idx"))
+    monkeypatch.setattr(clusters.source_refs, "source_reference_count", lambda d, doc: 0)
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+    await clusters.update_cluster(client, db, CID, theme="")
+    # theme="" is a real change from "authentication" → it writes (not a no-op) and binds "".
+    assert "update public.content_clusters set label" in db.fetch_one.call_args.args[0]
+    assert db.fetch_one.call_args.args[1][1] == ""
+
+
+async def test_update_cluster_theme_only_preserves_label(monkeypatch):
+    current = {
+        "id": CID, "business_id": BID, "label": "Auth", "theme": "old",
+        "index_doc_id": "d",
+    }
+    db = MagicMock()
+    monkeypatch.setattr(clusters, "get_cluster", lambda d, cid: current)
+    db.fetch_one.return_value = {**current, "theme": "new"}
+    monkeypatch.setattr(clusters, "ensure_cluster_kb", AsyncMock(return_value="kb1"))
+    monkeypatch.setattr(clusters, "_index_doc", AsyncMock(return_value="newdoc"))
+    monkeypatch.setattr(clusters, "_pillar_title", lambda d, c: "Auth")
+    monkeypatch.setattr(clusters, "indexed_source_id", AsyncMock(return_value="idx"))
+    monkeypatch.setattr(clusters.source_refs, "source_reference_count", lambda d, doc: 0)
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+    await clusters.update_cluster(client, db, CID, label=None, theme="new")
+    # label omitted → the UPDATE binds the current label unchanged.
+    assert db.fetch_one.call_args.args[1][0] == "Auth"
+
+
 async def test_assign_join_with_bad_id_falls_back_to_nearest(monkeypatch):
     db = MagicMock()
     monkeypatch.setattr(clusters.brands, "get_profile", lambda d, bid: {})
@@ -491,6 +578,21 @@ def test_update_cluster_404_when_missing(monkeypatch):
     monkeypatch.setattr(clusters, "update_cluster", AsyncMock(return_value=None))
     resp = _client().patch(f"/api/clusters/{CID}", json={"label": "X"})
     assert resp.status_code == 404
+
+
+def test_update_cluster_cross_org_404(monkeypatch):
+    # The cluster exists but its brand is in another org → _guard_cluster's
+    # assert_brand_access 404s (never reaching update_cluster).
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    upd = AsyncMock()
+    monkeypatch.setattr(clusters, "update_cluster", upd)
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": UUID(NEWID)}  # brand owned by a different org
+    resp = _client(db).patch(f"/api/clusters/{CID}", json={"label": "X"})
+    assert resp.status_code == 404
+    upd.assert_not_awaited()
 
 
 async def test_delete_cluster_deindexes_and_clears_members(monkeypatch):

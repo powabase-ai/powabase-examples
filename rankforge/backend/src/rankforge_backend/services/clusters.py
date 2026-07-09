@@ -295,8 +295,12 @@ async def update_cluster(
 
     # Refresh the index doc: build a fresh one, point the cluster at it, then retire the
     # stale doc (de-index + delete the Source if nothing else references it — same
-    # orphan-safe pattern as delete_cluster). Best-effort throughout.
+    # orphan-safe pattern as delete_cluster). Best-effort: a re-index failure must never
+    # fail the (already-durable) metadata edit, and each remote step is logged with the
+    # ids so an operator can tell a benign "KB was down, nothing changed" from a real leak.
     old_doc = current.get("index_doc_id")
+    kb_id: str | None = None
+    new_doc: str | None = None
     try:
         kb_id = await ensure_cluster_kb(client, db, row["business_id"])
         new_doc = await _index_doc(
@@ -304,25 +308,50 @@ async def update_cluster(
             label=new_label, theme=new_theme,
             pillar_title=_pillar_title(db, row),
         )
-        if new_doc:
-            db.execute(
-                "update public.content_clusters set index_doc_id = %s where id = %s",
-                (new_doc, cluster_id),
-            )
-            row["index_doc_id"] = new_doc
-            if old_doc and old_doc != new_doc:
-                indexed = await indexed_source_id(client, kb_id, old_doc)
-                try:
-                    await client.remove_source_from_kb(kb_id, indexed)
-                except Exception:  # noqa: BLE001 — de-index failure isn't fatal
-                    log.exception("stale cluster de-index failed for %s/%s", kb_id, indexed)
-                if source_refs.source_reference_count(db, old_doc) == 0:
-                    try:
-                        await client.delete_source(old_doc)
-                    except Exception:  # noqa: BLE001 — Source delete isn't fatal
-                        log.exception("stale cluster source delete failed for %s", old_doc)
-    except Exception:  # noqa: BLE001 — a re-index failure must not fail the metadata edit
-        log.exception("cluster re-index failed for %s", cluster_id)
+    except Exception:  # noqa: BLE001 — build failed; cluster keeps old_doc, edit stands
+        log.exception(
+            "cluster re-index build failed for %s (kb=%s) — keeping old doc %s",
+            cluster_id, kb_id, old_doc,
+        )
+
+    if not new_doc:
+        # Nothing new indexed → the cluster still points at old_doc (or none). Retrieval
+        # degrades to the pre-edit text; the row edit persists.
+        return row
+
+    try:
+        db.execute(
+            "update public.content_clusters set index_doc_id = %s where id = %s",
+            (new_doc, cluster_id),
+        )
+        row["index_doc_id"] = new_doc
+    except Exception:  # noqa: BLE001 — repoint failed AFTER building new_doc
+        # The row still references old_doc while new_doc is indexed but unreferenced →
+        # compensate by de-indexing/deleting the orphan so it can't leak or double-count.
+        log.exception(
+            "cluster re-index repoint failed for %s — de-indexing orphan %s (kb=%s)",
+            cluster_id, new_doc, kb_id,
+        )
+        try:
+            orphan = await indexed_source_id(client, kb_id, new_doc)
+            await client.remove_source_from_kb(kb_id, orphan)
+            await client.delete_source(new_doc)
+        except Exception:  # noqa: BLE001 — orphan cleanup is best-effort
+            log.exception("cluster re-index orphan cleanup failed for %s", new_doc)
+        return row
+
+    # Retire the now-stale old doc (inner-guarded best-effort).
+    if old_doc and old_doc != new_doc:
+        try:
+            indexed = await indexed_source_id(client, kb_id, old_doc)
+            await client.remove_source_from_kb(kb_id, indexed)
+        except Exception:  # noqa: BLE001 — de-index failure isn't fatal
+            log.exception("stale cluster de-index failed for %s/%s", kb_id, old_doc)
+        if source_refs.source_reference_count(db, old_doc) == 0:
+            try:
+                await client.delete_source(old_doc)
+            except Exception:  # noqa: BLE001 — Source delete isn't fatal
+                log.exception("stale cluster source delete failed for %s", old_doc)
     return row
 
 

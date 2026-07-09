@@ -24,6 +24,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -485,7 +486,6 @@ function BriefView({
   onGenerate: () => void;
   generating: boolean;
 }) {
-  const [editOpen, setEditOpen] = React.useState(false);
   return (
     <Card>
       <CardHeader>
@@ -500,14 +500,7 @@ function BriefView({
           </CardTitle>
           <div className="flex items-center gap-2">
             {canEdit && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setEditOpen(true)}
-                title="Edit this brief before drafting"
-              >
-                <Pencil /> Edit
-              </Button>
+              <EditBriefDialog brief={brief} businessId={businessId} />
             )}
             <Button variant="gold" size="sm" onClick={onGenerate} disabled={generating}>
               {generating ? (
@@ -555,15 +548,6 @@ function BriefView({
           </ul>
         </div>
       </CardContent>
-      {canEdit && (
-        <EditBriefDialog
-          key={brief.id}
-          brief={brief}
-          businessId={businessId}
-          open={editOpen}
-          onOpenChange={setEditOpen}
-        />
-      )}
     </Card>
   );
 }
@@ -588,47 +572,58 @@ const markdownToHeadings = (text: string): string[] =>
   });
 
 /** Edit a generated brief before drafting: the writer-facing contract every downstream
- *  agent obeys. List fields are edited one-per-line. Saves a partial PATCH. */
+ *  agent obeys. Self-contained (owns open state + its trigger), so opening re-seeds the
+ *  fields from the current (AI-generated) brief. List fields are edited one-per-line;
+ *  the heading outline is Markdown (##/###), converted to the brief's H2:/H3: on save. */
 function EditBriefDialog({
   brief,
   businessId,
-  open,
-  onOpenChange,
 }: {
   brief: Brief;
   businessId: string;
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
 }) {
   const update = useUpdateBrief(businessId);
-  // Prepopulated from the (AI-generated) brief. The mount carries a `key={brief.id}` so
-  // selecting a different brief remounts and re-seeds these. Headings are shown as
-  // Markdown (##/###) and converted back to the brief's H2:/H3: form on save.
-  const [title, setTitle] = React.useState(brief.suggested_title ?? "");
-  const [meta, setMeta] = React.useState(brief.suggested_meta ?? "");
-  const [primaryKw, setPrimaryKw] = React.useState(brief.primary_keyword ?? "");
-  const [wordCount, setWordCount] = React.useState(
-    brief.target_word_count != null ? String(brief.target_word_count) : ""
-  );
-  const [secondary, setSecondary] = React.useState(
-    brief.secondary_keywords.join("\n")
-  );
-  const [entities, setEntities] = React.useState(brief.entities.join("\n"));
-  const [headings, setHeadings] = React.useState(headingsToMarkdown(brief.headings));
-  const [questions, setQuestions] = React.useState(brief.questions.join("\n"));
+  const [open, setOpen] = React.useState(false);
+  const [title, setTitle] = React.useState("");
+  const [meta, setMeta] = React.useState("");
+  const [primaryKw, setPrimaryKw] = React.useState("");
+  const [wordCount, setWordCount] = React.useState("");
+  const [secondary, setSecondary] = React.useState("");
+  const [entities, setEntities] = React.useState("");
+  const [headings, setHeadings] = React.useState("");
+  const [questions, setQuestions] = React.useState("");
+
+  function onOpenChange(v: boolean) {
+    // The trigger drives onOpenChange, so seed on open — every open reflects the latest
+    // brief and discards any prior canceled edit.
+    if (v) {
+      setTitle(brief.suggested_title ?? "");
+      setMeta(brief.suggested_meta ?? "");
+      setPrimaryKw(brief.primary_keyword ?? "");
+      setWordCount(
+        brief.target_word_count != null ? String(brief.target_word_count) : ""
+      );
+      setSecondary(brief.secondary_keywords.join("\n"));
+      setEntities(brief.entities.join("\n"));
+      setHeadings(headingsToMarkdown(brief.headings));
+      setQuestions(brief.questions.join("\n"));
+    }
+    setOpen(v);
+  }
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     const wc = wordCount.trim();
-    if (wc !== "" && Number.isNaN(Number(wc))) {
-      toast.error("Target word count must be a number");
+    const wcNum = wc === "" ? null : Number(wc);
+    if (wcNum !== null && (!Number.isInteger(wcNum) || wcNum < 0)) {
+      toast.error("Target word count must be a whole number of 0 or more");
       return;
     }
     const data: BriefUpdate = {
       suggested_title: title.trim() || null,
       suggested_meta: meta.trim() || null,
       primary_keyword: primaryKw.trim() || null,
-      target_word_count: wc === "" ? null : Number(wc),
+      target_word_count: wcNum,
       secondary_keywords: linesToArray(secondary),
       entities: linesToArray(entities),
       headings: markdownToHeadings(headings),
@@ -639,7 +634,7 @@ function EditBriefDialog({
       {
         onSuccess: () => {
           toast.success("Brief updated");
-          onOpenChange(false);
+          setOpen(false);
         },
         onError: (err) =>
           toast.error(err instanceof Error ? err.message : "Update failed"),
@@ -649,6 +644,11 @@ function EditBriefDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" title="Edit this brief before drafting">
+          <Pencil /> Edit
+        </Button>
+      </DialogTrigger>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle className="font-display">Edit content brief</DialogTitle>

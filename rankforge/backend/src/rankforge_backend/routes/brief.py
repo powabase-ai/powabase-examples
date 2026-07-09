@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..auth import assert_brand_access, get_current_user
+from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
 from ..models.brief import Brief, BriefGenerate, BriefUpdate
 from ..models.profile import CurrentUser
@@ -79,7 +79,7 @@ def update_brief(
     brief_id: UUID,
     payload: BriefUpdate,
     db: Database = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(require_editor),  # editor/admin, mirrors update_cluster
 ):
     existing = svc.get_brief(db, brief_id)
     if existing is None:

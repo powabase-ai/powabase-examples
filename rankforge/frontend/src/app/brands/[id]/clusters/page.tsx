@@ -26,6 +26,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -130,7 +131,6 @@ function ClusterCard({
   canEdit: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
   const detail = useCluster(open ? cluster.id : null);
   const setPillar = useSetPillar(cluster.id);
   const analyzeGaps = useAnalyzeGaps();
@@ -252,15 +252,7 @@ function ClusterCard({
             )}
             {canEdit && (
               <div className="mt-2 flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setEditOpen(true)}
-                  title="Edit this cluster's label & theme"
-                >
-                  <Pencil />
-                  Edit
-                </Button>
+                <EditClusterDialog brandId={brandId} cluster={cluster} />
                 {cluster.pillar_article_id && (
                   <Button
                     variant="ghost"
@@ -309,45 +301,35 @@ function ClusterCard({
             )}
           </div>
         )}
-        {canEdit && (
-          <EditClusterDialog
-            brandId={brandId}
-            cluster={cluster}
-            open={editOpen}
-            onOpenChange={setEditOpen}
-          />
-        )}
       </CardContent>
     </Card>
   );
 }
 
-/** Edit an existing cluster's label + theme. Mirrors NewClusterDialog but seeds the
- *  fields from the cluster and PATCHes on save. Editing the theme re-indexes the
- *  cluster server-side so future topics match on the updated text. */
+/** Edit an existing cluster's label + theme. Self-contained: it owns its open state and
+ *  renders its own trigger, so opening reliably re-seeds the fields from the cluster (a
+ *  canceled edit never lingers). Editing the theme re-indexes the cluster server-side so
+ *  future topics match on the updated text. */
 function EditClusterDialog({
   brandId,
   cluster,
-  open,
-  onOpenChange,
 }: {
   brandId: string;
   cluster: ContentCluster;
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
 }) {
   const update = useUpdateCluster(brandId);
+  const [open, setOpen] = useState(false);
   const [label, setLabel] = useState(cluster.label);
   const [theme, setTheme] = useState(cluster.theme ?? "");
 
-  // Re-seed when the dialog (re)opens so it always reflects the current values, even
-  // after a prior edit or an external change.
-  function onOpen(v: boolean) {
+  function onOpenChange(v: boolean) {
+    // The trigger drives onOpenChange, so seed here — every open reflects the current
+    // cluster and discards any prior canceled edit.
     if (v) {
       setLabel(cluster.label);
       setTheme(cluster.theme ?? "");
     }
-    onOpenChange(v);
+    setOpen(v);
   }
 
   const dirty =
@@ -360,8 +342,8 @@ function EditClusterDialog({
       { clusterId: cluster.id, data: { label: label.trim(), theme: theme.trim() } },
       {
         onSuccess: () => {
-          toast.success("Cluster updated");
-          onOpenChange(false);
+          toast.success("Cluster saved");
+          setOpen(false);
         },
         onError: (err) =>
           toast.error(err instanceof Error ? err.message : "Update failed"),
@@ -370,7 +352,17 @@ function EditClusterDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          title="Edit this cluster's label & theme"
+        >
+          <Pencil />
+          Edit
+        </Button>
+      </DialogTrigger>
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="font-display">Edit cluster</DialogTitle>

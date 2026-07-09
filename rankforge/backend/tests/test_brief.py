@@ -7,6 +7,7 @@ from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
+from rankforge_backend.models.profile import CurrentUser
 from rankforge_backend.routes.business_profiles import get_db
 from rankforge_backend.routes.research import get_powabase
 from rankforge_backend.services import brief as svc
@@ -96,3 +97,30 @@ def test_get_brief_404():
     client = make_client(db)
     resp = client.get("/api/briefs/44444444-4444-4444-4444-444444444444")
     assert resp.status_code == 404
+
+
+def test_update_brief_requires_editor():
+    # A writer must NOT be able to rewrite a brief via the API — the UI gates the Edit
+    # button on editor/admin, and the server must enforce the same (mirrors clusters).
+    db = MagicMock()
+    db.fetch_one.return_value = {**BRIEF, "org_id": UUID(ADMIN_ORG)}
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    resp = TestClient(with_auth(app, writer)).patch(
+        "/api/briefs/44444444-4444-4444-4444-444444444444",
+        json={"suggested_title": "rewritten"},
+    )
+    assert resp.status_code == 403
+
+
+def test_update_brief_rejects_negative_word_count():
+    db = MagicMock()
+    db.fetch_one.return_value = {**BRIEF, "org_id": UUID(ADMIN_ORG)}
+    client = make_client(db)
+    resp = client.patch(
+        "/api/briefs/44444444-4444-4444-4444-444444444444",
+        json={"target_word_count": -5},
+    )
+    assert resp.status_code == 422  # ge=0 on the schema
