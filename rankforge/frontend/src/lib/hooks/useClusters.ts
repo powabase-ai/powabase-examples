@@ -41,6 +41,25 @@ export function useCreateCluster(businessId: string) {
   });
 }
 
+export function useUpdateCluster(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      clusterId,
+      data,
+    }: {
+      clusterId: string;
+      data: { label?: string; theme?: string };
+    }) => clustersApi.update(clusterId, data),
+    onSuccess: (_data, { clusterId }) => {
+      // label/theme (and pillar_title/member_count enrichment) changed → refresh the
+      // list card and the expanded detail view from the server.
+      qc.invalidateQueries({ queryKey: ["clusters", businessId] });
+      qc.invalidateQueries({ queryKey: ["cluster", clusterId] });
+    },
+  });
+}
+
 export function useMoveArticle(businessId: string) {
   const qc = useQueryClient();
   return useMutation({

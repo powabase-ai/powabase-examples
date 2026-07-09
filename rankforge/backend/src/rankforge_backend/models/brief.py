@@ -28,7 +28,7 @@ class BriefGenerate(BaseModel):
 class BriefUpdate(BaseModel):
     primary_keyword: str | None = None
     secondary_keywords: list[str] | None = None
-    target_word_count: int | None = None
+    target_word_count: int | None = Field(default=None, ge=0)
     headings: list[str] | None = None
     entities: list[str] | None = None
     questions: list[str] | None = None

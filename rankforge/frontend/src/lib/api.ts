@@ -926,6 +926,13 @@ export const clustersApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  // Edit a cluster's label/theme. An empty-string theme clears it; omit a field to
+  // leave it unchanged. The server re-indexes the cluster on a change.
+  update: (clusterId: string, data: { label?: string; theme?: string }) =>
+    request<ContentCluster>(`/api/clusters/${clusterId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
   get: (clusterId: string) =>
     request<ClusterDetail>(`/api/clusters/${clusterId}`),
   setPillar: (clusterId: string, articleId: string) =>
@@ -1049,6 +1056,23 @@ export interface Brief {
   updated_at: string;
 }
 
+/** The editable brief fields (mirrors the backend `BriefUpdate`). `topic`/`article_type`
+ *  and the id/timestamps are NOT editable. */
+export type BriefUpdate = Partial<
+  Pick<
+    Brief,
+    | "primary_keyword"
+    | "secondary_keywords"
+    | "target_word_count"
+    | "headings"
+    | "entities"
+    | "questions"
+    | "link_suggestions"
+    | "suggested_title"
+    | "suggested_meta"
+  >
+>;
+
 export const briefsApi = {
   listByBrand: (businessId: string) =>
     request<Brief[]>(`/api/briefs?business_id=${businessId}`),
@@ -1061,7 +1085,7 @@ export const briefsApi = {
         article_type: articleType,
       }),
     }),
-  update: (id: string, data: Partial<Omit<Brief, "id" | "created_at" | "updated_at">>) =>
+  update: (id: string, data: BriefUpdate) =>
     request<Brief>(`/api/briefs/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
