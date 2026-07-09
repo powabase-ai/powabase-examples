@@ -40,6 +40,14 @@ class NewCluster(BaseModel):
     theme: str | None = Field(default=None, max_length=2000)
 
 
+class ClusterUpdate(BaseModel):
+    """Edit a cluster's metadata. Both fields are optional (partial patch): an omitted
+    field is left unchanged; an empty `theme` clears it. `label` can't be blanked."""
+
+    label: str | None = Field(default=None, min_length=1, max_length=120)
+    theme: str | None = Field(default=None, max_length=2000)
+
+
 class SetPillar(BaseModel):
     article_id: UUID
 

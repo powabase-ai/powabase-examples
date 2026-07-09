@@ -7,6 +7,7 @@ import {
   ExternalLink,
   FileText,
   Loader2,
+  Pencil,
   PenLine,
   Search,
   Sparkles,
@@ -19,11 +20,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Markdown } from "@/components/Markdown";
 import { Page, PageHeader } from "@/components/layout/PageHeader";
 import { useGenerateArticle } from "@/lib/hooks/useArticles";
@@ -36,10 +40,11 @@ import {
   useRunResearch,
   useSourceMarkdown,
   useTemplates,
+  useUpdateBrief,
 } from "@/lib/hooks/useResearch";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { canApprove, TERMINAL_RESEARCH } from "@/lib/api";
-import type { Brief, CompetitorTeardown, ResearchRun } from "@/lib/api";
+import type { Brief, BriefUpdate, CompetitorTeardown, ResearchRun } from "@/lib/api";
 
 function StatusBadge({ run }: { run: ResearchRun }) {
   if (run.status === "done")
@@ -259,6 +264,8 @@ export default function BrandWorkspace({
                 (selectedBrief ? (
                   <BriefView
                     brief={selectedBrief}
+                    businessId={id}
+                    canEdit={canEdit}
                     onGenerate={() => onGenerateDraft(selectedBrief.id)}
                     generating={generateArticle.isPending}
                   />
@@ -467,13 +474,18 @@ function SourceDialog({
 
 function BriefView({
   brief,
+  businessId,
+  canEdit,
   onGenerate,
   generating,
 }: {
   brief: Brief;
+  businessId: string;
+  canEdit: boolean;
   onGenerate: () => void;
   generating: boolean;
 }) {
+  const [editOpen, setEditOpen] = React.useState(false);
   return (
     <Card>
       <CardHeader>
@@ -486,17 +498,29 @@ function BriefView({
               </span>
             )}
           </CardTitle>
-          <Button variant="gold" size="sm" onClick={onGenerate} disabled={generating}>
-            {generating ? (
-              <>
-                <Loader2 className="animate-spin" /> Starting…
-              </>
-            ) : (
-              <>
-                <PenLine /> Generate draft
-              </>
+          <div className="flex items-center gap-2">
+            {canEdit && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setEditOpen(true)}
+                title="Edit this brief before drafting"
+              >
+                <Pencil /> Edit
+              </Button>
             )}
-          </Button>
+            <Button variant="gold" size="sm" onClick={onGenerate} disabled={generating}>
+              {generating ? (
+                <>
+                  <Loader2 className="animate-spin" /> Starting…
+                </>
+              ) : (
+                <>
+                  <PenLine /> Generate draft
+                </>
+              )}
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
@@ -531,7 +555,205 @@ function BriefView({
           </ul>
         </div>
       </CardContent>
+      {canEdit && (
+        <EditBriefDialog
+          key={brief.id}
+          brief={brief}
+          businessId={businessId}
+          open={editOpen}
+          onOpenChange={setEditOpen}
+        />
+      )}
     </Card>
+  );
+}
+
+const linesToArray = (s: string): string[] =>
+  s.split("\n").map((t) => t.trim()).filter(Boolean);
+
+// The brief stores headings as "H2:"/"H3:"-prefixed lines; the editor shows them as
+// Markdown (##/###) since that reads as the heading hierarchy it represents.
+const headingsToMarkdown = (headings: string[]): string =>
+  headings
+    .map((h) => {
+      const m = h.match(/^H([23]):\s*(.*)$/i);
+      return m ? `${m[1] === "3" ? "###" : "##"} ${m[2]}`.trim() : h;
+    })
+    .join("\n");
+
+const markdownToHeadings = (text: string): string[] =>
+  linesToArray(text).map((line) => {
+    const m = line.match(/^(#{1,6})\s+(.*)$/);
+    return m ? `H${m[1].length >= 3 ? 3 : 2}: ${m[2]}` : line;
+  });
+
+/** Edit a generated brief before drafting: the writer-facing contract every downstream
+ *  agent obeys. List fields are edited one-per-line. Saves a partial PATCH. */
+function EditBriefDialog({
+  brief,
+  businessId,
+  open,
+  onOpenChange,
+}: {
+  brief: Brief;
+  businessId: string;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const update = useUpdateBrief(businessId);
+  // Prepopulated from the (AI-generated) brief. The mount carries a `key={brief.id}` so
+  // selecting a different brief remounts and re-seeds these. Headings are shown as
+  // Markdown (##/###) and converted back to the brief's H2:/H3: form on save.
+  const [title, setTitle] = React.useState(brief.suggested_title ?? "");
+  const [meta, setMeta] = React.useState(brief.suggested_meta ?? "");
+  const [primaryKw, setPrimaryKw] = React.useState(brief.primary_keyword ?? "");
+  const [wordCount, setWordCount] = React.useState(
+    brief.target_word_count != null ? String(brief.target_word_count) : ""
+  );
+  const [secondary, setSecondary] = React.useState(
+    brief.secondary_keywords.join("\n")
+  );
+  const [entities, setEntities] = React.useState(brief.entities.join("\n"));
+  const [headings, setHeadings] = React.useState(headingsToMarkdown(brief.headings));
+  const [questions, setQuestions] = React.useState(brief.questions.join("\n"));
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const wc = wordCount.trim();
+    if (wc !== "" && Number.isNaN(Number(wc))) {
+      toast.error("Target word count must be a number");
+      return;
+    }
+    const data: BriefUpdate = {
+      suggested_title: title.trim() || null,
+      suggested_meta: meta.trim() || null,
+      primary_keyword: primaryKw.trim() || null,
+      target_word_count: wc === "" ? null : Number(wc),
+      secondary_keywords: linesToArray(secondary),
+      entities: linesToArray(entities),
+      headings: markdownToHeadings(headings),
+      questions: linesToArray(questions),
+    };
+    update.mutate(
+      { id: brief.id, data },
+      {
+        onSuccess: () => {
+          toast.success("Brief updated");
+          onOpenChange(false);
+        },
+        onError: (err) =>
+          toast.error(err instanceof Error ? err.message : "Update failed"),
+      }
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle className="font-display">Edit content brief</DialogTitle>
+          <DialogDescription>
+            The brief is the contract the writer follows. List fields are one entry per
+            line; the heading outline uses Markdown (<code>##</code> section,{" "}
+            <code>###</code> subsection).
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="grid gap-4">
+          <div className="grid gap-1.5">
+            <Label htmlFor="brief-title">Suggested title</Label>
+            <Input
+              id="brief-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={200}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="brief-meta">Meta description</Label>
+            <Textarea
+              id="brief-meta"
+              value={meta}
+              onChange={(e) => setMeta(e.target.value)}
+              rows={2}
+              maxLength={320}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-1.5">
+              <Label htmlFor="brief-kw">Primary keyword</Label>
+              <Input
+                id="brief-kw"
+                value={primaryKw}
+                onChange={(e) => setPrimaryKw(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="brief-wc">Target word count</Label>
+              <Input
+                id="brief-wc"
+                type="number"
+                min={0}
+                value={wordCount}
+                onChange={(e) => setWordCount(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="brief-secondary">Secondary keywords</Label>
+            <Textarea
+              id="brief-secondary"
+              value={secondary}
+              onChange={(e) => setSecondary(e.target.value)}
+              rows={3}
+              placeholder="One keyword per line"
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="brief-entities">Must-cover entities</Label>
+            <Textarea
+              id="brief-entities"
+              value={entities}
+              onChange={(e) => setEntities(e.target.value)}
+              rows={3}
+              placeholder="One entity per line"
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="brief-headings">Heading outline</Label>
+            <Textarea
+              id="brief-headings"
+              value={headings}
+              onChange={(e) => setHeadings(e.target.value)}
+              rows={6}
+              className="font-mono text-xs"
+              placeholder={"## Section heading\n### Subsection heading"}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="brief-questions">Questions to answer</Label>
+            <Textarea
+              id="brief-questions"
+              value={questions}
+              onChange={(e) => setQuestions(e.target.value)}
+              rows={4}
+              placeholder="One question per line"
+            />
+          </div>
+          <DialogFooter className="mt-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" variant="gold" disabled={update.isPending}>
+              {update.isPending ? "Saving…" : "Save brief"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -264,6 +264,68 @@ async def create_cluster(
     return cluster
 
 
+async def update_cluster(
+    client: PowabaseClient,
+    db: Database,
+    cluster_id: UUID,
+    *,
+    label: str | None = None,
+    theme: str | None = None,
+) -> dict[str, Any] | None:
+    """Edit a cluster's label/theme (partial: an omitted field is left as-is; an empty
+    theme clears it). When the text actually changes, refresh the cluster-index doc so
+    the architect keeps matching future topics on the CURRENT label/theme, not a stale
+    embedding. Remote index steps are best-effort (retrieval degrades to pass-all
+    without the doc). Returns the updated row, or None if the cluster is gone."""
+    current = get_cluster(db, cluster_id)
+    if current is None:
+        return None
+    new_label = current["label"] if label is None else label[:120]
+    new_theme = (current.get("theme") or "") if theme is None else (theme or "")
+    if new_label == current["label"] and new_theme == (current.get("theme") or ""):
+        return current  # nothing changed → skip the write + re-index entirely
+
+    row = db.fetch_one(
+        "update public.content_clusters set label = %s, theme = %s, "
+        f"updated_at = now() where id = %s returning {_COLUMNS}",
+        (new_label, new_theme, cluster_id),
+    )
+    if row is None:
+        return None
+
+    # Refresh the index doc: build a fresh one, point the cluster at it, then retire the
+    # stale doc (de-index + delete the Source if nothing else references it — same
+    # orphan-safe pattern as delete_cluster). Best-effort throughout.
+    old_doc = current.get("index_doc_id")
+    try:
+        kb_id = await ensure_cluster_kb(client, db, row["business_id"])
+        new_doc = await _index_doc(
+            client, kb_id,
+            label=new_label, theme=new_theme,
+            pillar_title=_pillar_title(db, row),
+        )
+        if new_doc:
+            db.execute(
+                "update public.content_clusters set index_doc_id = %s where id = %s",
+                (new_doc, cluster_id),
+            )
+            row["index_doc_id"] = new_doc
+            if old_doc and old_doc != new_doc:
+                indexed = await indexed_source_id(client, kb_id, old_doc)
+                try:
+                    await client.remove_source_from_kb(kb_id, indexed)
+                except Exception:  # noqa: BLE001 — de-index failure isn't fatal
+                    log.exception("stale cluster de-index failed for %s/%s", kb_id, indexed)
+                if source_refs.source_reference_count(db, old_doc) == 0:
+                    try:
+                        await client.delete_source(old_doc)
+                    except Exception:  # noqa: BLE001 — Source delete isn't fatal
+                        log.exception("stale cluster source delete failed for %s", old_doc)
+    except Exception:  # noqa: BLE001 — a re-index failure must not fail the metadata edit
+        log.exception("cluster re-index failed for %s", cluster_id)
+    return row
+
+
 def move_article(
     db: Database, business_id: UUID, article_id: UUID, target_cluster_id: UUID
 ) -> dict[str, Any] | None:

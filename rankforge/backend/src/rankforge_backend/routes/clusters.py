@@ -12,6 +12,7 @@ from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
 from ..models.clusters import (
     ClusterDetail,
+    ClusterUpdate,
     ContentCluster,
     MoveMember,
     NewCluster,
@@ -105,6 +106,25 @@ def analyze_gaps(
     cluster = _guard_cluster(db, cluster_id, user)
     created = scout_svc.analyze_cluster_gaps(db, cluster["business_id"], cluster_id)
     return {"created": created}
+
+
+@router.patch("/clusters/{cluster_id}", response_model=ContentCluster)
+async def update_cluster(
+    cluster_id: UUID,
+    payload: ClusterUpdate,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Edit a cluster's label/theme. Re-indexes the cluster's one-doc entry so the
+    architect matches future topics against the updated text, not a stale embedding."""
+    _guard_cluster(db, cluster_id, user)
+    row = await svc.update_cluster(
+        pb, db, cluster_id, label=payload.label, theme=payload.theme
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")
+    return row
 
 
 @router.delete("/clusters/{cluster_id}", status_code=status.HTTP_204_NO_CONTENT)

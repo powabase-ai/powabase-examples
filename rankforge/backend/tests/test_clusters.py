@@ -89,6 +89,71 @@ async def test_create_cluster_survives_index_doc_failure(monkeypatch):
     assert out["id"] == NEWID
 
 
+async def test_update_cluster_edits_row_and_reindexes(monkeypatch):
+    current = {
+        "id": CID, "business_id": BID, "label": "Auth", "theme": "old",
+        "index_doc_id": "olddoc",
+    }
+    updated = {**current, "label": "Auth v2", "theme": "new theme"}
+    db = MagicMock()
+    monkeypatch.setattr(clusters, "get_cluster", lambda d, cid: current)
+    db.fetch_one.return_value = updated  # the UPDATE ... returning
+    monkeypatch.setattr(clusters, "ensure_cluster_kb", AsyncMock(return_value="kb1"))
+    monkeypatch.setattr(clusters, "_index_doc", AsyncMock(return_value="newdoc"))
+    monkeypatch.setattr(clusters, "_pillar_title", lambda d, c: "Auth Guide")
+    monkeypatch.setattr(clusters, "indexed_source_id", AsyncMock(return_value="idx"))
+    monkeypatch.setattr(clusters.source_refs, "source_reference_count", lambda d, doc: 0)
+    client = MagicMock()
+    client.remove_source_from_kb = AsyncMock()
+    client.delete_source = AsyncMock()
+    out = await clusters.update_cluster(client, db, CID, label="Auth v2", theme="new theme")
+    # Row updated, pointed at the fresh index doc, and the stale doc retired.
+    assert "update public.content_clusters set label" in db.fetch_one.call_args.args[0]
+    assert out["index_doc_id"] == "newdoc"
+    assert any("set index_doc_id" in c.args[0] for c in db.execute.call_args_list)
+    client.remove_source_from_kb.assert_awaited_once()
+    client.delete_source.assert_awaited_once()
+
+
+async def test_update_cluster_noop_when_unchanged(monkeypatch):
+    current = {
+        "id": CID, "business_id": BID, "label": "Auth", "theme": "authentication",
+        "index_doc_id": "d",
+    }
+    monkeypatch.setattr(clusters, "get_cluster", lambda d, cid: current)
+    idx = AsyncMock()
+    monkeypatch.setattr(clusters, "_index_doc", idx)
+    db = MagicMock()
+    out = await clusters.update_cluster(
+        MagicMock(), db, CID, label="Auth", theme="authentication"
+    )
+    assert out is current
+    db.fetch_one.assert_not_called()  # no UPDATE
+    idx.assert_not_awaited()  # no re-index
+
+
+async def test_update_cluster_survives_reindex_failure(monkeypatch):
+    current = {
+        "id": CID, "business_id": BID, "label": "Auth", "theme": "old",
+        "index_doc_id": "olddoc",
+    }
+    db = MagicMock()
+    monkeypatch.setattr(clusters, "get_cluster", lambda d, cid: current)
+    db.fetch_one.return_value = {**current, "theme": "new"}
+    monkeypatch.setattr(
+        clusters, "ensure_cluster_kb", AsyncMock(side_effect=RuntimeError("kb down"))
+    )
+    # A re-index failure must NOT fail the metadata edit — the row change persists.
+    out = await clusters.update_cluster(MagicMock(), db, CID, theme="new")
+    assert out["theme"] == "new"
+
+
+async def test_update_cluster_returns_none_when_missing(monkeypatch):
+    monkeypatch.setattr(clusters, "get_cluster", lambda d, cid: None)
+    out = await clusters.update_cluster(MagicMock(), MagicMock(), CID, label="X")
+    assert out is None
+
+
 async def test_assign_join_with_bad_id_falls_back_to_nearest(monkeypatch):
     db = MagicMock()
     monkeypatch.setattr(clusters.brands, "get_profile", lambda d, bid: {})
@@ -384,6 +449,48 @@ def test_backfill_route_returns_count(monkeypatch):
     resp = _client().post(f"/api/business-profiles/{BID}/clusters/backfill")
     assert resp.status_code == 200
     assert resp.json() == {"assigned": 3, "remaining": True}
+
+
+def test_update_cluster_route(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    monkeypatch.setattr(
+        clusters, "update_cluster",
+        AsyncMock(return_value={"id": CID, "business_id": BID, "label": "Renamed",
+                               "theme": "t", "pillar_locked": False}),
+    )
+    resp = _client().patch(
+        f"/api/clusters/{CID}", json={"label": "Renamed", "theme": "t"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["label"] == "Renamed"
+
+
+def test_update_cluster_rejects_blank_label(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    resp = _client().patch(f"/api/clusters/{CID}", json={"label": ""})
+    assert resp.status_code == 422  # empty label rejected by the schema
+
+
+def test_update_cluster_requires_editor(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).patch(f"/api/clusters/{CID}", json={"label": "X"})
+    assert resp.status_code == 403
+
+
+def test_update_cluster_404_when_missing(monkeypatch):
+    monkeypatch.setattr(
+        clusters, "get_cluster", lambda d, cid: {"id": CID, "business_id": BID}
+    )
+    monkeypatch.setattr(clusters, "update_cluster", AsyncMock(return_value=None))
+    resp = _client().patch(f"/api/clusters/{CID}", json={"label": "X"})
+    assert resp.status_code == 404
 
 
 async def test_delete_cluster_deindexes_and_clears_members(monkeypatch):

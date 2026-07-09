@@ -9,6 +9,7 @@ import {
   Crown,
   FolderInput,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Sparkles,
@@ -39,6 +40,7 @@ import {
   useDeleteCluster,
   useMoveArticle,
   useSetPillar,
+  useUpdateCluster,
 } from "@/lib/hooks/useClusters";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { canApprove, type ContentCluster } from "@/lib/api";
@@ -128,6 +130,7 @@ function ClusterCard({
   canEdit: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   const detail = useCluster(open ? cluster.id : null);
   const setPillar = useSetPillar(cluster.id);
   const analyzeGaps = useAnalyzeGaps();
@@ -249,6 +252,15 @@ function ClusterCard({
             )}
             {canEdit && (
               <div className="mt-2 flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setEditOpen(true)}
+                  title="Edit this cluster's label & theme"
+                >
+                  <Pencil />
+                  Edit
+                </Button>
                 {cluster.pillar_article_id && (
                   <Button
                     variant="ghost"
@@ -297,8 +309,121 @@ function ClusterCard({
             )}
           </div>
         )}
+        {canEdit && (
+          <EditClusterDialog
+            brandId={brandId}
+            cluster={cluster}
+            open={editOpen}
+            onOpenChange={setEditOpen}
+          />
+        )}
       </CardContent>
     </Card>
+  );
+}
+
+/** Edit an existing cluster's label + theme. Mirrors NewClusterDialog but seeds the
+ *  fields from the cluster and PATCHes on save. Editing the theme re-indexes the
+ *  cluster server-side so future topics match on the updated text. */
+function EditClusterDialog({
+  brandId,
+  cluster,
+  open,
+  onOpenChange,
+}: {
+  brandId: string;
+  cluster: ContentCluster;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const update = useUpdateCluster(brandId);
+  const [label, setLabel] = useState(cluster.label);
+  const [theme, setTheme] = useState(cluster.theme ?? "");
+
+  // Re-seed when the dialog (re)opens so it always reflects the current values, even
+  // after a prior edit or an external change.
+  function onOpen(v: boolean) {
+    if (v) {
+      setLabel(cluster.label);
+      setTheme(cluster.theme ?? "");
+    }
+    onOpenChange(v);
+  }
+
+  const dirty =
+    label.trim() !== cluster.label || theme.trim() !== (cluster.theme ?? "");
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!label.trim() || !dirty) return;
+    update.mutate(
+      { clusterId: cluster.id, data: { label: label.trim(), theme: theme.trim() } },
+      {
+        onSuccess: () => {
+          toast.success("Cluster updated");
+          onOpenChange(false);
+        },
+        onError: (err) =>
+          toast.error(err instanceof Error ? err.message : "Update failed"),
+      }
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpen}>
+      <DialogContent className="sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="font-display">Edit cluster</DialogTitle>
+          <DialogDescription>
+            Rename the cluster or refine its theme. The theme is what future articles
+            are matched against — editing it re-indexes the cluster.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="grid gap-4">
+          <div className="grid gap-1.5">
+            <Label htmlFor="edit-cluster-label">Label</Label>
+            <Input
+              id="edit-cluster-label"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="e.g. Authentication"
+              maxLength={120}
+              autoFocus
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="edit-cluster-theme">
+              Theme <span className="text-muted-foreground">(optional)</span>
+            </Label>
+            <Textarea
+              id="edit-cluster-theme"
+              value={theme}
+              onChange={(e) => setTheme(e.target.value)}
+              placeholder="Which subtopics belong in this cluster — used to match future articles to it."
+              rows={14}
+              className="min-h-56"
+              maxLength={2000}
+            />
+          </div>
+          <DialogFooter className="mt-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="gold"
+              disabled={update.isPending || !label.trim() || !dirty}
+            >
+              {update.isPending ? "Saving…" : "Save changes"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
