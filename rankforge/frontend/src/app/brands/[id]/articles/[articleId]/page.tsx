@@ -31,6 +31,7 @@ import {
 import { ArticleEditor } from "@/components/ArticleEditor";
 import { CommentsPanel } from "@/components/CommentsPanel";
 import { InternalLinksPanel } from "@/components/InternalLinksPanel";
+import { LinkedInPanel } from "@/components/LinkedInPanel";
 import { Markdown } from "@/components/Markdown";
 import { PublishDialog } from "@/components/PublishDialog";
 import { useAuth } from "@/lib/auth/AuthProvider";
@@ -410,7 +411,7 @@ export default function ArticleView({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [tab, setTab] = useState<
-    "SEO" | "GEO" | "Readability" | "Grounding" | "Links" | "Comments"
+    "SEO" | "GEO" | "Readability" | "Grounding" | "Links" | "Comments" | "LinkedIn"
   >("SEO");
   const [showHistory, setShowHistory] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
@@ -583,7 +584,7 @@ export default function ArticleView({
       <ResizablePanel defaultSize={26} minSize={16} maxSize={45}>
         <aside className="flex h-full w-full flex-col bg-card">
         <div className="flex border-b border-border">
-          {(["SEO", "GEO", "Readability", "Grounding", "Links", "Comments"] as const).map((t) => {
+          {(["SEO", "GEO", "Readability", "Grounding", "Links", "Comments", "LinkedIn"] as const).map((t) => {
             const sc =
               t === "SEO"
                 ? a?.seo_score
@@ -648,6 +649,13 @@ export default function ArticleView({
               articleId={articleId}
               brandId={id}
               onLocate={locate}
+            />
+          </div>
+        ) : tab === "LinkedIn" ? (
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <LinkedInPanel
+              articleId={articleId}
+              articleReady={a?.generation_status === "done" && !!a?.content_md}
             />
           </div>
         ) : (
