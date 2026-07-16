@@ -108,7 +108,6 @@ function PostCard({
   const update = useUpdateLinkedInPost(articleId);
   const del = useDeleteLinkedInPost(articleId);
   const [body, setBody] = React.useState(post.body);
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- sync local edit buffer when the server value changes (existing pattern, see InternalLinksPanel.tsx)
   React.useEffect(() => setBody(post.body), [post.body]);
 
   const dirty = body !== post.body;
