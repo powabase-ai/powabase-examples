@@ -246,3 +246,41 @@ def test_cross_org_404(monkeypatch):
     db.fetch_one.return_value = {"org_id": __import__("uuid").UUID("77777777-7777-7777-7777-777777777777")}
     resp = _client(db).get(f"/api/articles/{AID}/linkedin-posts")
     assert resp.status_code == 404
+
+
+def test_list_brand_posts_service_joins_articles():
+    db = MagicMock()
+    db.fetch_all.return_value = []
+    li_svc.list_posts_for_brand(db, BID)
+    sql = db.fetch_all.call_args.args[0].lower()
+    assert "join public.articles a on a.id = p.article_id" in sql
+    assert "where p.business_id = %s" in sql
+    assert "a.title as article_title" in sql
+    assert "a.status as article_status" in sql
+
+
+def test_list_brand_posts_route(monkeypatch):
+    monkeypatch.setattr(
+        li_svc, "list_posts_for_brand",
+        lambda db, bid: [
+            {"id": PID, "article_id": AID, "angle": "stat", "body": "hi",
+             "created_by": None, "created_at": "2026-07-16T00:00:00Z",
+             "updated_at": "2026-07-16T00:00:00Z",
+             "article_title": "Governed BaaS", "article_status": "published"}
+        ],
+    )
+    resp = _client().get(f"/api/business-profiles/{BID}/linkedin-posts")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body[0]["article_title"] == "Governed BaaS"
+    assert body[0]["article_status"] == "published"
+
+
+def test_list_brand_posts_cross_org_404(monkeypatch):
+    called = MagicMock()
+    monkeypatch.setattr(li_svc, "list_posts_for_brand", called)
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": __import__("uuid").UUID("77777777-7777-7777-7777-777777777777")}
+    resp = _client(db).get(f"/api/business-profiles/{BID}/linkedin-posts")
+    assert resp.status_code == 404
+    called.assert_not_called()

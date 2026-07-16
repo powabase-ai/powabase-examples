@@ -261,3 +261,21 @@ Frontend:
 
 None blocking. Model tier (`opus-4-7`) and copy-to-clipboard scope confirmed during
 brainstorming.
+
+## Amendment — 2026-07-16: dedicated "Social" page (user feedback during local testing)
+
+The article-page "LinkedIn" tab is replaced by a dedicated **Social** page:
+
+- **Sidebar:** new "Social" item under the Content section (`/brands/{id}/social`,
+  `Share2` icon). The article page's LinkedIn tab is removed (the feature *moved*).
+- **Page layout:** a generate card up top — source-article picker (articles whose
+  generation is `done`; published ones labeled) + angle picker + Generate — followed by
+  every post in the brand **grouped under its source article** (title links to the
+  article, editorial-status badge, post count), with an optional per-article filter.
+  Cards are unchanged (above-the-fold preview, edit/save/copy/delete, char counter),
+  extracted to `components/LinkedInPostCard.tsx`.
+- **Backend:** new `GET /api/business-profiles/{id}/linkedin-posts` (any member,
+  `assert_brand_access`) returning `LinkedInPostWithArticle` (post + `article_title`,
+  `article_status`) via `list_posts_for_brand` (join on articles; newest articles
+  first, newest posts first within each). Per-article generate/update/delete endpoints
+  are unchanged; mutations invalidate both the per-article and brand-wide caches.

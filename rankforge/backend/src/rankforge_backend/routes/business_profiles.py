@@ -13,16 +13,18 @@ from fastapi import (
     status,
 )
 
-from ..auth import get_current_user, require_admin, require_editor
+from ..auth import assert_brand_access, get_current_user, require_admin, require_editor
 from ..db import Database
 from ..models.business import (
     BusinessProfile,
     BusinessProfileCreate,
     BusinessProfileUpdate,
 )
+from ..models.linkedin import LinkedInPostWithArticle
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
 from ..services import business_profiles as svc
+from ..services import linkedin_posts as li_svc
 from ..services import source_refs
 from .deps import get_db, get_powabase  # re-exported for callers/tests
 
@@ -51,6 +53,20 @@ def list_business_profiles(
     db: Database = Depends(get_db), user: CurrentUser = Depends(get_current_user)
 ):
     return svc.list_profiles(db, user.org_id)
+
+
+@router.get(
+    "/{profile_id}/linkedin-posts", response_model=list[LinkedInPostWithArticle]
+)
+def list_brand_linkedin_posts(
+    profile_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """All of this brand's LinkedIn posts with their source article, for the Social
+    page (grouped by article there). Any workspace member."""
+    assert_brand_access(db, profile_id, user)
+    return li_svc.list_posts_for_brand(db, profile_id)
 
 
 @router.post("", response_model=BusinessProfile, status_code=status.HTTP_201_CREATED)

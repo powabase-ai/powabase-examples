@@ -28,3 +28,11 @@ class LinkedInPost(BaseModel):
     created_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class LinkedInPostWithArticle(LinkedInPost):
+    """A post enriched with its source article, for the brand-wide Social view
+    (the article association is the organizing principle of that page)."""
+
+    article_title: str
+    article_status: str

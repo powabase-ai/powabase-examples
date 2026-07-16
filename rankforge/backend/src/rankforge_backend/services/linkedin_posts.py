@@ -17,6 +17,22 @@ def list_posts(db: Database, article_id: UUID) -> list[dict[str, Any]]:
     )
 
 
+def list_posts_for_brand(db: Database, business_id: UUID) -> list[dict[str, Any]]:
+    """All of a brand's posts with their source article's title/status, for the
+    Social page (grouped by article there). Newest articles first, then newest
+    posts within each article."""
+    return db.fetch_all(
+        "select p.id, p.article_id, p.angle, p.body, p.created_by, "
+        "p.created_at, p.updated_at, a.title as article_title, "
+        "a.status as article_status "
+        "from public.linkedin_posts p "
+        "join public.articles a on a.id = p.article_id "
+        "where p.business_id = %s "
+        "order by a.created_at desc, p.created_at desc",
+        (business_id,),
+    )
+
+
 def get_post(db: Database, post_id: UUID) -> dict[str, Any] | None:
     return db.fetch_one(
         f"select {_COLS} from public.linkedin_posts where id = %s", (post_id,)

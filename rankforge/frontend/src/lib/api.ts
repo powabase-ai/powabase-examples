@@ -1114,9 +1114,19 @@ export interface LinkedInPost {
   updated_at: string;
 }
 
+/** A post enriched with its source article — the Social page's organizing unit. */
+export interface LinkedInPostWithArticle extends LinkedInPost {
+  article_title: string;
+  article_status: string;
+}
+
 export const linkedInApi = {
   list: (articleId: string) =>
     request<LinkedInPost[]>(`/api/articles/${articleId}/linkedin-posts`),
+  listByBrand: (businessId: string) =>
+    request<LinkedInPostWithArticle[]>(
+      `/api/business-profiles/${businessId}/linkedin-posts`
+    ),
   generate: (articleId: string, angle: Angle) =>
     request<LinkedInPost>(`/api/articles/${articleId}/linkedin-posts`, {
       method: "POST",

@@ -2,103 +2,27 @@
 
 import * as React from "react";
 // Share2 (not a brand "Linkedin" icon — lucide has been deprecating brand icons).
-import { Copy, Loader2, Share2, Sparkles, Trash2 } from "lucide-react";
+import { Copy, Loader2, Share2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ANGLES, type Angle, type LinkedInPost } from "@/lib/api";
+import { ANGLES, type LinkedInPost } from "@/lib/api";
 import {
   useDeleteLinkedInPost,
-  useGenerateLinkedInPost,
-  useLinkedInPosts,
   useUpdateLinkedInPost,
 } from "@/lib/hooks/useLinkedIn";
 
-const FOLD_CHARS = 210; // LinkedIn hides everything after ~this behind "…see more"
-const MAX_CHARS = 3000;
+export const FOLD_CHARS = 210; // LinkedIn hides everything after ~this behind "…see more"
+export const MAX_CHARS = 3000;
 
-const angleLabel = (slug: string) =>
+export const angleLabel = (slug: string) =>
   ANGLES.find((a) => a.slug === slug)?.label ?? slug;
 
-export function LinkedInPanel({
-  articleId,
-  articleReady,
-}: {
-  articleId: string;
-  articleReady: boolean;
-}) {
-  const posts = useLinkedInPosts(articleId);
-  const generate = useGenerateLinkedInPost(articleId);
-  const [angle, setAngle] = React.useState<Angle>("key_insight");
-
-  function onGenerate() {
-    generate.mutate(angle, {
-      onSuccess: () => toast.success("LinkedIn post generated"),
-      onError: (e) =>
-        toast.error(e instanceof Error ? e.message : "Generation failed"),
-    });
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="space-y-2 rounded-md border border-border p-3">
-        <label className="text-xs font-medium text-muted-foreground">
-          Generate a LinkedIn post
-        </label>
-        <div className="flex gap-2">
-          <select
-            value={angle}
-            onChange={(e) => setAngle(e.target.value as Angle)}
-            className="h-9 flex-1 rounded-md border border-input bg-background px-2 text-sm"
-          >
-            {ANGLES.map((a) => (
-              <option key={a.slug} value={a.slug}>
-                {a.label}
-              </option>
-            ))}
-          </select>
-          <Button
-            variant="gold"
-            size="sm"
-            onClick={onGenerate}
-            disabled={generate.isPending || !articleReady}
-          >
-            {generate.isPending ? (
-              <Loader2 className="animate-spin" />
-            ) : (
-              <Sparkles />
-            )}
-            Generate variant
-          </Button>
-        </div>
-        <p className="text-[11px] text-muted-foreground">
-          {articleReady
-            ? "Uses credits. Each generation adds a new variant you can edit or delete."
-            : "Generate the article draft first — there's no content to repurpose yet."}
-        </p>
-      </div>
-
-      {posts.isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : (posts.data ?? []).length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No posts yet — pick an angle and generate one.
-        </p>
-      ) : (
-        <ul className="space-y-3">
-          {(posts.data ?? []).map((p) => (
-            <li key={p.id}>
-              <PostCard articleId={articleId} post={p} />
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function PostCard({
+/** One editable LinkedIn post variant: angle badge + created date, an above-the-fold
+ *  preview (what shows before "…see more"), the editable body with a char counter,
+ *  and Copy / Save / Delete. Used by the Social page. */
+export function LinkedInPostCard({
   articleId,
   post,
 }: {
@@ -142,7 +66,7 @@ function PostCard({
   }
 
   return (
-    <div className="space-y-2 rounded-md border border-border p-3">
+    <div className="space-y-2 rounded-md border border-border bg-card p-3">
       <div className="flex items-center gap-2">
         <Share2 className="size-3.5 text-[rgb(var(--ember))]" />
         <span className="rounded bg-secondary px-1.5 py-0.5 text-xs text-muted-foreground">

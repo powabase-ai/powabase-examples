@@ -11,6 +11,7 @@ import {
   Radar,
   Search,
   Settings,
+  Share2,
   Users,
   type LucideIcon,
 } from "lucide-react";
@@ -50,6 +51,7 @@ export function AppSidebar({ brandId }: { brandId: string }) {
         { title: "Articles", href: `/brands/${brandId}/articles`, icon: PenLine },
         { title: "Clusters", href: `/brands/${brandId}/clusters`, icon: Boxes },
         { title: "Materials", href: `/brands/${brandId}/materials`, icon: Library },
+        { title: "Social", href: `/brands/${brandId}/social`, icon: Share2 },
       ],
     },
     {
