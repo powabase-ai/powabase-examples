@@ -1091,3 +1091,44 @@ export const briefsApi = {
       body: JSON.stringify(data),
     }),
 };
+
+// --- LinkedIn posts (repurpose an article) ---
+export type Angle = "key_insight" | "lesson" | "contrarian" | "story" | "stat";
+
+/** Slug → label. Keep in sync with backend models/linkedin.py ANGLE_SLUGS. */
+export const ANGLES: { slug: Angle; label: string }[] = [
+  { slug: "key_insight", label: "Key insight" },
+  { slug: "lesson", label: "Lesson learned" },
+  { slug: "contrarian", label: "Contrarian take" },
+  { slug: "story", label: "Story / behind-the-scenes" },
+  { slug: "stat", label: "Stat highlight" },
+];
+
+export interface LinkedInPost {
+  id: string;
+  article_id: string;
+  angle: string;
+  body: string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const linkedInApi = {
+  list: (articleId: string) =>
+    request<LinkedInPost[]>(`/api/articles/${articleId}/linkedin-posts`),
+  generate: (articleId: string, angle: Angle) =>
+    request<LinkedInPost>(`/api/articles/${articleId}/linkedin-posts`, {
+      method: "POST",
+      body: JSON.stringify({ angle }),
+    }),
+  update: (articleId: string, postId: string, body: string) =>
+    request<LinkedInPost>(
+      `/api/articles/${articleId}/linkedin-posts/${postId}`,
+      { method: "PATCH", body: JSON.stringify({ body }) }
+    ),
+  remove: (articleId: string, postId: string) =>
+    request<void>(`/api/articles/${articleId}/linkedin-posts/${postId}`, {
+      method: "DELETE",
+    }),
+};
