@@ -148,6 +148,9 @@ function PostCard({
         <span className="rounded bg-secondary px-1.5 py-0.5 text-xs text-muted-foreground">
           {angleLabel(post.angle)}
         </span>
+        <span className="text-[11px] text-muted-foreground">
+          {new Date(post.created_at).toLocaleDateString()}
+        </span>
       </div>
 
       {/* Above-the-fold preview: what shows before "…see more". */}

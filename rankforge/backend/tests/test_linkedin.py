@@ -136,6 +136,21 @@ async def test_generate_post_raises_runtimeerror_on_empty(monkeypatch):
         await li_gen.generate_post(client, MagicMock(), AID, "key_insight")
 
 
+async def test_generate_post_caps_body_at_linkedin_limit(monkeypatch):
+    monkeypatch.setattr(
+        li_gen.gen, "get_article",
+        lambda db, aid: {"id": AID, "business_id": BID, "content_md": "real", "status": "draft"},
+    )
+    monkeypatch.setattr(li_gen.brands, "get_profile", lambda db, bid: {})
+    monkeypatch.setattr(li_gen, "ensure_linkedin_agent", AsyncMock(return_value="a"))
+    client = MagicMock()
+    long_text = "line one\n" + ("x" * 4000)
+    client.run_agent = AsyncMock(return_value={"content": long_text})
+    out = await li_gen.generate_post(client, MagicMock(), AID, "key_insight")
+    assert len(out) <= 3000
+    assert out == "line one"  # truncated to the last complete line under the cap
+
+
 def _brand_db():
     db = MagicMock()
     db.fetch_one.return_value = {"org_id": __import__("uuid").UUID(ADMIN_ORG)}

@@ -150,7 +150,7 @@ async def ensure_linkedin_agent(client: PowabaseClient) -> str:
 
 
 def _resolve_article_url(
-    db: Database, brand: dict[str, Any] | None, article: dict[str, Any]
+    brand: dict[str, Any] | None, article: dict[str, Any]
 ) -> str | None:
     """The article's live URL, only if it's published — else None (no link line)."""
     if article.get("status") != "published":
@@ -182,7 +182,7 @@ async def generate_post(
         content_md=content_md,
         brand=brand or {},
         angle=angle,
-        article_url=_resolve_article_url(db, brand, article),
+        article_url=_resolve_article_url(brand, article),
     )
     agent_id = await ensure_linkedin_agent(client)
     try:
@@ -193,4 +193,8 @@ async def generate_post(
     text = (res.get("content") or "").strip()
     if not text:
         raise RuntimeError("empty generation")
+    if len(text) > 3000:
+        # Truncate to the last complete line under the LinkedIn cap — a rare, defensive
+        # path (the prompt already targets <=3000); an edit past the cap can't be saved.
+        text = text[:3000].rsplit("\n", 1)[0].rstrip()
     return text
