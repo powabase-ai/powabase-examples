@@ -8,9 +8,13 @@
 
 Let a workspace generate insightful **LinkedIn posts** from a selected blog article. Each
 post is written in the brand's voice — insightful, positive-but-not-salesy, and free of
-AI tells (reusing the article writer's anti-AI-tell guidance). Users pick an **angle**,
-generate a **variant**, **edit** the text, **copy** it to the clipboard, and **delete**
-variants they don't want. Posts are per-article and shared across the workspace (org).
+AI tells (reusing the article writer's anti-AI-tell guidance) — and is engineered for
+reach: the **above-the-fold hook** (the first ~210 chars before "…see more") is the top
+priority, following social best practices to maximize the chance of the post traveling.
+Posts can run long when the content earns it (up to LinkedIn's 3,000-char cap). Users
+pick an **angle**, generate a **variant**, **edit** the text, **copy** it to the
+clipboard, and **delete** variants they don't want. Posts are per-article and shared
+across the workspace (org).
 
 ## Decisions (from brainstorming)
 
@@ -125,13 +129,33 @@ Default in the UI: `key_insight`. The set is a shared constant used by both the 
   `generation._SYSTEM_PROMPT` (delve/leverage/robust/seamless/…; "it's not just X, it's
   Y"; the antithesis reframe; "Let's dive in"; rule-of-three; empty transitions), em-dash
   restraint, varied sentence length, concrete specifics over generic filler.
-- LinkedIn format: a strong **hook first line**, short lines / whitespace between
-  thoughts, ~1,300-character sweet spot (hard cap ~3,000), insightful and useful — **no
-  hard CTA, not salesy**. Ground every claim in the article; invent nothing.
-- **Fixed trailing order** (so every post is consistent): post body → blank line →
-  (if an article URL is provided) a soft `Full write-up → {url}` line → blank line →
-  **3–5** relevant, specific hashtags (no generic spam). When no URL is provided, the
-  link line is omitted and the hashtags follow the body directly.
+- **Above-the-fold hook is the #1 priority.** LinkedIn truncates at ~210 characters
+  (≈2–3 lines) behind "…see more", so the opening MUST stop the scroll and earn the
+  click on its own. Bake in the proven hook patterns and forbid throat-clearing:
+  - Open with ONE scroll-stopper: a counterintuitive/bold claim, a specific number or
+    surprising result, a sharp question, or a concrete first-person moment. Never bury
+    the lede or open with a generic setup ("In today's world…", "As engineers, we…").
+  - The first ~210 chars must deliver a complete, curiosity-driving thought (an open
+    loop the reader wants closed) — not a fragment cut off mid-idea.
+  - No links, hashtags, or fluff in the first two lines (they suppress reach and waste
+    the hook).
+- **Retention & scannability:** deliver on the hook's promise fast; front-load the
+  payoff. One idea per line, generous whitespace, 1–2-line paragraphs — built to be
+  skimmed on mobile.
+- **Length is flexible:** the post can run as long as it keeps earning attention, up to
+  LinkedIn's hard cap of **3,000 characters**. There is no short target — a long post is
+  fine if every line pulls the reader down; a short one is fine if that's all it needs.
+- **Engagement close (soft, not salesy):** end the body with a genuine discussion
+  question that invites comments (comments drive reach) — a peer question, never a
+  product CTA or "DM us". Insightful and useful throughout; the brand earns authority by
+  being worth reading, not by selling.
+- Ground every claim in the article; invent nothing.
+- **Fixed trailing order** (so every post is consistent): hook + body → the soft
+  discussion question (last line of the body) → blank line → (if an article URL is
+  provided) a soft `Full write-up → {url}` line → blank line → **3–5** relevant, specific
+  hashtags (no generic spam). When no URL is provided, the link line is omitted and the
+  hashtags follow the body directly. (The link sits at the end, not the top, to avoid the
+  first-line reach penalty external links carry.)
 
 Non-goals: no separate fact-check pipeline (the source is our own vetted article); no
 streaming (short output).
@@ -174,7 +198,9 @@ mirroring the comment endpoints.
 - List of variant cards (newest first), each:
   - angle **badge** + created date/author,
   - editable `<Textarea>` seeded from `body`, **Save** (dirty-tracked) via PATCH,
-  - live **char count** with ~1,300 sweet-spot and 3,000 hard-limit hints,
+  - an **"above the fold" preview/marker**: the panel highlights the first ~210
+    characters (what shows before "…see more") so editors can see and tune the hook,
+    plus a live char count against LinkedIn's 3,000 hard limit (no short target),
   - **Copy** (`navigator.clipboard.writeText` + sonner toast),
   - **Delete** (with confirm) via DELETE.
 - Empty state: "No posts yet — pick an angle and generate one."
