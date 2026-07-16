@@ -18,6 +18,7 @@ from ..models.article import (
     RemoveLinkResult,
 )
 from ..models.comment import Comment, CommentCreate, CommentUpdate
+from ..models.linkedin import LinkedInGenerate, LinkedInPost, LinkedInUpdate
 from ..models.linking import BrokenLink, LinkSuggestion, RemoveLinkRequest
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
@@ -26,6 +27,8 @@ from ..services import comments as comments_svc
 from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
 from ..services import linkcheck as linkcheck_svc
+from ..services import linkedin_gen as li_gen
+from ..services import linkedin_posts as li_svc
 from ..services import linking as linking_svc
 from ..services import publishing as pub_svc
 from ..services import quality as quality_svc
@@ -641,3 +644,86 @@ def remove_comment(
     ):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "not allowed")
     comments_svc.delete_comment(db, comment_id)
+
+
+# --- LinkedIn posts (repurpose an article into shareable LinkedIn variants) ---
+def _guard_li_post(db: Database, article_id: UUID, post_id: UUID) -> dict:
+    """Load a post and confirm it belongs to the named (already org-guarded) article.
+    Mirrors the comment endpoints' 404 so we don't leak which post ids exist elsewhere."""
+    post = li_svc.get_post(db, post_id)
+    if post is None or str(post["article_id"]) != str(article_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    return post
+
+
+@router.get("/{article_id}/linkedin-posts", response_model=list[LinkedInPost])
+def list_linkedin_posts(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """All LinkedIn post variants for this article (newest first). Any workspace member."""
+    _guard_article(db, article_id, user)
+    return li_svc.list_posts(db, article_id)
+
+
+@router.post(
+    "/{article_id}/linkedin-posts",
+    response_model=LinkedInPost,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("linkedin:generate"))],
+)
+async def generate_linkedin_post(
+    article_id: UUID,
+    payload: LinkedInGenerate,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Generate a new LinkedIn variant from the article (synchronous LLM call)."""
+    article = _guard_article(db, article_id, user)
+    try:
+        body = await li_gen.generate_post(pb, db, article_id, payload.angle)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
+    return li_svc.create_post(
+        db,
+        article_id=article_id,
+        business_id=article["business_id"],
+        angle=payload.angle,
+        body=body,
+        author_id=user.id,
+    )
+
+
+@router.patch(
+    "/{article_id}/linkedin-posts/{post_id}", response_model=LinkedInPost
+)
+def update_linkedin_post(
+    article_id: UUID,
+    post_id: UUID,
+    payload: LinkedInUpdate,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Edit a variant's text. Any workspace member."""
+    _guard_article(db, article_id, user)
+    _guard_li_post(db, article_id, post_id)
+    return li_svc.update_post(db, post_id, payload.body)
+
+
+@router.delete(
+    "/{article_id}/linkedin-posts/{post_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_linkedin_post(
+    article_id: UUID,
+    post_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    _guard_article(db, article_id, user)
+    _guard_li_post(db, article_id, post_id)
+    li_svc.delete_post(db, post_id)

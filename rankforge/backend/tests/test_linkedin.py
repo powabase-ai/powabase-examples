@@ -3,13 +3,19 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from conftest import ADMIN_ORG, with_auth
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from rankforge_backend.main import create_app
 from rankforge_backend.models.linkedin import (
     ANGLE_SLUGS,
     LinkedInGenerate,
     LinkedInUpdate,
 )
+from rankforge_backend.models.profile import CurrentUser
+from rankforge_backend.routes.deps import get_db, get_powabase
+from rankforge_backend.services import generation as gen_svc
 from rankforge_backend.services import linkedin_gen as li_gen
 from rankforge_backend.services import linkedin_posts as li_svc
 
@@ -128,3 +134,100 @@ async def test_generate_post_raises_runtimeerror_on_empty(monkeypatch):
     client.run_agent = AsyncMock(return_value={"content": "   "})
     with pytest.raises(RuntimeError):
         await li_gen.generate_post(client, MagicMock(), AID, "key_insight")
+
+
+def _brand_db():
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": __import__("uuid").UUID(ADMIN_ORG)}
+    return db
+
+
+def _client(db=None, pb=None, user: CurrentUser | None = None):
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: db if db is not None else _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: pb if pb is not None else MagicMock()
+    return TestClient(with_auth(app, user) if user else with_auth(app))
+
+
+def test_list_linkedin_posts_route(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    monkeypatch.setattr(li_svc, "list_posts", lambda db, aid: [
+        {"id": PID, "article_id": AID, "angle": "story", "body": "hi",
+         "created_by": None, "created_at": "2026-07-16T00:00:00Z",
+         "updated_at": "2026-07-16T00:00:00Z"}
+    ])
+    resp = _client().get(f"/api/articles/{AID}/linkedin-posts")
+    assert resp.status_code == 200
+    assert resp.json()[0]["angle"] == "story"
+
+
+def test_generate_linkedin_post_route(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    monkeypatch.setattr(li_gen, "generate_post", AsyncMock(return_value="Hook line.\n\n#Dev"))
+    monkeypatch.setattr(li_svc, "create_post", lambda db, **k: {
+        "id": PID, "article_id": AID, "angle": k["angle"], "body": k["body"],
+        "created_by": None, "created_at": "2026-07-16T00:00:00Z",
+        "updated_at": "2026-07-16T00:00:00Z"})
+    resp = _client().post(f"/api/articles/{AID}/linkedin-posts", json={"angle": "key_insight"})
+    assert resp.status_code == 201
+    assert resp.json()["body"] == "Hook line.\n\n#Dev"
+
+
+def test_generate_409_when_article_has_no_content(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    async def boom(*a, **k):
+        raise ValueError("article has no content yet")
+    monkeypatch.setattr(li_gen, "generate_post", boom)
+    resp = _client().post(f"/api/articles/{AID}/linkedin-posts", json={"angle": "key_insight"})
+    assert resp.status_code == 409
+
+
+def test_generate_502_on_upstream_failure(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    async def boom(*a, **k):
+        raise RuntimeError("generation failed")
+    monkeypatch.setattr(li_gen, "generate_post", boom)
+    resp = _client().post(f"/api/articles/{AID}/linkedin-posts", json={"angle": "key_insight"})
+    assert resp.status_code == 502
+
+
+def test_generate_422_on_bad_angle(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    resp = _client().post(f"/api/articles/{AID}/linkedin-posts", json={"angle": "spicy"})
+    assert resp.status_code == 422
+
+
+def test_update_linkedin_post_route(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    monkeypatch.setattr(li_svc, "get_post", lambda db, pid: {"id": PID, "article_id": AID})
+    monkeypatch.setattr(li_svc, "update_post", lambda db, pid, body: {
+        "id": PID, "article_id": AID, "angle": "story", "body": body,
+        "created_by": None, "created_at": "2026-07-16T00:00:00Z",
+        "updated_at": "2026-07-16T00:00:00Z"})
+    resp = _client().patch(f"/api/articles/{AID}/linkedin-posts/{PID}", json={"body": "edited"})
+    assert resp.status_code == 200
+    assert resp.json()["body"] == "edited"
+
+
+def test_update_404_when_post_not_on_article(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    monkeypatch.setattr(li_svc, "get_post", lambda db, pid: {"id": PID, "article_id": "99999999-9999-9999-9999-999999999999"})
+    resp = _client().patch(f"/api/articles/{AID}/linkedin-posts/{PID}", json={"body": "edited"})
+    assert resp.status_code == 404
+
+
+def test_delete_linkedin_post_route(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    monkeypatch.setattr(li_svc, "get_post", lambda db, pid: {"id": PID, "article_id": AID})
+    monkeypatch.setattr(li_svc, "delete_post", lambda db, pid: True)
+    resp = _client().delete(f"/api/articles/{AID}/linkedin-posts/{PID}")
+    assert resp.status_code == 204
+
+
+def test_cross_org_404(monkeypatch):
+    # Article's brand is in another org → _guard_article 404s before any work.
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": __import__("uuid").UUID("77777777-7777-7777-7777-777777777777")}
+    resp = _client(db).get(f"/api/articles/{AID}/linkedin-posts")
+    assert resp.status_code == 404
