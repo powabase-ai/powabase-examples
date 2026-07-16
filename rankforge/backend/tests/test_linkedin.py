@@ -1,5 +1,7 @@
 """LinkedIn post generator — models, prompt builder, CRUD service, routes (hermetic)."""
 
+from unittest.mock import MagicMock
+
 import pytest
 from pydantic import ValidationError
 
@@ -8,6 +10,7 @@ from rankforge_backend.models.linkedin import (
     LinkedInGenerate,
     LinkedInUpdate,
 )
+from rankforge_backend.services import linkedin_posts as li_svc
 
 
 def test_angle_slugs_are_the_five_presets():
@@ -30,10 +33,6 @@ def test_update_rejects_empty_and_overlong_body():
         LinkedInUpdate(body="x" * 3001)
     assert LinkedInUpdate(body="ok").body == "ok"
 
-
-from unittest.mock import MagicMock
-
-from rankforge_backend.services import linkedin_posts as li_svc
 
 AID = "55555555-5555-5555-5555-555555555555"
 BID = "11111111-1111-1111-1111-111111111111"
