@@ -268,12 +268,14 @@ The article-page "LinkedIn" tab is replaced by a dedicated **Social** page:
 
 - **Sidebar:** new "Social" item under the Content section (`/brands/{id}/social`,
   `Share2` icon). The article page's LinkedIn tab is removed (the feature *moved*).
-- **Page layout:** a generate card up top — source-article picker (articles whose
-  generation is `done`; published ones labeled) + angle picker + Generate — followed by
-  every post in the brand **grouped under its source article** (title links to the
-  article, editorial-status badge, post count), with an optional per-article filter.
-  Cards are unchanged (above-the-fold preview, edit/save/copy/delete, char counter),
-  extracted to `components/LinkedInPostCard.tsx`.
+- **Page layout — master-detail** (scales to a 100+-article library; mirrors the
+  Sources page's two-pane pattern): a searchable **article rail** on the left (every
+  article whose generation is `done`, each row showing title, editorial-status badge,
+  and its post count) and, for the selected article, the **main region** with the
+  article header (title → article link, status, post count), the generate controls
+  (angle picker + Generate), and that article's post variants. Default selection: the
+  first article that already has posts. Cards are unchanged (above-the-fold preview,
+  edit/save/copy/delete, char counter), extracted to `components/LinkedInPostCard.tsx`.
 - **Backend:** new `GET /api/business-profiles/{id}/linkedin-posts` (any member,
   `assert_brand_access`) returning `LinkedInPostWithArticle` (post + `article_title`,
   `article_status`) via `list_posts_for_brand` (join on articles; newest articles
