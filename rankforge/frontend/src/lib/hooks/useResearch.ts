@@ -75,6 +75,49 @@ export function useSourceMarkdown(sourceId: string | null) {
   });
 }
 
+/** Whether a source has 'original page' renders (uploaded PDFs) + their dimensions. */
+export function useSourceMeta(sourceId: string | null) {
+  return useQuery({
+    queryKey: ["source-meta", sourceId],
+    queryFn: () => sourcesApi.meta(sourceId as string),
+    enabled: !!sourceId,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** One rendered page image as a Blob (lazy — `enabled` gated by an IntersectionObserver
+ *  in the viewer). The fetch uses `cache: "no-store"`, so React Query — not the browser
+ *  HTTP cache — is the cache here; a long staleTime keeps a scrolled-past page from
+ *  refetching on the same session. */
+export function useSourcePageBlob(
+  sourceId: string | null,
+  index: number,
+  enabled: boolean
+) {
+  return useQuery({
+    queryKey: ["source-page", sourceId, index],
+    queryFn: () => sourcesApi.pageImage(sourceId as string, index),
+    enabled: enabled && !!sourceId,
+    staleTime: 50 * 60_000,
+    retry: 1,
+  });
+}
+
+export function useDeleteBrandSources(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rowIds: string[]) => sourcesApi.bulkDelete(businessId, rowIds),
+    // Invalidate on settle (not just success): a partial failure can leave rows deleted
+    // server-side while the request errored — refetch either way so the list never keeps
+    // showing rows that are already gone.
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["sources", businessId] });
+      // Deleting sources can empty a run's source list — refresh the runs view too.
+      qc.invalidateQueries({ queryKey: ["research", businessId] });
+    },
+  });
+}
+
 export function useBriefs(businessId: string) {
   return useQuery({
     queryKey: ["briefs", businessId],

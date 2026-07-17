@@ -730,11 +730,11 @@ def list_articles(db: Database, business_id: UUID) -> list[dict[str, Any]]:
 
 
 def delete_article(db: Database, article_id: UUID) -> bool:
-    """Hard-delete an article. Its versions, publications, comments, link suggestions,
-    and broken-link findings cascade; cluster membership is FK ON DELETE SET NULL (a
-    deleted pillar leaves its cluster pillar-less, not removed). Articles own no
-    per-article Powabase resource, so there's nothing to clean up remotely. Returns
-    whether a row was deleted.
+    """Hard-delete an article. Its versions, publications, comments, LinkedIn posts,
+    link suggestions, and broken-link findings cascade; cluster membership is FK ON
+    DELETE SET NULL (a deleted pillar leaves its cluster pillar-less, not removed).
+    Articles own no per-article Powabase resource, so there's nothing to clean up
+    remotely. Returns whether a row was deleted.
 
     LIMITATION: APPLIED internal links baked into OTHER articles' bodies as
     `rf:article/{deleted_id}` are NOT rewritten here — after delete they resolve to a

@@ -103,3 +103,26 @@ class BrandSource(BaseModel):
     created_at: datetime
     research_run_id: UUID
     run_topic: str | None = None
+
+
+class SourceBulkDelete(BaseModel):
+    business_id: UUID
+    row_ids: list[UUID] = Field(min_length=1, max_length=500)
+
+
+class SourcePageMeta(BaseModel):
+    # position in the source's image-derivative list (download key)
+    index: int = Field(ge=0)
+    page: int = Field(ge=1)  # 1-indexed page number (display order)
+    width: int | None = None
+    height: int | None = None
+
+
+class SourceMeta(BaseModel):
+    """'Original page' availability for a source — true page renders exist only for
+    uploaded documents (PDFs), never for scraped URLs (see services/source_view)."""
+
+    source_id: str
+    has_page_images: bool
+    page_count: int
+    pages: list[SourcePageMeta] = Field(default_factory=list)

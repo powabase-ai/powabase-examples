@@ -383,6 +383,21 @@ class PowabaseClient:
             raise PowabaseError(resp.status_code, resp.text)
         return resp.text
 
+    async def get_source_derivative_image(
+        self, source_id: str, index: int
+    ) -> tuple[bytes, str]:
+        """Fetch one 'image' derivative (a rendered page image, for uploaded PDFs) by
+        its LIST index into derivatives['image']. Returns (bytes, content_type). The
+        BaaS download endpoint is index-based, not page-based — the caller maps a page
+        number to a list index via the source's derivatives (see get_source)."""
+        resp = await self._client.get(
+            f"/api/sources/{source_id}/derivatives/image/download",
+            params={"index": index},
+        )
+        if resp.status_code >= 400:
+            raise PowabaseError(resp.status_code, resp.text)
+        return resp.content, resp.headers.get("content-type", "image/png")
+
     async def create_kb(
         self,
         name: str,

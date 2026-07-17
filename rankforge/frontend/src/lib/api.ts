@@ -243,6 +243,41 @@ export interface BrandSource {
   run_topic?: string | null;
 }
 
+/** 'Original page' availability for a source (true page renders exist for uploaded
+ *  PDFs only — scraped URLs don't have them). Drives the viewer's display-mode menu. */
+export interface SourcePageMeta {
+  index: number; // download key into the source's image-derivative list
+  page: number; // 1-indexed page number
+  width?: number | null;
+  height?: number | null;
+}
+export interface SourceMeta {
+  source_id: string;
+  has_page_images: boolean;
+  page_count: number;
+  pages: SourcePageMeta[];
+}
+
+/** Fetch one rendered page image as a Blob (authed; mirrors exportArticle's
+ *  Bearer + 401→refresh→retry). The caller turns it into an object URL. */
+export async function fetchSourcePageImage(
+  sourceId: string,
+  index: number,
+  retry = false
+): Promise<Blob> {
+  const token = getAccessToken();
+  const res = await fetch(
+    `${API_BASE_URL}/api/sources/${sourceId}/pages/${index}`,
+    { cache: "no-store", headers: token ? { Authorization: `Bearer ${token}` } : {} }
+  );
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return fetchSourcePageImage(sourceId, index, true);
+  }
+  if (!res.ok) throw new ApiError(res.status, `Page image failed (${res.status})`);
+  return res.blob();
+}
+
 export const sourcesApi = {
   listByBrand: (businessId: string) =>
     request<BrandSource[]>(`/api/sources?business_id=${businessId}`),
@@ -250,6 +285,29 @@ export const sourcesApi = {
     request<{ source_id: string; markdown: string }>(
       `/api/sources/${sourceId}/markdown`
     ),
+  meta: (sourceId: string) =>
+    request<SourceMeta>(`/api/sources/${sourceId}/meta`),
+  pageImage: fetchSourcePageImage,
+  // The API caps row_ids at 500/request; a "select all" over a large library can exceed
+  // that. Chunk into batches so select-all never hits a raw 422, and sum the counts.
+  bulkDelete: async (
+    businessId: string,
+    rowIds: string[]
+  ): Promise<{ deleted: number }> => {
+    const BATCH = 500;
+    let deleted = 0;
+    for (let i = 0; i < rowIds.length; i += BATCH) {
+      const res = await request<{ deleted: number }>(`/api/sources/bulk-delete`, {
+        method: "POST",
+        body: JSON.stringify({
+          business_id: businessId,
+          row_ids: rowIds.slice(i, i + BATCH),
+        }),
+      });
+      deleted += res.deleted;
+    }
+    return { deleted };
+  },
 };
 
 // --- Brand materials (own-site KB) ---
@@ -766,7 +824,7 @@ export interface Comment {
   updated_at: string;
 }
 
-/** Whether a role may approve/publish (the editorial gate). */
+/** Whether a role may perform editor-gated actions (approve, publish, delete sources). */
 export function canApprove(role?: Role | null): boolean {
   return role === "editor" || role === "admin";
 }
@@ -1089,5 +1147,56 @@ export const briefsApi = {
     request<Brief>(`/api/briefs/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
+    }),
+};
+
+// --- LinkedIn posts (repurpose an article) ---
+export type Angle = "key_insight" | "lesson" | "contrarian" | "story" | "stat";
+
+/** Slug → label. Keep in sync with backend models/linkedin.py ANGLE_SLUGS. */
+export const ANGLES: { slug: Angle; label: string }[] = [
+  { slug: "key_insight", label: "Key insight" },
+  { slug: "lesson", label: "Lesson learned" },
+  { slug: "contrarian", label: "Contrarian take" },
+  { slug: "story", label: "Story / behind-the-scenes" },
+  { slug: "stat", label: "Stat highlight" },
+];
+
+export interface LinkedInPost {
+  id: string;
+  article_id: string;
+  angle: Angle;
+  body: string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A post enriched with its source article — the Social page's organizing unit. */
+export interface LinkedInPostWithArticle extends LinkedInPost {
+  article_title: string;
+  article_status: ArticleStatus;
+}
+
+export const linkedInApi = {
+  list: (articleId: string) =>
+    request<LinkedInPost[]>(`/api/articles/${articleId}/linkedin-posts`),
+  listByBrand: (businessId: string) =>
+    request<LinkedInPostWithArticle[]>(
+      `/api/business-profiles/${businessId}/linkedin-posts`
+    ),
+  generate: (articleId: string, angle: Angle) =>
+    request<LinkedInPost>(`/api/articles/${articleId}/linkedin-posts`, {
+      method: "POST",
+      body: JSON.stringify({ angle }),
+    }),
+  update: (articleId: string, postId: string, body: string) =>
+    request<LinkedInPost>(
+      `/api/articles/${articleId}/linkedin-posts/${postId}`,
+      { method: "PATCH", body: JSON.stringify({ body }) }
+    ),
+  remove: (articleId: string, postId: string) =>
+    request<void>(`/api/articles/${articleId}/linkedin-posts/${postId}`, {
+      method: "DELETE",
     }),
 };
