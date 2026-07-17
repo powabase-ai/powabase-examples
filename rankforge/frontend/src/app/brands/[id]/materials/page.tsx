@@ -4,7 +4,7 @@ import { use } from "react";
 import { Library } from "lucide-react";
 
 import { BrandMaterials } from "@/components/brand/BrandMaterials";
-import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
+import { Page, PageHeader } from "@/components/layout/PageHeader";
 
 export default function BrandMaterialsPage({
   params,
@@ -19,9 +19,8 @@ export default function BrandMaterialsPage({
         title="Materials"
         meta="Your own pages drafts can describe and link to"
       />
-      <PageBody className="max-w-2xl">
-        <BrandMaterials brandId={id} />
-      </PageBody>
+      {/* BrandMaterials is a full two-pane (rail + content) that fills the region. */}
+      <BrandMaterials brandId={id} />
     </Page>
   );
 }

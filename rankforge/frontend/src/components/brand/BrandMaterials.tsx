@@ -3,9 +3,7 @@
 import * as React from "react";
 import {
   AlertTriangle,
-  CheckCircle2,
   ExternalLink,
-  Eye,
   Loader2,
   Plus,
   RefreshCw,
@@ -15,7 +13,6 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -26,14 +23,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { SourceContentViewer } from "@/components/SourceContentViewer";
 import {
   useBrandMaterials,
   useBulkDeleteMaterials,
   useDiscoverMaterials,
   useIngestMaterials,
-  useMaterialContent,
   useRefreshMaterials,
-  useRemoveMaterial,
   useUploadMaterialFile,
 } from "@/lib/hooks/useBrandMaterials";
 import { useAuth } from "@/lib/auth/AuthProvider";
@@ -79,157 +75,6 @@ function statusColor(status?: string | null) {
     default:
       return "var(--muted-ink)";
   }
-}
-
-function MaterialRow({
-  brandId,
-  source,
-  canEdit,
-  selected,
-  onToggleSelect,
-  disabled,
-}: {
-  brandId: string;
-  source: BrandMaterialSource;
-  canEdit: boolean;
-  selected: boolean;
-  onToggleSelect: (id: string, checked: boolean) => void;
-  disabled: boolean;
-}) {
-  const remove = useRemoveMaterial(brandId);
-  const [inspecting, setInspecting] = React.useState(false);
-
-  return (
-    <li className="flex items-center gap-3 border-b border-border px-3 py-2.5 last:border-b-0">
-      {canEdit && (
-        <input
-          type="checkbox"
-          aria-label="Select page"
-          checked={selected}
-          disabled={disabled}
-          onChange={(e) => onToggleSelect(source.id, e.target.checked)}
-          className="size-3.5 shrink-0 cursor-pointer accent-[rgb(var(--ember))] disabled:cursor-not-allowed"
-        />
-      )}
-      <div className="min-w-0 flex-1">
-        <a
-          href={source.url}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex max-w-full items-center gap-1 truncate text-sm font-medium hover:underline"
-        >
-          <span className="truncate">{source.title || source.url}</span>
-          <ExternalLink className="size-3 shrink-0 text-muted-foreground" />
-        </a>
-        <div className="mt-0.5 truncate text-xs text-muted-foreground">
-          {source.url}
-        </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-2 text-xs">
-        {source.status && (
-          <span
-            className="rounded px-1.5 py-0.5 font-data capitalize"
-            style={{
-              color: `rgb(${statusColor(source.status)})`,
-              background: `rgb(${statusColor(source.status)} / 0.12)`,
-            }}
-          >
-            {source.status}
-          </span>
-        )}
-        <span className="rounded bg-secondary px-1.5 py-0.5 capitalize text-muted-foreground">
-          {source.origin}
-        </span>
-        <button
-          type="button"
-          aria-label="Inspect content"
-          onClick={() => setInspecting(true)}
-          className="inline-flex items-center text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <Eye className="size-3.5" />
-        </button>
-        {canEdit && (
-          <button
-            type="button"
-            aria-label="Remove page"
-            onClick={() => {
-              if (
-                !window.confirm(
-                  "Remove this page from the KB and delete its source?"
-                )
-              )
-                return;
-              remove.mutate(source.id, {
-                onError: (e) =>
-                  toast.error(
-                    e instanceof Error ? e.message : "Could not remove page"
-                  ),
-              });
-            }}
-            disabled={remove.isPending}
-            className="inline-flex items-center text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50"
-          >
-            {remove.isPending ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Trash2 className="size-3.5" />
-            )}
-          </button>
-        )}
-      </div>
-      <InspectDialog
-        brandId={brandId}
-        source={source}
-        open={inspecting}
-        onOpenChange={setInspecting}
-      />
-    </li>
-  );
-}
-
-function InspectDialog({
-  brandId,
-  source,
-  open,
-  onOpenChange,
-}: {
-  brandId: string;
-  source: BrandMaterialSource;
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
-}) {
-  // Only fetch while the dialog is open (rowId gates the query's `enabled`).
-  const { data, isLoading, error } = useMaterialContent(
-    brandId,
-    open ? source.id : null
-  );
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle className="truncate pr-6">
-            {source.title || source.url}
-          </DialogTitle>
-        </DialogHeader>
-        {isLoading ? (
-          <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" /> Loading scraped content…
-          </div>
-        ) : error ? (
-          <p className="py-6 text-sm text-destructive">
-            {error instanceof Error
-              ? error.message
-              : "No extracted content for this source yet."}
-          </p>
-        ) : (
-          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-3 font-data text-xs leading-relaxed">
-            {data?.content?.trim() || "No content."}
-          </pre>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 function AddPagesDialog({
@@ -516,6 +361,72 @@ function AddPagesDialog({
   );
 }
 
+/** One rail row: bulk-select checkbox + a button that shows the page's content in the
+ *  main pane. */
+function MaterialRow({
+  source,
+  canEdit,
+  active,
+  checked,
+  onToggleCheck,
+  onSelect,
+  disabled,
+}: {
+  source: BrandMaterialSource;
+  canEdit: boolean;
+  active: boolean;
+  checked: boolean;
+  onToggleCheck: (id: string, checked: boolean) => void;
+  onSelect: () => void;
+  disabled: boolean;
+}) {
+  return (
+    <li className="flex items-stretch">
+      {canEdit && (
+        <label className="flex items-center border-b border-border pl-3 pr-1">
+          <input
+            type="checkbox"
+            aria-label="Select page"
+            checked={checked}
+            disabled={disabled}
+            onChange={(e) => onToggleCheck(source.id, e.target.checked)}
+            className="size-3.5 cursor-pointer accent-[rgb(var(--ember))] disabled:cursor-not-allowed"
+          />
+        </label>
+      )}
+      <button
+        onClick={onSelect}
+        className={`min-w-0 flex-1 border-b border-border px-4 py-3 text-left transition-colors ${
+          active ? "bg-[rgb(var(--accent-gold-muted))]" : "hover:bg-secondary"
+        }`}
+      >
+        <div className="line-clamp-1 text-sm font-medium">
+          {source.title || source.url}
+        </div>
+        <div className="mt-1 line-clamp-1 text-xs text-muted-foreground">
+          {source.url}
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+          {source.status && (
+            <span
+              className="rounded px-1.5 py-0.5 font-data capitalize"
+              style={{
+                color: `rgb(${statusColor(source.status)})`,
+                background: `rgb(${statusColor(source.status)} / 0.12)`,
+              }}
+            >
+              {source.status}
+            </span>
+          )}
+          <span className="rounded bg-secondary px-1.5 py-0.5 capitalize text-muted-foreground">
+            {source.origin}
+          </span>
+        </div>
+      </button>
+    </li>
+  );
+}
+
 export function BrandMaterials({ brandId }: { brandId: string }) {
   const { profile } = useAuth();
   const canEdit = canApprove(profile?.role);
@@ -526,43 +437,43 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const [addOpen, setAddOpen] = React.useState(false);
-  // Checkbox selection for bulk refresh / delete (ids of selected source rows).
-  const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [checked, setChecked] = React.useState<Set<string>>(new Set());
+  const [activeId, setActiveId] = React.useState<string | null>(null);
 
   const running = materialsRunning(data?.progress);
-  const sources = data?.sources ?? [];
+  const sources = React.useMemo(() => data?.sources ?? [], [data?.sources]);
+  const active = sources.find((s) => s.id === activeId) ?? null;
 
-  // Drop any selected ids that no longer exist (e.g. after a delete completes), so a
-  // stale selection can't linger or target a removed row.
+  // Drop stale ids (checkbox selection + active) after the list changes.
   React.useEffect(() => {
     const ids = new Set(sources.map((s) => s.id));
-    setSelected((prev) => {
-      const next = new Set([...prev].filter((id) => ids.has(id)));
+    setChecked((prev) => {
+      const next = new Set([...prev].filter((x) => ids.has(x)));
       return next.size === prev.size ? prev : next;
     });
+    setActiveId((prev) => (prev && ids.has(prev) ? prev : null));
   }, [sources]);
 
-  function toggleSelect(id: string, checked: boolean) {
-    setSelected((prev) => {
+  function toggleCheck(id: string, on: boolean) {
+    setChecked((prev) => {
       const next = new Set(prev);
-      if (checked) next.add(id);
+      if (on) next.add(id);
       else next.delete(id);
       return next;
     });
   }
-
-  const allSelected = sources.length > 0 && selected.size === sources.length;
-  function toggleAll(checked: boolean) {
-    setSelected(checked ? new Set(sources.map((s) => s.id)) : new Set());
+  const allChecked = sources.length > 0 && checked.size === sources.length;
+  function toggleAll(on: boolean) {
+    setChecked(on ? new Set(sources.map((s) => s.id)) : new Set());
   }
 
   function runRefresh() {
-    const ids = [...selected];
+    const ids = [...checked];
     if (!ids.length) return;
     refresh.mutate(ids, {
       onSuccess: () => {
         toast.success(`Refreshing ${ids.length} page${ids.length === 1 ? "" : "s"}…`);
-        setSelected(new Set());
+        setChecked(new Set());
       },
       onError: (e) =>
         toast.error(e instanceof Error ? e.message : "Could not start refresh"),
@@ -570,7 +481,7 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
   }
 
   function runBulkDelete() {
-    const ids = [...selected];
+    const ids = [...checked];
     if (!ids.length) return;
     if (
       !window.confirm(
@@ -581,7 +492,7 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
     bulkDelete.mutate(ids, {
       onSuccess: () => {
         toast.success(`Removing ${ids.length} page${ids.length === 1 ? "" : "s"}…`);
-        setSelected(new Set());
+        setChecked(new Set());
       },
       onError: (e) =>
         toast.error(e instanceof Error ? e.message : "Could not delete pages"),
@@ -595,9 +506,7 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
     upload.mutate(file, {
       onSuccess: () => toast.success(`Uploading ${file.name}…`),
       onError: (err) =>
-        toast.error(
-          err instanceof Error ? err.message : "Could not upload file"
-        ),
+        toast.error(err instanceof Error ? err.message : "Could not upload file"),
     });
   }
 
@@ -605,78 +514,37 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
   const failed = data?.progress?.phase === "failed";
 
   return (
-    <Card className="mt-6">
-      <CardHeader>
-        <CardTitle className="text-base">Brand materials</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <p className="text-sm text-muted-foreground">
-          Pages from your own site/docs that drafts can describe and link to
-          (internal links). Crawl your site, pull from a sitemap, add specific
-          URLs, or upload files (PDF, Word, Markdown).
-        </p>
-
-        {/* KB status / live progress */}
-        {running ? (
-          <div className="flex items-start gap-2.5 rounded-md border border-[rgb(var(--ember))]/30 bg-[rgb(var(--ember))]/[0.06] px-3 py-2.5">
-            <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-[rgb(var(--ember-bright))]" />
-            <div className="min-w-0 text-sm font-medium text-foreground">
-              {data?.progress?.message ?? "Ingesting brand materials…"}
-            </div>
-          </div>
-        ) : failed ? (
-          <div className="flex items-start gap-2.5 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2.5">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
-            <div className="min-w-0 text-sm">
-              <span className="font-medium text-destructive">
-                Last ingest didn&apos;t finish.
-              </span>{" "}
-              <span className="text-muted-foreground">
-                {data?.progress?.message ?? "Please try again."}
-              </span>
-            </div>
-          </div>
-        ) : sources.length > 0 ? (
-          <div className="inline-flex items-center gap-1.5 text-xs text-[rgb(var(--success))]">
-            <CheckCircle2 className="size-3.5" /> Materials KB is ready —{" "}
-            {sources.length} page{sources.length === 1 ? "" : "s"}
-          </div>
-        ) : null}
-
-        {/* Add / ingest controls */}
+    <div className="grid min-h-0 flex-1 grid-cols-[360px_1fr]">
+      {/* Rail */}
+      <div className="flex min-h-0 flex-col border-r border-border">
+        {/* Ingest controls */}
         {canEdit && (
-          <div className="space-y-2">
-            <div className="flex flex-wrap gap-2">
-              <Button
-                variant="gold"
-                size="sm"
-                onClick={() => setAddOpen(true)}
-                disabled={running}
-              >
-                {running ? <Loader2 className="animate-spin" /> : <Plus />}
-                Add pages
-              </Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept={UPLOAD_ACCEPT}
-                className="hidden"
-                onChange={onPickFile}
-              />
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploadDisabled}
-              >
-                {upload.isPending ? (
-                  <Loader2 className="animate-spin" />
-                ) : (
-                  <Upload />
-                )}
-                Upload file
-              </Button>
-            </div>
+          <div className="flex flex-wrap gap-2 border-b border-border p-2.5">
+            <Button
+              variant="gold"
+              size="sm"
+              onClick={() => setAddOpen(true)}
+              disabled={running}
+            >
+              {running ? <Loader2 className="animate-spin" /> : <Plus />}
+              Add pages
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={UPLOAD_ACCEPT}
+              className="hidden"
+              onChange={onPickFile}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadDisabled}
+            >
+              {upload.isPending ? <Loader2 className="animate-spin" /> : <Upload />}
+              Upload file
+            </Button>
             <AddPagesDialog
               brandId={brandId}
               open={addOpen}
@@ -686,25 +554,48 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
           </div>
         )}
 
-        {/* Bulk-selection toolbar */}
+        {/* Live status */}
+        {running ? (
+          <div className="flex items-center gap-2 border-b border-border bg-[rgb(var(--ember))]/[0.06] px-3 py-2 text-xs text-foreground">
+            <Loader2 className="size-3.5 shrink-0 animate-spin text-[rgb(var(--ember-bright))]" />
+            <span className="min-w-0 truncate">
+              {data?.progress?.message ?? "Ingesting brand materials…"}
+            </span>
+          </div>
+        ) : failed ? (
+          <div className="flex items-center gap-2 border-b border-border bg-destructive/[0.06] px-3 py-2 text-xs">
+            <AlertTriangle className="size-3.5 shrink-0 text-destructive" />
+            <span className="min-w-0 truncate">
+              <span className="font-medium text-destructive">
+                Last ingest didn&apos;t finish.
+              </span>{" "}
+              <span className="text-muted-foreground">
+                {data?.progress?.message ?? "Please try again."}
+              </span>
+            </span>
+          </div>
+        ) : null}
+
+        {/* Bulk toolbar */}
         {canEdit && sources.length > 0 && (
-          <div className="flex flex-wrap items-center gap-3 text-xs">
-            <label className="inline-flex cursor-pointer items-center gap-2 text-muted-foreground">
+          <div className="flex items-center gap-2 border-b border-border px-3 py-2 text-xs">
+            <label className="flex cursor-pointer items-center gap-2 text-muted-foreground">
               <input
                 type="checkbox"
                 aria-label="Select all pages"
-                checked={allSelected}
+                checked={allChecked}
                 disabled={running}
                 onChange={(e) => toggleAll(e.target.checked)}
                 className="size-3.5 cursor-pointer accent-[rgb(var(--ember))]"
               />
-              {selected.size > 0 ? `${selected.size} selected` : "Select all"}
+              {checked.size ? `${checked.size} selected` : "Select all"}
             </label>
-            {selected.size > 0 && (
-              <div className="flex items-center gap-2">
+            {checked.size > 0 && (
+              <div className="ml-auto flex items-center gap-1">
                 <Button
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
+                  className="h-7"
                   onClick={runRefresh}
                   disabled={running || refresh.isPending}
                   title="Re-scrape selected pages to pick up changed content"
@@ -717,11 +608,11 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
                   Refresh
                 </Button>
                 <Button
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
+                  className="h-7 text-muted-foreground hover:text-destructive"
                   onClick={runBulkDelete}
                   disabled={running || bulkDelete.isPending}
-                  className="text-destructive hover:text-destructive"
                 >
                   {bulkDelete.isPending ? (
                     <Loader2 className="animate-spin" />
@@ -735,32 +626,78 @@ export function BrandMaterials({ brandId }: { brandId: string }) {
           </div>
         )}
 
-        {/* Source list / empty state */}
-        {isLoading ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : sources.length > 0 ? (
-          <ul className={cn("rounded-md border border-border")}>
-            {sources.map((s) => (
-              <MaterialRow
-                key={s.id}
-                brandId={brandId}
-                source={s}
-                canEdit={canEdit}
-                selected={selected.has(s.id)}
-                onToggleSelect={toggleSelect}
-                disabled={running}
-              />
-            ))}
-          </ul>
-        ) : !running ? (
-          <div className="rounded-md border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
-            No brand pages yet.{" "}
-            {canEdit
-              ? "Add pages or upload files above to build the materials KB."
-              : "An editor can add pages to build the materials KB."}
+        {/* Rows */}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {isLoading ? (
+            <p className="p-6 text-sm text-muted-foreground">Loading…</p>
+          ) : sources.length > 0 ? (
+            <ul>
+              {sources.map((s) => (
+                <MaterialRow
+                  key={s.id}
+                  source={s}
+                  canEdit={canEdit}
+                  active={activeId === s.id}
+                  checked={checked.has(s.id)}
+                  onToggleCheck={toggleCheck}
+                  onSelect={() => setActiveId(s.id)}
+                  disabled={running}
+                />
+              ))}
+            </ul>
+          ) : !running ? (
+            <div className="p-6 text-sm text-muted-foreground">
+              No brand pages yet.{" "}
+              {canEdit
+                ? "Add pages or upload files above to build the materials KB."
+                : "An editor can add pages to build the materials KB."}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Detail */}
+      <div className="min-h-0 overflow-y-auto">
+        {!active ? (
+          <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+            Select a page to read its extracted content.
           </div>
-        ) : null}
-      </CardContent>
-    </Card>
+        ) : (
+          <div className="mx-auto max-w-3xl px-8 py-6">
+            <div className="mb-4">
+              <h2 className="font-display text-xl font-bold">
+                {active.title || active.url}
+              </h2>
+              <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                <a
+                  href={active.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  <ExternalLink className="size-3" /> {active.url}
+                </a>
+                {active.status && (
+                  <span
+                    className="rounded px-1.5 py-0.5 font-data capitalize"
+                    style={{
+                      color: `rgb(${statusColor(active.status)})`,
+                      background: `rgb(${statusColor(active.status)} / 0.12)`,
+                    }}
+                  >
+                    {active.status}
+                  </span>
+                )}
+                <span className="capitalize">{active.origin}</span>
+              </div>
+            </div>
+            <SourceContentViewer
+              sourceId={active.source_id ?? null}
+              emptyHint="This page hasn't been extracted yet — check back once ingestion finishes."
+            />
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
