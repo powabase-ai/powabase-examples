@@ -387,19 +387,60 @@ async def delete_run(client: PowabaseClient, db: Database, run_id: UUID) -> bool
 
 
 def source_in_org(db: Database, source_id: str, org_id: UUID) -> bool:
-    """True if a research_sources row with this Powabase source_id belongs to a
-    research run whose business is in the caller's org. Gates the markdown proxy
-    so a caller can't read arbitrary Powabase sources from other orgs."""
+    """True if this Powabase source_id is referenced by the caller's org — via a
+    scraped research source OR a brand material. Gates the source proxies (markdown /
+    meta / page image) so a caller can't read arbitrary project-wide Powabase sources
+    from other orgs."""
     return (
         db.fetch_one(
             "select 1 from public.research_sources rs "
             "join public.research_runs rr on rr.id = rs.research_run_id "
             "join public.business_profiles bp on bp.id = rr.business_id "
-            "where rs.source_id = %s and bp.org_id = %s limit 1",
-            (source_id, org_id),
+            "where rs.source_id = %s and bp.org_id = %s "
+            "union all "
+            "select 1 from public.brand_sources bs "
+            "join public.business_profiles bp2 on bp2.id = bs.business_id "
+            "where bs.source_id = %s and bp2.org_id = %s "
+            "limit 1",
+            (source_id, org_id, source_id, org_id),
         )
         is not None
     )
+
+
+async def bulk_delete_brand_sources(
+    client: PowabaseClient,
+    db: Database,
+    business_id: UUID,
+    row_ids: list[UUID],
+) -> int:
+    """Delete selected scraped-source rows from a brand's library. The WHERE join on
+    `business_id` is the authorization boundary — ids belonging to another brand are
+    silently ignored. Each removed row's Powabase Source is then deleted iff nothing
+    else references it (orphan-safe ref-count check; remote delete best-effort).
+    Returns the number of rows deleted."""
+    if not row_ids:
+        return 0
+    rows = db.fetch_all(
+        "select rs.id, rs.source_id from public.research_sources rs "
+        "join public.research_runs rr on rr.id = rs.research_run_id "
+        "where rr.business_id = %s and rs.id = any(%s)",
+        (business_id, list(row_ids)),
+    )
+    if not rows:
+        return 0
+    ids = [r["id"] for r in rows]
+    sids = {r["source_id"] for r in rows if r.get("source_id")}
+    db.execute(
+        "delete from public.research_sources where id = any(%s)", (ids,)
+    )
+    for sid in sids:
+        if source_refs.source_reference_count(db, sid) == 0:
+            try:
+                await client.delete_source(sid)
+            except Exception:  # noqa: BLE001 — remote cleanup is best-effort
+                log.exception("bulk delete: delete_source failed for %s", sid)
+    return len(ids)
 
 
 def list_sources(db: Database, run_id: UUID) -> list[dict[str, Any]]:
