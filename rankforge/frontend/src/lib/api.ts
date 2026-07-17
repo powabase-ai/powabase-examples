@@ -243,6 +243,41 @@ export interface BrandSource {
   run_topic?: string | null;
 }
 
+/** 'Original page' availability for a source (true page renders exist for uploaded
+ *  PDFs only — scraped URLs don't have them). Drives the viewer's display-mode menu. */
+export interface SourcePageMeta {
+  index: number; // download key into the source's image-derivative list
+  page: number; // 1-indexed page number
+  width?: number | null;
+  height?: number | null;
+}
+export interface SourceMeta {
+  source_id: string;
+  has_page_images: boolean;
+  page_count: number;
+  pages: SourcePageMeta[];
+}
+
+/** Fetch one rendered page image as a Blob (authed; mirrors exportArticle's
+ *  Bearer + 401→refresh→retry). The caller turns it into an object URL. */
+export async function fetchSourcePageImage(
+  sourceId: string,
+  index: number,
+  retry = false
+): Promise<Blob> {
+  const token = getAccessToken();
+  const res = await fetch(
+    `${API_BASE_URL}/api/sources/${sourceId}/pages/${index}`,
+    { cache: "no-store", headers: token ? { Authorization: `Bearer ${token}` } : {} }
+  );
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return fetchSourcePageImage(sourceId, index, true);
+  }
+  if (!res.ok) throw new ApiError(res.status, `Page image failed (${res.status})`);
+  return res.blob();
+}
+
 export const sourcesApi = {
   listByBrand: (businessId: string) =>
     request<BrandSource[]>(`/api/sources?business_id=${businessId}`),
@@ -250,6 +285,14 @@ export const sourcesApi = {
     request<{ source_id: string; markdown: string }>(
       `/api/sources/${sourceId}/markdown`
     ),
+  meta: (sourceId: string) =>
+    request<SourceMeta>(`/api/sources/${sourceId}/meta`),
+  pageImage: fetchSourcePageImage,
+  bulkDelete: (businessId: string, rowIds: string[]) =>
+    request<{ deleted: number }>(`/api/sources/bulk-delete`, {
+      method: "POST",
+      body: JSON.stringify({ business_id: businessId, row_ids: rowIds }),
+    }),
 };
 
 // --- Brand materials (own-site KB) ---

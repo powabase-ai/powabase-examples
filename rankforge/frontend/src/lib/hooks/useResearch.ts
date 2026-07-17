@@ -75,6 +75,44 @@ export function useSourceMarkdown(sourceId: string | null) {
   });
 }
 
+/** Whether a source has 'original page' renders (uploaded PDFs) + their dimensions. */
+export function useSourceMeta(sourceId: string | null) {
+  return useQuery({
+    queryKey: ["source-meta", sourceId],
+    queryFn: () => sourcesApi.meta(sourceId as string),
+    enabled: !!sourceId,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** One rendered page image as a Blob (lazy — `enabled` gated by an IntersectionObserver
+ *  in the viewer). Long staleTime matches the backend's 1h Cache-Control. */
+export function useSourcePageBlob(
+  sourceId: string | null,
+  index: number,
+  enabled: boolean
+) {
+  return useQuery({
+    queryKey: ["source-page", sourceId, index],
+    queryFn: () => sourcesApi.pageImage(sourceId as string, index),
+    enabled: enabled && !!sourceId,
+    staleTime: 50 * 60_000,
+    retry: 1,
+  });
+}
+
+export function useDeleteBrandSources(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rowIds: string[]) => sourcesApi.bulkDelete(businessId, rowIds),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["sources", businessId] });
+      // Deleting sources can empty a run's source list — refresh the runs view too.
+      qc.invalidateQueries({ queryKey: ["research", businessId] });
+    },
+  });
+}
+
 export function useBriefs(businessId: string) {
   return useQuery({
     queryKey: ["briefs", businessId],
