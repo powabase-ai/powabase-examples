@@ -140,7 +140,8 @@ def get_current_user(
 
 
 def require_editor(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
-    """Gate actions that move an article forward (approve / publish)."""
+    """Editor-or-admin gate for destructive/editorial actions (approve, publish,
+    delete sources)."""
     if user.role not in ("editor", "admin"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "editor role required")
     return user

@@ -1,5 +1,6 @@
 """LinkedIn post generator — models, prompt builder, CRUD service, routes (hermetic)."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,6 +15,7 @@ from rankforge_backend.models.linkedin import (
     LinkedInUpdate,
 )
 from rankforge_backend.models.profile import CurrentUser
+from rankforge_backend.powabase import PowabaseError
 from rankforge_backend.routes.deps import get_db, get_powabase
 from rankforge_backend.services import generation as gen_svc
 from rankforge_backend.services import linkedin_gen as li_gen
@@ -22,6 +24,11 @@ from rankforge_backend.services import linkedin_posts as li_svc
 
 def test_angle_slugs_are_the_five_presets():
     assert ANGLE_SLUGS == ("key_insight", "lesson", "contrarian", "story", "stat")
+
+
+def test_angle_clauses_cover_every_slug():
+    # _ANGLE_CLAUSES is the fifth copy of the preset list — pin it to the source of truth.
+    assert set(li_gen._ANGLE_CLAUSES) == set(ANGLE_SLUGS)
 
 
 def test_generate_defaults_to_key_insight():
@@ -39,6 +46,13 @@ def test_update_rejects_empty_and_overlong_body():
     with pytest.raises(ValidationError):
         LinkedInUpdate(body="x" * 3001)
     assert LinkedInUpdate(body="ok").body == "ok"
+
+
+def test_update_strips_whitespace_and_rejects_blank():
+    # A whitespace-only body is empty; the API must be as strict as the UI.
+    with pytest.raises(ValidationError):
+        LinkedInUpdate(body="   ")
+    assert LinkedInUpdate(body="  ok  ").body == "ok"
 
 
 AID = "55555555-5555-5555-5555-555555555555"
@@ -151,6 +165,51 @@ async def test_generate_post_caps_body_at_linkedin_limit(monkeypatch):
     assert out == "line one"  # truncated to the last complete line under the cap
 
 
+async def test_generate_post_warns_on_token_ceiling(monkeypatch, caplog):
+    monkeypatch.setattr(
+        li_gen.gen, "get_article",
+        lambda db, aid: {"id": AID, "business_id": BID, "content_md": "real", "status": "draft"},
+    )
+    monkeypatch.setattr(li_gen.brands, "get_profile", lambda db, bid: {})
+    monkeypatch.setattr(li_gen, "ensure_linkedin_agent", AsyncMock(return_value="a"))
+    client = MagicMock()
+    client.run_agent = AsyncMock(
+        return_value={"content": "a short post", "stop_reason": "max_tokens"}
+    )
+    with caplog.at_level("WARNING"):
+        await li_gen.generate_post(client, MagicMock(), AID, "key_insight")
+    assert any("token ceiling" in r.getMessage() for r in caplog.records)
+
+
+# --- _resolve_article_url (published-only link rule) ---
+def test_resolve_url_none_when_unpublished():
+    assert li_gen._resolve_article_url({}, {"id": AID, "status": "draft"}) is None
+
+
+def test_resolve_url_uses_canonical_when_published(monkeypatch):
+    monkeypatch.setattr(li_gen.linking, "canonical_url", lambda b, a: "https://blog.x/p")
+    out = li_gen._resolve_article_url({}, {"id": AID, "status": "published"})
+    assert out == "https://blog.x/p"
+
+
+def test_resolve_url_falls_back_to_public_base(monkeypatch):
+    monkeypatch.setattr(li_gen.linking, "canonical_url", lambda b, a: None)
+    monkeypatch.setattr(
+        li_gen, "get_settings",
+        lambda: SimpleNamespace(public_base_url="https://app.rf.dev/"),
+    )
+    out = li_gen._resolve_article_url({}, {"id": AID, "status": "published"})
+    assert out == f"https://app.rf.dev/p/{AID}"
+
+
+def test_resolve_url_none_when_no_canonical_and_no_base(monkeypatch):
+    monkeypatch.setattr(li_gen.linking, "canonical_url", lambda b, a: None)
+    monkeypatch.setattr(
+        li_gen, "get_settings", lambda: SimpleNamespace(public_base_url=None)
+    )
+    assert li_gen._resolve_article_url({}, {"id": AID, "status": "published"}) is None
+
+
 def _brand_db():
     db = MagicMock()
     db.fetch_one.return_value = {"org_id": __import__("uuid").UUID(ADMIN_ORG)}
@@ -206,6 +265,28 @@ def test_generate_502_on_upstream_failure(monkeypatch):
     assert resp.status_code == 502
 
 
+def test_generate_propagates_rate_limit_status(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+
+    async def boom(*a, **k):
+        raise PowabaseError(429, "rate limited")
+
+    monkeypatch.setattr(li_gen, "generate_post", boom)
+    resp = _client().post(f"/api/articles/{AID}/linkedin-posts", json={"angle": "key_insight"})
+    assert resp.status_code == 429
+
+
+def test_generate_502_on_other_powabase_error(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+
+    async def boom(*a, **k):
+        raise PowabaseError(500, "upstream boom")
+
+    monkeypatch.setattr(li_gen, "generate_post", boom)
+    resp = _client().post(f"/api/articles/{AID}/linkedin-posts", json={"angle": "key_insight"})
+    assert resp.status_code == 502
+
+
 def test_generate_422_on_bad_angle(monkeypatch):
     monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
     resp = _client().post(f"/api/articles/{AID}/linkedin-posts", json={"angle": "spicy"})
@@ -227,6 +308,16 @@ def test_update_linkedin_post_route(monkeypatch):
 def test_update_404_when_post_not_on_article(monkeypatch):
     monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
     monkeypatch.setattr(li_svc, "get_post", lambda db, pid: {"id": PID, "article_id": "99999999-9999-9999-9999-999999999999"})
+    resp = _client().patch(f"/api/articles/{AID}/linkedin-posts/{PID}", json={"body": "edited"})
+    assert resp.status_code == 404
+
+
+def test_update_404_when_post_deleted_midflight(monkeypatch):
+    # get_post passes the guard, but update_post returns None (deleted in between) —
+    # must 404, not 500 with a ResponseValidationError.
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    monkeypatch.setattr(li_svc, "get_post", lambda db, pid: {"id": PID, "article_id": AID})
+    monkeypatch.setattr(li_svc, "update_post", lambda db, pid, body: None)
     resp = _client().patch(f"/api/articles/{AID}/linkedin-posts/{PID}", json={"body": "edited"})
     assert resp.status_code == 404
 

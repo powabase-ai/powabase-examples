@@ -111,8 +111,9 @@ class SourceBulkDelete(BaseModel):
 
 
 class SourcePageMeta(BaseModel):
-    index: int  # position in the source's image-derivative list (download key)
-    page: int  # 1-indexed page number (display order)
+    # position in the source's image-derivative list (download key)
+    index: int = Field(ge=0)
+    page: int = Field(ge=1)  # 1-indexed page number (display order)
     width: int | None = None
     height: int | None = None
 

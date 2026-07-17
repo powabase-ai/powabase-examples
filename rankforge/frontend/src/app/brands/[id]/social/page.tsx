@@ -102,6 +102,14 @@ export default function SocialPage({
           <div className="min-h-0 flex-1 overflow-y-auto">
             {articles.isLoading ? (
               <p className="p-4 text-sm text-muted-foreground">Loading…</p>
+            ) : articles.error ? (
+              <p className="p-4 text-sm text-destructive">
+                Couldn&apos;t load articles —{" "}
+                {articles.error instanceof Error
+                  ? articles.error.message
+                  : "please retry"}
+                .
+              </p>
             ) : ready.length === 0 ? (
               <p className="p-4 text-sm text-muted-foreground">
                 No generated articles yet — draft an article first, then turn it
@@ -223,6 +231,14 @@ export default function SocialPage({
               {/* Variants */}
               {posts.isLoading ? (
                 <p className="text-sm text-muted-foreground">Loading posts…</p>
+              ) : posts.error ? (
+                <div className="rounded-xl border border-dashed border-destructive/40 p-8 text-center text-sm text-destructive">
+                  Couldn&apos;t load posts for this article —{" "}
+                  {posts.error instanceof Error
+                    ? posts.error.message
+                    : "please retry"}
+                  . Existing variants may not be shown, so hold off on regenerating.
+                </div>
               ) : activePosts.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
                   No posts for this article yet — pick an angle and generate the

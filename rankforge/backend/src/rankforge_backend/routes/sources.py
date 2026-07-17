@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
 
 from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
@@ -83,24 +83,24 @@ async def get_source_meta(
 @router.get("/{source_id}/pages/{index}")
 async def get_source_page_image(
     source_id: str,
-    index: int,
+    index: int = Path(ge=0),
     db: Database = Depends(get_db),
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(get_current_user),
 ):
     """One rendered page image (by its derivative-list index, from /meta). Proxied
-    bytes, cacheable — the private cache-control matches the judocu viewer pattern."""
+    bytes with a private 1h cache so the browser/React-Query layer can reuse an
+    authed page across scroll and remount."""
     if not svc.source_in_org(db, source_id, user.org_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "source not found")
     try:
         content, content_type = await pb.get_source_derivative_image(source_id, index)
     except PowabaseError as e:
-        code = (
-            status.HTTP_404_NOT_FOUND
-            if e.status_code == 404
-            else status.HTTP_502_BAD_GATEWAY
-        )
-        raise HTTPException(code, "page image not found") from e
+        if e.status_code == 404:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "page image not found") from e
+        # The image exists but the upstream fetch failed — say so (a "not found" detail
+        # would mislead), and surface the upstream cause like the markdown/meta proxies.
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
     return Response(
         content=content,
         media_type=content_type,

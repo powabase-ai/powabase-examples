@@ -21,7 +21,7 @@ from ..models.comment import Comment, CommentCreate, CommentUpdate
 from ..models.linkedin import LinkedInGenerate, LinkedInPost, LinkedInUpdate
 from ..models.linking import BrokenLink, LinkSuggestion, RemoveLinkRequest
 from ..models.profile import CurrentUser
-from ..powabase import PowabaseClient
+from ..powabase import PowabaseClient, PowabaseError
 from ..ratelimit import rate_limit
 from ..services import comments as comments_svc
 from ..services import generation as svc
@@ -686,6 +686,15 @@ async def generate_linkedin_post(
         body = await li_gen.generate_post(pb, db, article_id, payload.angle)
     except ValueError as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    except PowabaseError as e:
+        # Preserve rate-limit / unavailable / billing statuses so the client's dedicated
+        # messaging fires; everything else is an upstream fault → 502.
+        code = (
+            e.status_code
+            if e.status_code in (402, 429, 503)
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        raise HTTPException(code, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
     return li_svc.create_post(
@@ -711,7 +720,12 @@ def update_linkedin_post(
     """Edit a variant's text. Any workspace member."""
     _guard_article(db, article_id, user)
     _guard_li_post(db, article_id, post_id)
-    return li_svc.update_post(db, post_id, payload.body)
+    updated = li_svc.update_post(db, post_id, payload.body)
+    if updated is None:
+        # The post was deleted between the guard check and the update — treat as gone
+        # (a bare None would 500 as a ResponseValidationError against LinkedInPost).
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    return updated
 
 
 @router.delete(

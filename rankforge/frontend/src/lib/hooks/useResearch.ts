@@ -86,7 +86,9 @@ export function useSourceMeta(sourceId: string | null) {
 }
 
 /** One rendered page image as a Blob (lazy — `enabled` gated by an IntersectionObserver
- *  in the viewer). Long staleTime matches the backend's 1h Cache-Control. */
+ *  in the viewer). The fetch uses `cache: "no-store"`, so React Query — not the browser
+ *  HTTP cache — is the cache here; a long staleTime keeps a scrolled-past page from
+ *  refetching on the same session. */
 export function useSourcePageBlob(
   sourceId: string | null,
   index: number,
@@ -105,7 +107,10 @@ export function useDeleteBrandSources(businessId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (rowIds: string[]) => sourcesApi.bulkDelete(businessId, rowIds),
-    onSuccess: () => {
+    // Invalidate on settle (not just success): a partial failure can leave rows deleted
+    // server-side while the request errored — refetch either way so the list never keeps
+    // showing rows that are already gone.
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ["sources", businessId] });
       // Deleting sources can empty a run's source list — refresh the runs view too.
       qc.invalidateQueries({ queryKey: ["research", businessId] });

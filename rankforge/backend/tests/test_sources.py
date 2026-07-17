@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from rankforge_backend.main import create_app
 from rankforge_backend.models.profile import CurrentUser
+from rankforge_backend.powabase import PowabaseError
 from rankforge_backend.routes.deps import get_db, get_powabase
 from rankforge_backend.services import research as svc
 from rankforge_backend.services import source_view
@@ -94,13 +95,63 @@ async def test_bulk_delete_service_scopes_and_cleans(monkeypatch):
     client.delete_source = AsyncMock()
     n = await svc.bulk_delete_brand_sources(client, db, UUID(BID), [UUID(RID)])
     assert n == 1
+    sqls = [c.args[0].lower() for c in db.fetch_all.call_args_list]
     # business_id is the authorization boundary in the select.
-    assert "where rr.business_id = %s" in db.fetch_all.call_args.args[0].lower()
+    assert any("where rr.business_id = %s" in s for s in sqls)
+    # the delete counts actually-removed rows via `returning id`.
     assert any(
-        "delete from public.research_sources" in c.args[0]
-        for c in db.execute.call_args_list
+        "delete from public.research_sources" in s and "returning id" in s
+        for s in sqls
     )
     client.delete_source.assert_awaited_once_with(SID)
+
+
+async def test_bulk_delete_keeps_shared_source_deletes_only_orphan(monkeypatch):
+    """Headline guarantee: a Source still referenced elsewhere (ref-count > 0) is NOT
+    deleted from Powabase; only the orphaned one (count 0) is. A regression dropping the
+    `== 0` check would delete project-wide Sources other brands still use."""
+    db = MagicMock()
+    shared, orphan = "src-shared", "src-orphan"
+    db.fetch_all.return_value = [
+        {"id": UUID(RID), "source_id": shared},
+        {"id": UUID(RID2), "source_id": orphan},
+    ]
+    counts = {shared: 1, orphan: 0}
+    monkeypatch.setattr(
+        svc.source_refs, "source_reference_count", lambda d, s: counts[s]
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+    await svc.bulk_delete_brand_sources(client, db, UUID(BID), [UUID(RID), UUID(RID2)])
+    client.delete_source.assert_awaited_once_with(orphan)
+
+
+async def test_bulk_delete_swallows_remote_delete_failure(monkeypatch):
+    """Local rows are already deleted+committed — a remote delete_source hiccup must not
+    convert the successful delete into a 500 (would strand the UI showing gone rows)."""
+    db = MagicMock()
+    db.fetch_all.return_value = [{"id": UUID(RID), "source_id": SID}]
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, s: 0)
+    client = MagicMock()
+    client.delete_source = AsyncMock(side_effect=RuntimeError("remote down"))
+    n = await svc.bulk_delete_brand_sources(client, db, UUID(BID), [UUID(RID)])
+    assert n == 1  # returned normally despite the cleanup failure
+
+
+async def test_bulk_delete_swallows_refcount_failure(monkeypatch):
+    """Same guarantee for a failing ref-count query (pool timeout) in the cleanup loop."""
+    db = MagicMock()
+    db.fetch_all.return_value = [{"id": UUID(RID), "source_id": SID}]
+
+    def boom(d, s):
+        raise RuntimeError("pool timeout")
+
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", boom)
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+    n = await svc.bulk_delete_brand_sources(client, db, UUID(BID), [UUID(RID)])
+    assert n == 1
+    client.delete_source.assert_not_awaited()
 
 
 # --- meta ---
@@ -128,6 +179,14 @@ def test_source_meta_404_cross_org(monkeypatch):
     assert resp.status_code == 404
 
 
+def test_source_meta_502_on_upstream_error(monkeypatch):
+    monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: True)
+    pb = MagicMock()
+    pb.get_source = AsyncMock(side_effect=PowabaseError(500, "boom"))
+    resp = _client(pb=pb).get(f"/api/sources/{SID}/meta")
+    assert resp.status_code == 502
+
+
 # --- page image ---
 def test_source_page_image_route(monkeypatch):
     monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: True)
@@ -143,3 +202,25 @@ def test_source_page_image_404_cross_org(monkeypatch):
     monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: False)
     resp = _client().get(f"/api/sources/{SID}/pages/0")
     assert resp.status_code == 404
+
+
+def test_source_page_image_404_when_upstream_404(monkeypatch):
+    monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: True)
+    pb = MagicMock()
+    pb.get_source_derivative_image = AsyncMock(side_effect=PowabaseError(404, "nope"))
+    resp = _client(pb=pb).get(f"/api/sources/{SID}/pages/0")
+    assert resp.status_code == 404
+
+
+def test_source_page_image_502_when_upstream_errors(monkeypatch):
+    monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: True)
+    pb = MagicMock()
+    pb.get_source_derivative_image = AsyncMock(side_effect=PowabaseError(500, "boom"))
+    resp = _client(pb=pb).get(f"/api/sources/{SID}/pages/0")
+    assert resp.status_code == 502
+
+
+def test_source_page_image_rejects_negative_index(monkeypatch):
+    monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: True)
+    resp = _client().get(f"/api/sources/{SID}/pages/-1")
+    assert resp.status_code == 422

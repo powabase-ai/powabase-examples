@@ -288,11 +288,26 @@ export const sourcesApi = {
   meta: (sourceId: string) =>
     request<SourceMeta>(`/api/sources/${sourceId}/meta`),
   pageImage: fetchSourcePageImage,
-  bulkDelete: (businessId: string, rowIds: string[]) =>
-    request<{ deleted: number }>(`/api/sources/bulk-delete`, {
-      method: "POST",
-      body: JSON.stringify({ business_id: businessId, row_ids: rowIds }),
-    }),
+  // The API caps row_ids at 500/request; a "select all" over a large library can exceed
+  // that. Chunk into batches so select-all never hits a raw 422, and sum the counts.
+  bulkDelete: async (
+    businessId: string,
+    rowIds: string[]
+  ): Promise<{ deleted: number }> => {
+    const BATCH = 500;
+    let deleted = 0;
+    for (let i = 0; i < rowIds.length; i += BATCH) {
+      const res = await request<{ deleted: number }>(`/api/sources/bulk-delete`, {
+        method: "POST",
+        body: JSON.stringify({
+          business_id: businessId,
+          row_ids: rowIds.slice(i, i + BATCH),
+        }),
+      });
+      deleted += res.deleted;
+    }
+    return { deleted };
+  },
 };
 
 // --- Brand materials (own-site KB) ---
@@ -809,7 +824,7 @@ export interface Comment {
   updated_at: string;
 }
 
-/** Whether a role may approve/publish (the editorial gate). */
+/** Whether a role may perform editor-gated actions (approve, publish, delete sources). */
 export function canApprove(role?: Role | null): boolean {
   return role === "editor" || role === "admin";
 }
@@ -1150,7 +1165,7 @@ export const ANGLES: { slug: Angle; label: string }[] = [
 export interface LinkedInPost {
   id: string;
   article_id: string;
-  angle: string;
+  angle: Angle;
   body: string;
   created_by?: string | null;
   created_at: string;
@@ -1160,7 +1175,7 @@ export interface LinkedInPost {
 /** A post enriched with its source article — the Social page's organizing unit. */
 export interface LinkedInPostWithArticle extends LinkedInPost {
   article_title: string;
-  article_status: string;
+  article_status: ArticleStatus;
 }
 
 export const linkedInApi = {

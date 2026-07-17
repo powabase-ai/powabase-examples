@@ -46,7 +46,7 @@ export default function SourcesLibrary({
   const { id } = use(params);
   const { profile } = useAuth();
   const canEdit = canApprove(profile?.role);
-  const { data: sources, isLoading } = useBrandSources(id);
+  const { data: sources, isLoading, error } = useBrandSources(id);
   const del = useDeleteBrandSources(id);
 
   const [selected, setSelected] = React.useState<BrandSource | null>(null);
@@ -89,7 +89,15 @@ export default function SourcesLibrary({
       return;
     del.mutate(ids, {
       onSuccess: (r) => {
-        toast.success(`Deleted ${r.deleted} source${r.deleted === 1 ? "" : "s"}`);
+        if (r.deleted < ids.length) {
+          // Fewer removed than asked — some rows were already gone (raced) or out of
+          // scope. Warn rather than report a clean success.
+          toast.warning(
+            `Deleted ${r.deleted} of ${ids.length} — the rest were already removed`
+          );
+        } else {
+          toast.success(`Deleted ${r.deleted} source${r.deleted === 1 ? "" : "s"}`);
+        }
         setChecked(new Set());
       },
       onError: (e) =>
@@ -140,6 +148,12 @@ export default function SourcesLibrary({
           <div className="min-h-0 flex-1 overflow-y-auto">
             {isLoading && (
               <p className="p-6 text-sm text-muted-foreground">Loading…</p>
+            )}
+            {error && (
+              <p className="p-6 text-sm text-destructive">
+                Couldn&apos;t load sources —{" "}
+                {error instanceof Error ? error.message : "please retry"}.
+              </p>
             )}
             {sources?.length === 0 && (
               <p className="p-6 text-sm text-muted-foreground">

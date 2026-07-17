@@ -9,7 +9,7 @@ from uuid import UUID
 
 from ..config import get_settings
 from ..db import Database
-from ..powabase import PowabaseClient
+from ..powabase import PowabaseClient, PowabaseError
 from . import business_profiles as brands
 from . import generation as gen
 from . import linking
@@ -22,6 +22,17 @@ LINKEDIN_AGENT_NAME = "rankforge-linkedin"
 
 # Article body is truncated to bound token cost (mirrors the FAQ generator).
 _MAX_ARTICLE_CHARS = 16000
+
+# LinkedIn's hard body limit.
+_MAX_POST_CHARS = 3000
+# Output ceiling. A <=3000-char post is ~750-1000 tokens; this leaves comfortable
+# headroom so a full post is almost never cut off mid-sentence by the token limit
+# (which — unlike our char-cap trim — would amputate the load-bearing closing question,
+# link, and hashtags with no clean line to fall back to).
+_MAX_TOKENS = 1600
+# Agent stop/finish reasons that mean the model was cut off by the token ceiling rather
+# than finishing on its own (field name varies by provider — check all).
+_TRUNCATED_STOP_REASONS = {"max_tokens", "length", "max_output_tokens"}
 
 _ANGLE_CLAUSES = {
     "key_insight": (
@@ -145,7 +156,7 @@ async def ensure_linkedin_agent(client: PowabaseClient) -> str:
         name=LINKEDIN_AGENT_NAME,
         model=LINKEDIN_MODEL,
         system_prompt=_SYSTEM,
-        settings={"temperature": 0.5, "max_tokens": 1200},
+        settings={"temperature": 0.5, "max_tokens": _MAX_TOKENS},
     )
 
 
@@ -187,14 +198,36 @@ async def generate_post(
     agent_id = await ensure_linkedin_agent(client)
     try:
         res = await client.run_agent(agent_id, msg)
-    except Exception as e:  # noqa: BLE001 — upstream failure → 502 at the route
+    except PowabaseError:
+        # Let the upstream status/message reach the route so it can map 429/503/402
+        # to the same status (the frontend has dedicated messaging for those) instead
+        # of laundering every failure into an opaque 502 "generation failed".
+        log.warning("linkedin generation upstream error for %s", article_id)
+        raise
+    except Exception as e:  # noqa: BLE001 — non-Powabase failure → 502 at the route
         log.exception("linkedin generation failed for %s", article_id)
         raise RuntimeError("generation failed") from e
     text = (res.get("content") or "").strip()
     if not text:
         raise RuntimeError("empty generation")
-    if len(text) > 3000:
-        # Truncate to the last complete line under the LinkedIn cap — a rare, defensive
-        # path (the prompt already targets <=3000); an edit past the cap can't be saved.
-        text = text[:3000].rsplit("\n", 1)[0].rstrip()
+    # A token-ceiling cutoff (vs. the model finishing on its own) means the post likely
+    # lost its closing question/link/hashtags — surface it in the logs rather than
+    # silently returning a truncated post.
+    stop = res.get("stop_reason") or res.get("finish_reason")
+    if isinstance(stop, str) and stop.lower() in _TRUNCATED_STOP_REASONS:
+        log.warning(
+            "linkedin post for %s hit the token ceiling (stop_reason=%s) — the closing "
+            "line may be cut off",
+            article_id, stop,
+        )
+    if len(text) > _MAX_POST_CHARS:
+        # Trim to the last complete line under the LinkedIn cap — a rare, defensive path
+        # (the prompt already targets <=3000); an edit past the cap can't be saved. Log
+        # it: the fixed trailing order means the cut lands on the load-bearing ending.
+        log.warning(
+            "linkedin post for %s exceeded %d chars (%d) — trimmed to the last full "
+            "line; the closing question/link/hashtags may be lost",
+            article_id, _MAX_POST_CHARS, len(text),
+        )
+        text = text[:_MAX_POST_CHARS].rsplit("\n", 1)[0].rstrip()
     return text

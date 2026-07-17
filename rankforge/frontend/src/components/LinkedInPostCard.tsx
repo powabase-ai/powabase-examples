@@ -32,6 +32,9 @@ export function LinkedInPostCard({
   const update = useUpdateLinkedInPost(articleId);
   const del = useDeleteLinkedInPost(articleId);
   const [body, setBody] = React.useState(post.body);
+  // Re-sync the textarea when the server copy changes (e.g. a refetch after another
+  // member saves). Trade-off: this discards local unsaved edits on refetch — acceptable
+  // here since edits are short and refetches only follow a mutation the user triggered.
   React.useEffect(() => setBody(post.body), [post.body]);
 
   const dirty = body !== post.body;

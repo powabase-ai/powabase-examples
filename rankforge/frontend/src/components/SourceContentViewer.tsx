@@ -55,6 +55,13 @@ export function SourceContentViewer({
         {(meta.isLoading || md.isLoading) && (
           <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
         )}
+        {meta.error && (
+          // A failed /meta is otherwise indistinguishable from "this source has no page
+          // renders" — say so, so a transient error doesn't silently hide the option.
+          <span className="text-[11px] text-destructive">
+            Couldn&apos;t check for original pages
+          </span>
+        )}
       </div>
 
       {effective === "pages" && meta.data ? (
@@ -101,8 +108,9 @@ function SourcePageView({
 }
 
 /** One page image, lazy-loaded: an IntersectionObserver (one-shot, 300px margin) gates
- *  the authed blob fetch; the div reserves the page's exact aspect ratio so scroll
- *  position is stable before the image arrives (judocu viewer pattern). */
+ *  the authed blob fetch, so images load only as they scroll into view; the div reserves
+ *  the page's exact aspect ratio up front so scroll position stays stable before the
+ *  image arrives. A failed fetch offers a Retry (the observer only fires once). */
 function SourcePage({
   sourceId,
   page,
@@ -157,8 +165,22 @@ function SourcePage({
           className="absolute inset-0 h-full w-full object-contain"
         />
       ) : (
-        <div className="absolute inset-0 flex items-center justify-center bg-muted/40 text-xs text-muted-foreground">
-          {blob.error ? "Couldn't load this page" : `Page ${page.page}…`}
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-muted/40 text-xs text-muted-foreground">
+          {blob.error ? (
+            <>
+              <span>Couldn&apos;t load this page</span>
+              <button
+                type="button"
+                onClick={() => blob.refetch()}
+                disabled={blob.isFetching}
+                className="rounded border border-border px-2 py-0.5 hover:bg-secondary disabled:opacity-50"
+              >
+                {blob.isFetching ? "Retrying…" : "Retry"}
+              </button>
+            </>
+          ) : (
+            `Page ${page.page}…`
+          )}
         </div>
       )}
     </div>

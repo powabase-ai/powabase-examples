@@ -431,16 +431,23 @@ async def bulk_delete_brand_sources(
         return 0
     ids = [r["id"] for r in rows]
     sids = {r["source_id"] for r in rows if r.get("source_id")}
-    db.execute(
-        "delete from public.research_sources where id = any(%s)", (ids,)
+    # `returning id` so the count reflects rows ACTUALLY deleted (not the pre-delete
+    # SELECT, which overcounts if a concurrent delete raced us).
+    deleted = db.fetch_all(
+        "delete from public.research_sources where id = any(%s) returning id", (ids,)
     )
+    # The rows are committed now. The remote-Source cleanup below is best-effort and must
+    # NEVER turn a successful delete into an error — a failing ref-count query or remote
+    # delete would otherwise 500 the route AFTER the rows are already gone, leaving the UI
+    # showing rows that no longer exist. Guard the whole per-source step, not just the
+    # delete call.
     for sid in sids:
-        if source_refs.source_reference_count(db, sid) == 0:
-            try:
+        try:
+            if source_refs.source_reference_count(db, sid) == 0:
                 await client.delete_source(sid)
-            except Exception:  # noqa: BLE001 — remote cleanup is best-effort
-                log.exception("bulk delete: delete_source failed for %s", sid)
-    return len(ids)
+        except Exception:  # noqa: BLE001 — remote cleanup is best-effort
+            log.exception("bulk delete: cleanup failed for source %s", sid)
+    return len(deleted)
 
 
 def list_sources(db: Database, run_id: UUID) -> list[dict[str, Any]]:
