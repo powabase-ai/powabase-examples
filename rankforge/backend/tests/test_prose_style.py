@@ -1,0 +1,63 @@
+"""Prose taxonomy invariants (pure, hermetic)."""
+
+import re
+
+from rankforge_backend.services import prose_style as ps
+
+
+def test_ai_words_flattens_every_register_form():
+    assert ps.AI_WORDS == tuple(f for r in ps.AI_REGISTER for f in r.forms)
+    # the lemma is always among its own forms, so the detector catches the base word
+    for r in ps.AI_REGISTER:
+        assert r.lemma in r.forms
+
+
+def test_register_has_no_duplicate_forms():
+    # A duplicated form would double-count in the density calculation.
+    assert len(ps.AI_WORDS) == len(set(ps.AI_WORDS))
+
+
+def test_every_pattern_is_complete():
+    for p in ps.PATTERNS:
+        assert p.key and p.name and p.fix, p
+        assert p.examples, p
+        assert all(e.strip() for e in p.examples), p
+
+
+def test_pattern_keys_are_unique():
+    keys = [p.key for p in ps.PATTERNS]
+    assert len(keys) == len(set(keys))
+
+
+def test_no_pattern_example_contains_a_registered_word():
+    """The no-overlap rule: a construction must not embed an already-banned word, or a
+    single sin scores twice — once in ai_vocabulary, again in tell_phrases."""
+    banned = re.compile(
+        r"(?<![a-z])(?:" + "|".join(re.escape(w) for w in ps.AI_WORDS) + r")(?![a-z])",
+        re.I,
+    )
+    for p in ps.PATTERNS:
+        for example in p.examples:
+            assert not banned.search(example), f"{p.key} example overlaps: {example}"
+
+
+def test_tell_regex_source_compiles_and_excludes_judge_only_patterns():
+    src = ps.tell_regex_source()
+    re.compile(src, re.I)  # must not raise
+    for p in ps.PATTERNS:
+        if p.regex is None:
+            assert p.name not in src
+
+
+def test_writer_block_lists_the_register_and_every_construction():
+    block = ps.writer_block()
+    assert "delve" in block
+    assert "leverage" in block
+    for p in ps.PATTERNS:
+        assert p.name in block
+
+
+def test_judge_taxonomy_names_every_pattern_including_judge_only():
+    tax = ps.judge_taxonomy()
+    for p in ps.PATTERNS:
+        assert p.name in tax
