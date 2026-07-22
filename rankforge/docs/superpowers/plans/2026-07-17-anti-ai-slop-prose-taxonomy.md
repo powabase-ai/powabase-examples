@@ -561,6 +561,24 @@ def test_fake_profound_kicker_is_judge_only():
     assert not scoring._TELL_RE.search(
         "The best systems are the ones you never think about."
     )
+
+
+def test_every_contraction_matches_both_apostrophe_forms():
+    """Rendered Markdown and LLM output emit the typographic apostrophe (U+2019) far
+    more than the straight one, so a straight-only branch misses most real prose."""
+    straight = [
+        "it isn't just a database, it's a platform",
+        "whether you're a beginner or a pro",
+        "in today's fast-paced world",
+        "let's dive in",
+        "it's worth noting the cache is cold",
+        "here's the thing, nobody measures it",
+        "That's it. That's the whole migration.",
+    ]
+    for phrase in straight:
+        assert scoring._TELL_RE.search(phrase), f"straight: {phrase}"
+        curly = phrase.replace("'", "’")
+        assert scoring._TELL_RE.search(curly), f"typographic: {curly}"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -763,6 +781,44 @@ In `prose_style.py`, insert these entries at the end of the `PATTERNS` tuple, af
     ),
 )
 ```
+
+- [ ] **Step 4b: Normalize every contraction to accept both apostrophe forms**
+
+Task 1 established that `it['’]s` accepts the straight apostrophe (U+0027) and the
+typographic one (U+2019), but every other contraction in the taxonomy still uses `'?`,
+which is straight-only. Rendered Markdown and LLM output overwhelmingly emit U+2019, so
+those branches silently miss most real prose. Task 2 had to be behavior-preserving and
+so left them alone; here it is a deliberate behavior change.
+
+In `prose_style.py`, replace every `'?` inside a contraction with `['’]?`:
+
+| Pattern | Before | After |
+|---|---|---|
+| `not_just` | `\bisn'?t (?:just\|merely)\b` | `\bisn['’]?t (?:just\|merely)\b` |
+| `antithesis_reframe` | `(?:n'?t\| not)` | `(?:n['’]?t\| not)` |
+| `whether_youre` | `\bwhether you'?re an?\b` | `\bwhether you['’]?re an?\b` |
+| `in_todays_world` | `\bin today'?s\b` | `\bin today['’]?s\b` |
+| `lets_dive_in` | `\blet'?s (?:dive in\|…)\b` | `\blet['’]?s (?:dive in\|…)\b` |
+
+Apply the same to the contractions in the patterns added in Step 4: `empty_phrase`
+(`it'?s worth noting`, `it'?s important to note`), `throat_clearing` (`here'?s the
+thing`, `here'?s what I mean`), `faux_insight` (`here'?s what nobody`), and
+`dramatic_fragmentation` (`that'?s it\.\s*that'?s`).
+
+The character after the straight `'` must be U+2019 (RIGHT SINGLE QUOTATION MARK).
+Verify with:
+
+```bash
+python3 -c "
+p='src/rankforge_backend/services/prose_style.py'
+s=open(p,encoding='utf-8').read()
+print('U+2019 count:', s.count(chr(0x2019)))
+print('straight-only contractions left:', s.count(chr(0x27)+'?'))
+"
+```
+
+Expected: a U+2019 count matching the number of contraction sites, and `0` remaining
+straight-only `'?` occurrences.
 
 - [ ] **Step 5: Compile the tell detector in multiline mode**
 
