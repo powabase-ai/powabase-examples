@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace seven drifted copies of RankForge's "reads as AI-written" knowledge with one shared taxonomy module, widen detection by ~25 high-precision patterns, and stop the reviser from flattening prose while it removes slop.
+**Goal:** Replace seven drifted copies of RankForge's "reads as AI-written" knowledge with one shared taxonomy module, widen detection by ~15 register words and ~16 constructions, and stop the reviser from flattening prose while it removes slop.
 
 **Architecture:** A new pure module `services/prose_style.py` owns the register words and the formulaic-construction patterns (name, examples, fix, and regex source). `scoring.py` compiles its detectors from it; `generation.py`, `linkedin_gen.py`, `revise.py`, and the readability judge render their prompt text from it. New patterns fold into the existing `ai_vocabulary` and `tell_phrases` signals, so the nine readability signals, their weights, the gate keys, and the score-object shape are all unchanged.
 
@@ -465,7 +465,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 3: Widen the taxonomy (~15 words, ~10 constructions)
+### Task 3: Widen the taxonomy (~15 words, ~16 constructions)
 
 **Files:**
 - Modify: `rankforge/backend/src/rankforge_backend/services/prose_style.py` (`AI_REGISTER`, `PATTERNS`)
@@ -507,6 +507,30 @@ def test_new_constructions_are_detected():
         assert scoring._TELL_RE.search(phrase), phrase
 
 
+def test_empty_phrases_hype_and_recap_openers_are_detected():
+    for phrase in (
+        "it's worth noting that the cache is cold",
+        "it is important to note the tradeoff",
+        "at its core, the runtime is a queue",
+        "the truth is nobody measured it",
+        "in this article we cover indexing",
+        "when it comes to latency, p99 matters",
+        "going forward we will pin the version",
+        "this is huge for the team",
+        "this changes everything about deploys",
+    ):
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
+def test_recap_opener_needs_line_start_and_a_comma():
+    """Line-anchored so ordinary sentences survive: "Overall performance improved" is
+    a fact, "Overall, ..." is a recap. Requires the detector to compile with re.M."""
+    assert scoring._TELL_RE.search("Ultimately, the migration paid off.")
+    assert scoring._TELL_RE.search("## Section\nOverall, we cut latency in half.")
+    assert not scoring._TELL_RE.search("Overall performance improved by 12%.")
+    assert not scoring._TELL_RE.search("We ultimately, and reluctantly, rolled back.")
+
+
 def test_precision_guards_hold_for_the_new_constructions():
     """High-precision only: ordinary technical prose must not trip the new patterns."""
     for clean in (
@@ -518,8 +542,25 @@ def test_precision_guards_hold_for_the_new_constructions():
         "- **Latency**: 40ms at p99.",
         # "summary" as a noun, not a recap opener
         "The summary field accepts 160 characters.",
+        # "the source of truth is" must not trip the "the truth is" filler
+        "The single source of truth is the ledger table.",
+        # "in order to" / "in terms of" were deliberately left out of empty_phrase
+        "We shard the table in order to keep writes under 5ms.",
     ):
         assert not scoring._TELL_RE.search(clean), clean
+
+
+def test_fake_profound_kicker_is_judge_only():
+    """The closing-metaphor pattern is recognizable only in context, so it must reach
+    the judge but never the deterministic detector."""
+    from rankforge_backend.services import prose_style as ps
+
+    kicker = next(p for p in ps.PATTERNS if p.key == "fake_profound_kicker")
+    assert kicker.regex is None
+    assert kicker.name in ps.judge_taxonomy()
+    assert not scoring._TELL_RE.search(
+        "The best systems are the ones you never think about."
+    )
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -663,6 +704,50 @@ In `prose_style.py`, insert these entries at the end of the `PATTERNS` tuple, af
         ),
     ),
     Pattern(
+        key="empty_phrase",
+        name="Empty phrase",
+        examples=("it's worth noting", "when it comes to", "at its core"),
+        fix="Delete the phrase and start on the point it was delaying.",
+        # Only the distinctive fillers. "in order to" / "in terms of" are deliberately
+        # excluded — too common in ordinary technical prose to penalize at 15 a hit.
+        regex=(
+            r"\bit'?s worth noting\b|\bit is worth noting\b"
+            r"|\bit'?s important to note\b|\bit is important to note\b"
+            r"|\bat its core\b|\bthe (?:truth|reality) is\b"
+            r"|\bin this article\b|\bwhen it comes to\b|\bgoing forward\b"
+        ),
+    ),
+    Pattern(
+        key="hype_declaration",
+        name="Hype declaration",
+        examples=("this is huge", "this changes everything"),
+        fix="Give the number or the mechanism that makes it matter, or cut the line.",
+        regex=r"\bthis is huge\b|\bthis changes everything\b",
+    ),
+    Pattern(
+        key="recap_opener",
+        name="Recap opener",
+        examples=("Ultimately, the migration paid off",),
+        fix="End on the last concrete point instead of restating the piece.",
+        # Line-anchored AND comma-anchored: "Overall performance improved" is an
+        # ordinary sentence, "Overall, …" is a recap. Needs re.M at the compile site.
+        regex=r"^\s*(?:ultimately|overall),",
+    ),
+    Pattern(
+        key="fake_profound_kicker",
+        name="Fake-profound kicker",
+        examples=(
+            "The best systems are the ones you never think about.",
+            "And that, in the end, is what really counts.",
+        ),
+        fix=(
+            "Delete the line — do NOT rewrite it into a better metaphor and do not "
+            "preserve its rhythm. End on the clearest concrete sentence already in the "
+            "draft, or add a plain takeaway or next action."
+        ),
+        regex=None,  # a closing metaphor is recognizable only in context
+    ),
+    Pattern(
         key="synonym_cycling",
         name="Synonym cycling",
         examples=("the agent reviews it, then the assistant scores it",),
@@ -679,7 +764,21 @@ In `prose_style.py`, insert these entries at the end of the `PATTERNS` tuple, af
 )
 ```
 
-- [ ] **Step 5: Generate the `tell_phrases` explanation so it can't drift**
+- [ ] **Step 5: Compile the tell detector in multiline mode**
+
+The `recap_opener` pattern anchors on `^` to mean *line* start. Python raises
+`error: global flags not at the start of the expression` if a pattern embeds `(?m)`
+partway through an alternation, so the flag must go at the compile site instead.
+
+In `scoring.py`, change the `_TELL_RE` compile added in Task 2 to:
+
+```python
+# re.M so a pattern can anchor on line start (recap openers like "Ultimately,").
+# Harmless to every other pattern — none of them use ^ or $.
+_TELL_RE = re.compile(prose_style.tell_regex_source(), re.I | re.M)
+```
+
+- [ ] **Step 6: Generate the `tell_phrases` explanation so it can't drift**
 
 In `scoring.py`, replace the `tell_phrases` signal's explanation string (currently the hardcoded list of six construction shapes, around lines 396-402) with:
 
@@ -697,7 +796,7 @@ In `scoring.py`, replace the `tell_phrases` signal's explanation string (current
 
 Leave the `* 25` slope alone — Task 4 changes it.
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 7: Run the tests**
 
 ```bash
 cd /home/zipeng/worktrees/rankforge-slop/rankforge/backend
@@ -706,19 +805,20 @@ uv run pytest tests/test_prose_style.py tests/test_scoring.py -q && uv run ruff 
 
 Expected: all pass. The no-overlap test from Task 1 now also guards the new patterns — if it fails, a new example embeds a registered word and must be reworded.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 cd /home/zipeng/worktrees/rankforge-slop
 /usr/bin/git add rankforge/backend/src/rankforge_backend/services/prose_style.py \
   rankforge/backend/src/rankforge_backend/services/scoring.py \
   rankforge/backend/tests/test_scoring.py
-/usr/bin/git commit -m "feat(prose): widen the taxonomy by ~15 words and ~10 constructions
+/usr/bin/git commit -m "feat(prose): widen the taxonomy by ~15 words and ~16 constructions
 
 Adds weasel attribution, importance puffery, faux-insight setups, throat-clearing
 openers, rhetorical setups, superficial -ing analysis, negative listing, dramatic
-fragmentation, summary-recap endings, and fake-strong verbs. Synonym cycling and
-colon reveals are judge-only — no precise regex exists for either.
+fragmentation, summary-recap endings, fake-strong verbs, empty phrases, hype
+declarations, and recap openers. Fake-profound kickers, synonym cycling, and colon
+reveals are judge-only — no precise regex exists for any of them.
 
 Weasel attribution matters most here: it works directly against the GEO
 citability signal the product already scores.
@@ -738,7 +838,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Consumes: nothing new.
 - Produces: nothing new. Only the slope constant changes.
 
-**Why:** the `× 25` slope was calibrated against 9 constructions. At ~19 it would drive articles to 0 and force revision passes that cost credits.
+**Why:** the `× 25` slope was calibrated against 9 constructions. At ~21 it would drive articles to 0 and force revision passes that cost credits.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -800,7 +900,7 @@ Add a comment above it:
 
 ```python
     # 15 per hit, not 25: the steeper slope was calibrated against 9 constructions and
-    # would drive articles to 0 now the taxonomy carries ~19. The gate fires below 40,
+    # would drive articles to 0 now the taxonomy carries ~21. The gate fires below 40,
     # so 4 hits sits on the boundary and 5 trips it.
 ```
 
@@ -821,7 +921,7 @@ cd /home/zipeng/worktrees/rankforge-slop
   rankforge/backend/tests/test_scoring.py
 /usr/bin/git commit -m "fix(scoring): recalibrate tell_phrases to 15 points per hit
 
-The 25-point slope was tuned for 9 constructions; the taxonomy now carries ~19.
+The 25-point slope was tuned for 9 constructions; the taxonomy now carries ~21.
 Gate boundary moves from 3 hits to 5, pinned by test.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
