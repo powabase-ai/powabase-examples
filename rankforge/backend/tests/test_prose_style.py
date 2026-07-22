@@ -80,3 +80,15 @@ def test_tell_examples_summary_returns_examples_and_respects_limit():
 
     limited = ps.tell_examples_summary(limit=1)
     assert limited == f'"{first_pattern_with_regex.examples[0]}"'
+
+
+def test_every_regex_pattern_matches_its_own_examples():
+    """Each pattern's examples are what we tell the writer, the judge, and the reviser
+    the pattern means. If an example doesn't match its own regex, the documentation and
+    the detector disagree — and one of them is wrong."""
+    for p in ps.PATTERNS:
+        if p.regex is None:
+            continue  # judge-only: described in prose, never matched deterministically
+        rx = re.compile(p.regex, re.I | re.M)
+        for example in p.examples:
+            assert rx.search(example), f"{p.key} does not match its own example: {example}"

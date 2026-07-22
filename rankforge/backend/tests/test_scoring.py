@@ -301,3 +301,103 @@ def test_possessive_its_is_not_an_antithesis_reframe():
 def test_ai_word_detector_still_catches_the_original_register():
     for word in ("delve", "leveraging", "seamlessly", "nestled", "genuinely"):
         assert scoring._AI_WORD_RE.search(f"we {word} here"), word
+
+
+def test_new_register_words_are_detected():
+    for word in (
+        "utilize", "facilitates", "empowering", "streamlined", "multifaceted",
+        "meticulously", "intricate", "paramount", "transformative", "supercharge",
+        "beacon", "cutting-edge", "ever-evolving", "paradigm shift", "game changer",
+    ):
+        assert scoring._AI_WORD_RE.search(f"a {word} thing"), word
+
+
+def test_new_constructions_are_detected():
+    for phrase in (
+        "studies show that teams ship faster",
+        "experts agree this is the way",
+        "it plays a vital role in the pipeline",
+        "what most people get wrong is the eval",
+        "here's the thing, nobody measures it",
+        "what if I told you the index was stale",
+        "the launch adds search, highlighting the team's focus",
+        "Not a framework. Not a library. A runtime.",
+        "That's it. That's the whole migration.",
+        "to sum up, the cache was cold",
+        "the gateway serves as a central hub",
+    ):
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
+def test_empty_phrases_hype_and_recap_openers_are_detected():
+    for phrase in (
+        "it's worth noting that the cache is cold",
+        "it is important to note the tradeoff",
+        "at its core, the runtime is a queue",
+        "the truth is nobody measured it",
+        "in this article we cover indexing",
+        "when it comes to latency, p99 matters",
+        "going forward we will pin the version",
+        "this is huge for the team",
+        "this changes everything about deploys",
+    ):
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
+def test_recap_opener_needs_line_start_and_a_comma():
+    """Line-anchored so ordinary sentences survive: "Overall performance improved" is
+    a fact, "Overall, ..." is a recap. Requires the detector to compile with re.M."""
+    assert scoring._TELL_RE.search("Ultimately, the migration paid off.")
+    assert scoring._TELL_RE.search("## Section\nOverall, we cut latency in half.")
+    assert not scoring._TELL_RE.search("Overall performance improved by 12%.")
+    assert not scoring._TELL_RE.search("We ultimately, and reluctantly, rolled back.")
+
+
+def test_precision_guards_hold_for_the_new_constructions():
+    """High-precision only: ordinary technical prose must not trip the new patterns."""
+    for clean in (
+        # "acts as a" was deliberately excluded — it's normal technical writing
+        "The proxy acts as a load balancer for the cluster.",
+        # a named, linked source is exactly what we want, not weasel attribution
+        "The 2025 Stack Overflow survey reports a 12% drop.",
+        # a Markdown label colon is not a colon reveal
+        "- **Latency**: 40ms at p99.",
+        # "summary" as a noun, not a recap opener
+        "The summary field accepts 160 characters.",
+        # "the source of truth is" must not trip the "the truth is" filler
+        "The single source of truth is the ledger table.",
+        # "in order to" / "in terms of" were deliberately left out of empty_phrase
+        "We shard the table in order to keep writes under 5ms.",
+    ):
+        assert not scoring._TELL_RE.search(clean), clean
+
+
+def test_fake_profound_kicker_is_judge_only():
+    """The closing-metaphor pattern is recognizable only in context, so it must reach
+    the judge but never the deterministic detector."""
+    from rankforge_backend.services import prose_style as ps
+
+    kicker = next(p for p in ps.PATTERNS if p.key == "fake_profound_kicker")
+    assert kicker.regex is None
+    assert kicker.name in ps.judge_taxonomy()
+    assert not scoring._TELL_RE.search(
+        "The best systems are the ones you never think about."
+    )
+
+
+def test_every_contraction_matches_both_apostrophe_forms():
+    """Rendered Markdown and LLM output emit the typographic apostrophe (U+2019) far
+    more than the straight one, so a straight-only branch misses most real prose."""
+    straight = [
+        "it isn't just a database, it's a platform",
+        "whether you're a beginner or a pro",
+        "in today's fast-paced world",
+        "let's dive in",
+        "it's worth noting the cache is cold",
+        "here's the thing, nobody measures it",
+        "That's it. That's the whole migration.",
+    ]
+    for phrase in straight:
+        assert scoring._TELL_RE.search(phrase), f"straight: {phrase}"
+        curly = phrase.replace("'", "’")
+        assert scoring._TELL_RE.search(curly), f"typographic: {curly}"

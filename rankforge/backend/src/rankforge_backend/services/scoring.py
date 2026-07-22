@@ -32,7 +32,9 @@ _AI_WORD_RE = re.compile(
     r"(?<![a-z])(?:" + "|".join(re.escape(w) for w in _AI_WORDS) + r")(?![a-z])",
     re.I,
 )
-_TELL_RE = re.compile(prose_style.tell_regex_source(), re.I)
+# re.M so a pattern can anchor on line start (recap openers like "Ultimately,").
+# Harmless to every other pattern — none of them use ^ or $.
+_TELL_RE = re.compile(prose_style.tell_regex_source(), re.I | re.M)
 _EMPTY_TRANSITION_RE = re.compile(
     r"(?<![a-z])(?:moreover|furthermore|additionally|that said)(?![a-z])", re.I
 )
@@ -376,9 +378,8 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     tell_score = max(0.0, 100.0 - tell_hits * 25)
     sig.append(_signal(
         "tell_phrases", "Formulaic constructions", tell_score, 0.14,
-        f"{tell_hits} AI-tell construction(s) (\"it's not just X…\", the \"X isn't A, "
-        "it's B\" reframe, \"whether you're a…\", \"in today's… world\", \"let's dive "
-        "in\", \"in conclusion\").",
+        f"{tell_hits} AI-tell construction(s) "
+        f"({prose_style.tell_examples_summary()}, …).",
         ["Rewrite the formulaic openers/closers in a natural voice; for \"X isn't A, "
          "it's B\", just state what it is."]
         if tell_hits else []))
