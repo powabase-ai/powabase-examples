@@ -197,6 +197,37 @@ weights, same gate keys, same score-object shape.
 - `services/linkedin_gen.py` — writer block from the module
 - `tests/` — new `test_prose_style.py`; additions to the scoring tests
 
+## Amendments during implementation
+
+This spec describes the design as approved. Five things changed while executing it;
+the implementation plan is the binding record, and this section reconciles the two.
+
+1. **Wider pattern set.** The taxonomy shipped with 35 register entries and 24 patterns
+   (21 detected, 3 judge-only), not the ~10 constructions listed above. Added beyond the
+   original list: empty phrases, hype declarations, recap openers, and — judge-only —
+   fake-profound kickers and padding connectives.
+
+2. **Apostrophe normalization.** Every contraction accepts both `'` (U+0027) and `’`
+   (U+2019). The original code was straight-only, so it missed most rendered Markdown and
+   LLM output. This was not in the approved design; it surfaced when a review caught the
+   typographic apostrophe being dropped during transcription.
+
+3. **Precision narrowing after empirical review.** Several regexes as first written fired
+   on ordinary technical prose. Since `tell_phrases` and `ai_vocabulary` are gate keys,
+   that would route clean articles into paid revision passes. The high-precision
+   constraint governs, so `fake_strong_verb` was narrowed to `hub|cornerstone`,
+   `superficial_analysis` now requires an abstract signal noun and first/third-person
+   determiners only, and three ordinary connectives ("when it comes to", "going forward",
+   "in this article") moved from the detector to judge-only. Concepts too contextual for
+   a regex live in `judge_taxonomy()`, where the LLM can weigh them.
+
+4. **`tell_phrases` slope.** `100 − hits × 15`, down from `× 25`. The gate fires below 40,
+   so 4 constructions sit exactly on the boundary and pass while 5 gate.
+
+5. **Score explanations render matched patterns.** The `tell_phrases` explanation names
+   the constructions that actually fired rather than a fixed sample, so the editor stops
+   telling authors to fix phrases absent from their draft.
+
 ## Attribution
 
 The pattern taxonomy derives from the `no-ai-slop` skill by Peter Yang
