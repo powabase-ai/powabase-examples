@@ -91,6 +91,10 @@ not by selling. Not salesy.
 
 """ + prose_style.writer_block() + """
 
+- Reflexive rule-of-three triads ("fast, reliable, and scalable").
+- "From X to Y" framing. Empty transitions (Moreover, Furthermore, Additionally, That \
+said). Use em-dashes sparingly. Vary sentence length.
+
 Generic, specificity-free prose is the clearest AI tell — be concrete.
 
 OUTPUT: only the post text itself, ready to paste — no preamble, no quotes, no \

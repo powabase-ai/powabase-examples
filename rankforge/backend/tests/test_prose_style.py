@@ -105,10 +105,11 @@ def test_every_prompt_renders_the_shared_register():
 
 
 def test_prompts_name_the_new_constructions():
-    from rankforge_backend.services import generation, scoring
+    from rankforge_backend.services import generation, linkedin_gen, scoring
 
     for name in ("Weasel attribution", "Faux-insight setup"):
         assert name in generation._SYSTEM_PROMPT
+        assert name in linkedin_gen._SYSTEM
         assert name in scoring._READ_JUDGE_PROMPT
 
 

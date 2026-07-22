@@ -564,6 +564,7 @@ knowledgeable person clearly wrote it; low means it reads as machine-generated.
 specificity (numbers, names, dates, examples). Penalize every pattern below:
 
 """ + prose_style.judge_taxonomy() + """
+- Also generic, hedge-everything, specificity-free prose.
 
 - flow — natural rhythm (a mix of short and long sentences, uneven section lengths) \
 that reads smoothly, NOT the mechanical evenness and over-even paragraphing of \
