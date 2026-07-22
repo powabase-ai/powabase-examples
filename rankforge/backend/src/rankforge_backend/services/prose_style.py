@@ -183,10 +183,10 @@ PATTERNS: tuple[Pattern, ...] = (
         # Avoids "pivotal" and "testament" — already in the register, and matching them
         # here would score one sin twice.
         regex=(
-            r"\b(?:plays?|played) a (?:vital|key|critical) role\b"
+            r"\b(?:plays?|played|playing) a (?:vital|key|critical) role\b"
             r"|\bsolidif(?:y|ies|ied|ying) its position\b"
-            r"|\b(?:cements?|cemented) its (?:position|status)\b"
-            r"|\b(?:marks?|marked) a turning point\b"
+            r"|\b(?:cements?|cemented|cementing) its (?:position|status)\b"
+            r"|\b(?:marks?|marked|marking) a turning point\b"
         ),
     ),
     Pattern(
@@ -228,11 +228,12 @@ PATTERNS: tuple[Pattern, ...] = (
         ),
         fix="Say what the fact lets someone DO, not what it supposedly signals.",
         # "underscoring" is excluded on purpose — it's already in the register.
-        # Requires an ABSTRACT signal noun as the object, so concrete/number-carrying
-        # clauses ("reflecting the four content types", "reflecting a Google core
-        # update") do not match.
+        # Requires the object to be one of a closed whitelist of abstract signal nouns,
+        # so concrete/number-carrying clauses ("reflecting the four content types",
+        # "reflecting a Google core update") do not match regardless of determiner.
         regex=(
-            r",\s*(?:highlighting|reflecting|showcasing)\s+(?:the|its|their|a)\s+"
+            r",\s*(?:highlighting|reflecting|showcasing)\s+"
+            r"(?:the|its|their|our|my|your|his|her|this|a)\s+"
             r"(?:[\w'’-]+\s+){0,2}"
             r"(?:commitment|dedication|focus|importance|significance|expertise"
             r"|priorities|values?|mission|vision|ambition)\b"
@@ -255,22 +256,37 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="summary_recap",
         name="Summary-recap ending",
-        examples=("to sum up, the cache was cold", "in summary, the tradeoffs are clear"),
+        examples=(
+            "to sum up, the cache was cold",
+            "in summary, the tradeoffs are clear",
+            "In summary: the tradeoffs are clear",
+        ),
         fix="End on the last concrete point, takeaway, or next action.",
-        # Requires the recap punctuation (a comma or sentence end right after "in
-        # summary") so the noun "summary" ("in summary view", "in summary tables")
-        # doesn't trip it.
-        regex=r"\bto sum up\b|\bin summary(?:[,.!?]|$)|\bto wrap (?:up|things up)\b",
+        # Requires one of ,.!?: to immediately follow "in summary" via lookahead, so the
+        # noun "summary" ("in summary view", "in summary tables") doesn't trip it. NOTE:
+        # the detector compiles with re.M (for recap_opener's line anchor), so a bare
+        # "$" here would match end-of-LINE, not end-of-string — firing on ordinary
+        # sentences that merely happen to wrap right after "in summary". The lookahead
+        # avoids that trap entirely, since it never matches on a line break.
+        regex=r"\bto sum up\b|\bin summary(?=[,.!?:])|\bto wrap (?:up|things up)\b",
     ),
     Pattern(
         key="fake_strong_verb",
         name="Fake-strong verb",
         examples=("serves as a centralized hub",),
-        fix='Prefer "is" or "has", then name what it actually does.',
+        fix=(
+            'Prefer "is" or "has", then name what it actually does. This includes the '
+            'abstract-object form — "serves as a gateway to endless possibilities", '
+            '"serves as the backbone of modern transformation" — where the object is a '
+            "concept rather than a concrete system."
+        ),
         # Anchored to a small set of reliably-puffy nouns only. "gateway", "backbone",
         # "foundation", and "resource" are ordinary infra nouns ("serves as a gateway
         # to the internal network") and must not match; "acts as a load balancer" is
-        # likewise excluded by not matching "acts as".
+        # likewise excluded by not matching "acts as". The abstract-object form (object
+        # is a concept, not a concrete system) is real slop too, but a regex can't tell
+        # concrete from abstract objects reliably — that judgment is pushed to the fix
+        # text above, which reaches the writer/judge/reviser prompts instead.
         regex=(
             r"\bserves as an? (?:[a-z-]+ ){0,2}"
             r"(?:hub|cornerstone)\b"

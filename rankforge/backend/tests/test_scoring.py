@@ -385,6 +385,23 @@ def test_precision_guards_hold_for_the_new_constructions():
         assert not scoring._TELL_RE.search(clean), clean
 
 
+def test_narrowed_patterns_still_catch_genuine_slop():
+    """Recall regression guard: the round-1 false-positive fix pass narrowed these
+    patterns to kill false positives. A future over-narrowing pass must not silently
+    lose the genuine slop each pattern exists to catch."""
+    for phrase in (
+        # fake_strong_verb: "hub"/"cornerstone" must still fire.
+        "The platform serves as a centralized hub for everything.",
+        # superficial_analysis: first-person determiners ("our", "my") must fire.
+        "We rebuilt the homepage, reflecting our commitment to accessibility.",
+        # importance_puffery: gerund forms must fire.
+        "The API is playing a vital role in the ecosystem.",
+        # summary_recap: colon-punctuated recap opener must fire.
+        "In summary: the tradeoffs are clear.",
+    ):
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
 def test_fake_profound_kicker_is_judge_only():
     """The closing-metaphor pattern is recognizable only in context, so it must reach
     the judge but never the deterministic detector."""
