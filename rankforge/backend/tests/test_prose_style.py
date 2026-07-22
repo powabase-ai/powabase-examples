@@ -61,3 +61,22 @@ def test_judge_taxonomy_names_every_pattern_including_judge_only():
     tax = ps.judge_taxonomy()
     for p in ps.PATTERNS:
         assert p.name in tax
+
+
+def test_tell_patterns_match_typographic_apostrophes():
+    """Real prose (and rendered Markdown) uses ’ far more than '. A detector that only
+    handles the straight apostrophe silently misses most real input."""
+    detector = re.compile(ps.tell_regex_source(), re.I)
+    assert detector.search("it’s not just a database, it’s a platform")
+    # Note: the `isn'?t` branch does not (yet) handle the curly apostrophe, so a
+    # curly-quoted "isn’t" does not match here — widening that is a later task.
+
+
+def test_tell_examples_summary_returns_examples_and_respects_limit():
+    summary = ps.tell_examples_summary()
+    assert summary
+    first_pattern_with_regex = next(p for p in ps.PATTERNS if p.regex)
+    assert first_pattern_with_regex.examples[0] in summary
+
+    limited = ps.tell_examples_summary(limit=1)
+    assert limited == f'"{first_pattern_with_regex.examples[0]}"'

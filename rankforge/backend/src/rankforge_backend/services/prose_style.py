@@ -82,7 +82,7 @@ PATTERNS: tuple[Pattern, ...] = (
         name='The "not just X, it\'s Y" intensifier',
         examples=("it's not just a database, it's a platform",),
         fix="State what it is and drop the negated half.",
-        regex=r"it['']s not (?:just|merely)\b|\bisn'?t (?:just|merely)\b",
+        regex=r"it['’]s not (?:just|merely)\b|\bisn'?t (?:just|merely)\b",
     ),
     Pattern(
         key="antithesis_reframe",
@@ -95,7 +95,10 @@ PATTERNS: tuple[Pattern, ...] = (
         # Bounded span so it can't run away. REQUIRE the contraction apostrophe in the
         # payoff so possessive "its" ("…isn't down, but its replacement is") is not a
         # false positive. This guard is load-bearing — do not loosen it.
-        regex=r"\b(?:is|are|was|were)(?:n'?t| not)\b[^.!?\n]{0,70}[,.!?—–-]\s*it['']s\b",
+        regex=(
+            r"\b(?:is|are|was|were)(?:n'?t| not)\b[^.!?\n]{0,70}"
+            r"[,.!?—–-]\s*it['’]s\b"
+        ),
     ),
     Pattern(
         key="whether_youre",
