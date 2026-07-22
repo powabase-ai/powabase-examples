@@ -62,9 +62,17 @@ need different framings of the same knowledge:
 | `judge_taxonomy()` | detection framing | `scoring.py` `_READ_JUDGE_PROMPT` |
 | `fix_instruction(key)` | surgical rewrite text | `revise.py` `_TELL_INSTRUCTION` |
 
-The tuned regexes stay hand-written in `scoring.py` — the possessive-`its` guard at
-`scoring.py:44` is load-bearing and must not be generated — but they source their word
-list from `AI_WORDS` so the vocabulary cannot drift from the prompts.
+Each pattern carries its own regex source string as data (`Pattern.regex`), so a
+construction's name, examples, fix, and detector are defined together in one place.
+`scoring.py` compiles them: `_TELL_RE` from `tell_regex_source()`, `_AI_WORD_RE` from
+`AI_WORDS`. Regexes stay **hand-written** — the possessive-`its` guard currently at
+`scoring.py:44` is load-bearing and is moved verbatim, comment and all, never generated
+from a word list. Patterns needing judgment (synonym cycling, colon reveals) carry
+`regex=None`: described to the judge, never scored deterministically.
+
+The alternative — leaving today's regexes in `scoring.py` and sourcing only new ones
+from the module — was rejected: it would leave tells defined in two places and only
+half-solve the drift.
 
 `prose_style.py` imports nothing from other services, so it introduces no cycle:
 `scoring.py`, `generation.py`, `revise.py`, and `linkedin_gen.py` all depend on it and
