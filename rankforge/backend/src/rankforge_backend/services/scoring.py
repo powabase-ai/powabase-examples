@@ -375,7 +375,10 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
          "paragraph."] if ai_score < 80 else []))
 
     tell_hits = len(_TELL_RE.findall(content_md))
-    tell_score = max(0.0, 100.0 - tell_hits * 25)
+    # 15 per hit, not 25: the steeper slope was calibrated against 9 constructions and
+    # would drive articles to 0 now the taxonomy carries ~21. The gate fires below 40,
+    # so 4 hits sits on the boundary and 5 trips it.
+    tell_score = max(0.0, 100.0 - tell_hits * 15)
     sig.append(_signal(
         "tell_phrases", "Formulaic constructions", tell_score, 0.14,
         f"{tell_hits} AI-tell construction(s) "

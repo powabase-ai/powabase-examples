@@ -458,3 +458,37 @@ def test_every_contraction_matches_both_apostrophe_forms():
         assert scoring._TELL_RE.search(phrase), f"straight: {phrase}"
         curly = phrase.replace("'", "’")
         assert scoring._TELL_RE.search(curly), f"typographic: {curly}"
+
+
+def _md_with_tells(n: int) -> str:
+    """An article body carrying exactly `n` distinct AI-tell constructions."""
+    tells = [
+        "In conclusion, we shipped.",
+        "Let's dive in.",
+        "Buckle up.",
+        "At the end of the day it worked.",
+        "Studies show teams ship faster.",
+        "Here's the thing, nobody measures it.",
+    ]
+    body = " ".join("filler word here ok" for _ in range(50))
+    return "# T\n\n" + body + "\n\n" + "\n\n".join(tells[:n])
+
+
+def test_tell_score_slope_is_fifteen_per_hit():
+    for hits, expected in ((1, 85), (2, 70), (3, 55), (4, 40), (5, 25)):
+        s = scoring.score_readability(_md_with_tells(hits), None)
+        tp = next(x for x in s["signals"] if x["key"] == "tell_phrases")
+        assert tp["score"] == expected, (hits, tp["score"])
+
+
+def test_gate_boundary_four_hits_does_not_gate_five_does():
+    """The gate fires below 40, so at the new slope 4 constructions sit exactly on the
+    boundary and pass, while 5 trips it. This is the intended sensitivity."""
+    four = scoring.score_readability(_md_with_tells(4), {"human_voice": 95, "flow": 95})
+    five = scoring.score_readability(_md_with_tells(5), {"human_voice": 95, "flow": 95})
+    tp4 = next(x for x in four["signals"] if x["key"] == "tell_phrases")
+    tp5 = next(x for x in five["signals"] if x["key"] == "tell_phrases")
+    assert tp4["score"] == 40 and tp5["score"] == 25
+    # 5 hits is below the gate floor, so the axis cannot be "met" however well it
+    # scores elsewhere.
+    assert five["met"] is False
