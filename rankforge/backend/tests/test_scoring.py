@@ -489,6 +489,9 @@ def test_gate_boundary_four_hits_does_not_gate_five_does():
     tp4 = next(x for x in four["signals"] if x["key"] == "tell_phrases")
     tp5 = next(x for x in five["signals"] if x["key"] == "tell_phrases")
     assert tp4["score"] == 40 and tp5["score"] == 25
+    # 4 hits sits exactly on boundary and passes; this assertion catches < → <=
+    # off-by-one in the gate condition (the < is critical).
+    assert four["met"] is True
     # 5 hits is below the gate floor, so the axis cannot be "met" however well it
     # scores elsewhere.
     assert five["met"] is False
