@@ -18,7 +18,7 @@ from ..util import extract_json
 from . import brief as brief_svc
 from . import business_profiles as brands
 from . import generation as gen_svc
-from . import grounding
+from . import grounding, prose_style
 from . import research as research_svc
 from .agents import ensure_agent
 
@@ -92,11 +92,10 @@ no exact URL, leave it unlinked rather than fabricating one.
 ## De-AI the prose (remove these tells, even if they aren't in the issue list)
 A draft that reads as AI-written is not "improved". As you revise, actively rewrite out every one of these:
 
-### Overused words (worst when stacked)
-- delve, tapestry, realm, landscape (metaphor), leverage, robust, seamless, navigate (metaphor), underscore, foster, harness, elevate, unlock, embark, testament, pivotal, crucial, vibrant, "boasts", "nestled", "genuinely" (as an intensifier). Replace with plain words; never several in a paragraph.
+""" + prose_style.writer_block() + """
 
-### Constructions to delete
-- "It's not just X, it's Y"; the antithesis reframe "X isn't A, it's B" / "The way forward isn't X. It's Y" (negate-then-reveal — just say what it is); "Whether you're a beginner or a seasoned pro"; "In today's fast-paced, ever-evolving world"; "Let's dive in / Let's explore"; reflexive rule-of-three triads; "From X to Y".
+- Reflexive rule-of-three triads ("fast, reliable, and scalable"); vary list length and rhythm instead.
+- "From X to Y" framing ("from startups to enterprises").
 
 ### Rhythm and punctuation
 - Thin out em-dashes (prefer commas, periods, parentheses).
@@ -507,13 +506,9 @@ to fix what reads as machine-made. You are not a proofreader and not an SEO chec
 a metronomic rhythm. Real writers vary deliberately.
 - Generic, hedged, safe phrasing where a specific number, name, version, or example \
 belongs. Vagueness is the strongest tell.
-- Formulaic constructions: "it's not just X, it's Y"; the antithesis reframe "X isn't \
-A, it's B" / "the way forward isn't X, it's Y" (negate-then-reveal); "whether you're a \
-beginner or a pro"; "in today's world"; "let's dive in"; reflexive rule-of-three \
-triads; "from X to Y".
-- Overused register: delve, leverage, robust, seamless, elevate, unlock, harness, \
-navigate (metaphor), foster, underscore, pivotal, crucial, vibrant, "boasts", "nestled", \
-"genuinely" (as an intensifier).
+""" + prose_style.judge_taxonomy() + """
+- Reflexive rule-of-three triads ("fast, reliable, and scalable"); "from X to Y" \
+framing ("from startups to enterprises").
 - Empty transitions (Moreover, Furthermore, Additionally, That said), both-sidesing, \
 stating the obvious as insight, over-hedging, bolded bullet lead-ins, "In conclusion" \
 restatements.
@@ -897,6 +892,8 @@ _LOCALIZED_TELL_KEYS = frozenset(
 )
 _EM_DASH_RE = re.compile(r"—")
 _TELL_INSTRUCTION = {
+    # brand_voice and em_dashes are NOT in the shared taxonomy: one is brand-specific,
+    # the other is punctuation policy with a deterministic backstop. They stay here.
     "brand_voice": "Rewrite detached self-reference into the brand's FIRST-PERSON "
                    'champion voice: "the vendor asserts…"/"the platform documents…"/'
                    '"according to <brand>\'s own docs…" become the brand naming itself '
@@ -905,16 +902,9 @@ _TELL_INSTRUCTION = {
                    'details the pitfalls…"). Keep third-person only for competitors.',
     "em_dashes": "Remove every em-dash (—); use a comma, period, or parentheses "
                  "instead. Do not leave a single em-dash.",
-    "tell_phrases": 'Rewrite formulaic AI constructions in a natural voice: "X isn\'t '
-                    'A, it\'s B" / "the way forward isn\'t…, it\'s…", "whether you\'re '
-                    'a…", "in today\'s … world", "let\'s dive in", "in conclusion", "at '
-                    'the end of the day".',
-    "ai_vocabulary": "Replace AI-register words (delve, leverage, robust, seamless, "
-                     "navigate, underscore, foster, harness, elevate, unlock, embark, "
-                     "testament, pivotal, crucial, vibrant, boasts, nestled, genuinely) "
-                     "with plain, specific language.",
-    "transitions": "Cut filler transitions (Moreover, Furthermore, Additionally, That "
-                   "said); let the sentences connect directly.",
+    "tell_phrases": prose_style.fix_instruction("tell_phrases"),
+    "ai_vocabulary": prose_style.fix_instruction("ai_vocabulary"),
+    "transitions": prose_style.fix_instruction("transitions"),
 }
 
 

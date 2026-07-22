@@ -398,3 +398,38 @@ def judge_taxonomy() -> str:
     lines = [f"- Overused register: {register_list()}."]
     lines += [f"- {p.name}: {_examples(p)}" for p in PATTERNS]
     return "\n".join(lines)
+
+
+# The reviser runs in a loop that chases a score, and loops like that sand prose smooth:
+# each pass has a local reason to rewrite one more sentence. This rule is what keeps a
+# slop fix from becoming a rewrite — it rides on every instruction the reviser gets.
+MINIMUM_EDIT_RULE = (
+    "Rewrite ONLY the flagged span. Leave clean sentences alone, and never trade a "
+    "concrete detail (a number, name, date, version, or mechanism) for smoother "
+    "phrasing — losing a specific is worse than the tell you removed."
+)
+
+
+def fix_instruction(signal_key: str) -> str:
+    """The surgical rewrite instruction for a readability signal this module owns.
+
+    Raises KeyError for `brand_voice` and `em_dashes`: those aren't part of the prose
+    taxonomy (one is brand-specific, the other is punctuation policy), so they stay
+    hand-written in revise.py. Failing loudly beats returning plausible generic text.
+    """
+    if signal_key == "ai_vocabulary":
+        body = (
+            f"Replace AI-register words ({register_list()}) with plain, specific "
+            "language."
+        )
+    elif signal_key == "tell_phrases":
+        shapes = "; ".join(f'"{p.examples[0]}"' for p in PATTERNS if p.regex)
+        body = f"Rewrite formulaic AI constructions in a natural voice: {shapes}."
+    elif signal_key == "transitions":
+        listed = ", ".join(w.capitalize() for w in EMPTY_TRANSITIONS)
+        body = (
+            f"Cut filler transitions ({listed}); let the sentences connect directly."
+        )
+    else:
+        raise KeyError(signal_key)
+    return f"{body} {MINIMUM_EDIT_RULE}"

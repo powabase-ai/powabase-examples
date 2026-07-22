@@ -3,7 +3,15 @@
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
-from rankforge_backend.services import geo_optimize, quality, revise, scoring
+import pytest
+
+from rankforge_backend.services import (
+    geo_optimize,
+    prose_style,
+    quality,
+    revise,
+    scoring,
+)
 
 SEO_MET = {"total": 82, "target": 80, "met": True, "signals": []}
 SEO_FAIL = {
@@ -709,3 +717,31 @@ async def test_targeted_loop_uses_surgical_rewrite_for_localized_tells(monkeypat
     surgical.assert_awaited()  # surgical path taken
     whole.assert_not_awaited()  # NOT the whole-article reviser
     assert state["art"]["content_md"] == "X" * 500  # kept despite the human_voice dip
+
+
+def test_fix_instructions_carry_the_minimum_edit_guardrail():
+    for key in ("ai_vocabulary", "tell_phrases", "transitions"):
+        assert prose_style.MINIMUM_EDIT_RULE in prose_style.fix_instruction(key), key
+
+
+def test_fix_instruction_rejects_signals_it_does_not_own():
+    """brand_voice and em_dashes are hand-written in revise.py — they aren't part of
+    the shared taxonomy, and silently returning generic text for them would be worse
+    than failing loudly."""
+    for key in ("brand_voice", "em_dashes"):
+        with pytest.raises(KeyError):
+            prose_style.fix_instruction(key)
+
+
+def test_localized_tell_instructions_source_from_the_taxonomy():
+    newest = prose_style.AI_REGISTER[-1].lemma
+    assert newest in revise._TELL_INSTRUCTION["ai_vocabulary"]
+    # every signal the reviser can surgically fix still has an instruction
+    for key in revise._LOCALIZED_TELL_KEYS:
+        assert revise._TELL_INSTRUCTION[key].strip()
+
+
+def test_em_dash_instruction_is_unchanged():
+    """Em-dash handling is deliberately out of scope: the zero-tolerance backstop and
+    its instruction must survive this refactor untouched."""
+    assert "Do not leave a single em-dash" in revise._TELL_INSTRUCTION["em_dashes"]
