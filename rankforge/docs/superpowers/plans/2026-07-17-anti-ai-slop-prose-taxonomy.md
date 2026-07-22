@@ -581,6 +581,25 @@ def test_every_contraction_matches_both_apostrophe_forms():
         assert scoring._TELL_RE.search(curly), f"typographic: {curly}"
 ```
 
+Additionally, append this to **`tests/test_prose_style.py`** (not `test_scoring.py` — it
+is a taxonomy invariant, and that file already imports `re` and `prose_style as ps`).
+It replaces hand-listed sample phrases with an invariant that covers every branch of
+every pattern automatically, so a dropped alternation can't slip through as the
+taxonomy grows:
+
+```python
+def test_every_regex_pattern_matches_its_own_examples():
+    """Each pattern's examples are what we tell the writer, the judge, and the reviser
+    the pattern means. If an example doesn't match its own regex, the documentation and
+    the detector disagree — and one of them is wrong."""
+    for p in ps.PATTERNS:
+        if p.regex is None:
+            continue  # judge-only: described in prose, never matched deterministically
+        rx = re.compile(p.regex, re.I | re.M)
+        for example in p.examples:
+            assert rx.search(example), f"{p.key} does not match its own example: {example}"
+```
+
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
@@ -681,7 +700,12 @@ In `prose_style.py`, insert these entries at the end of the `PATTERNS` tuple, af
     Pattern(
         key="superficial_analysis",
         name="Superficial -ing analysis",
-        examples=("highlighting the team's commitment", "reflecting its focus"),
+        # The examples carry the leading comma the regex requires — an example that
+        # can't match its own pattern means the docs and the detector disagree.
+        examples=(
+            "the launch adds search, highlighting the team's focus",
+            "shipped in March, reflecting its new priorities",
+        ),
         fix="Say what the fact lets someone DO, not what it supposedly signals.",
         # "underscoring" is excluded on purpose — it's already in the register.
         regex=r",\s*(?:highlighting|reflecting|showcasing)\s+(?:the|its|their|a)\b",
