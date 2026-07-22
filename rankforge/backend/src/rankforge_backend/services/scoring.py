@@ -15,6 +15,7 @@ from ..powabase import PowabaseClient
 from ..util import extract_json
 from . import brief as brief_svc
 from . import generation as gen_svc
+from . import prose_style
 from . import templates as templates_svc
 from .agents import ensure_agent
 
@@ -24,33 +25,14 @@ READABILITY_TARGET = 80
 
 # AI "tells" — the register/constructions search engines now penalize as machine-
 # written. Detected deterministically (density matters more than any single use).
-_AI_WORDS = (
-    "delve", "delved", "delving", "tapestry", "realm", "realms", "landscape",
-    "leverage", "leverages", "leveraging", "leveraged", "robust", "seamless",
-    "seamlessly", "navigate", "navigating", "underscore", "underscores",
-    "underscoring", "foster", "fosters", "fostering", "harness", "harnessing",
-    "elevate", "elevates", "elevating", "unlock", "unlocks", "unlocking",
-    "embark", "embarking", "testament", "pivotal", "crucial", "vibrant",
-    "boasts", "boasting", "nestled", "genuinely",
-)
-_AI_WORD_RE = re.compile(r"(?<![a-z])(?:" + "|".join(_AI_WORDS) + r")(?![a-z])", re.I)
-_TELL_RE = re.compile(
-    r"it['’]s not (?:just|merely)\b"
-    r"|\bisn'?t (?:just|merely)\b"
-    # The antithesis reframe: "X isn't A. It's B" / "isn't about A, it's about B" —
-    # negate-then-reveal-the-real-truth. A heavy AI tic ("the way forward isn't more
-    # tools. It's better process."). Bounded span so it can't run away. REQUIRE the
-    # contraction apostrophe in the payoff so possessive "its" ("…isn't down, but its
-    # replacement is") isn't a false positive.
-    r"|\b(?:is|are|was|were)(?:n'?t| not)\b[^.!?\n]{0,70}[,.!?—–-]\s*it['’]s\b"
-    r"|\bwhether you'?re an?\b"
-    r"|\bin today'?s\b.{0,40}?\b(?:world|landscape|era|age)\b"
-    r"|\blet'?s (?:dive in|explore|take a look|unpack)\b"
-    r"|\bbuckle up\b"
-    r"|\bin conclusion\b"
-    r"|\bat the end of the day\b",
+# The taxonomy itself lives in prose_style so the detector and every prompt stay in
+# sync; only the compilation is here.
+_AI_WORDS = prose_style.AI_WORDS
+_AI_WORD_RE = re.compile(
+    r"(?<![a-z])(?:" + "|".join(re.escape(w) for w in _AI_WORDS) + r")(?![a-z])",
     re.I,
 )
+_TELL_RE = re.compile(prose_style.tell_regex_source(), re.I)
 _EMPTY_TRANSITION_RE = re.compile(
     r"(?<![a-z])(?:moreover|furthermore|additionally|that said)(?![a-z])", re.I
 )

@@ -273,3 +273,31 @@ def test_readability_gate_fails_on_em_dash_spam():
     assert by["em_dashes"] < 40
     assert not s["met"]  # gated to not-met despite a high weighted average
     assert s["total"] == scoring.READABILITY_TARGET - 1
+
+
+def test_tell_detector_still_catches_every_original_construction():
+    """Refactor guard: sourcing the regex from prose_style must not drop a pattern."""
+    originals = [
+        "it's not just a database, it's a platform",
+        "the way forward isn't more tools. It's better process",
+        "whether you're a beginner or a pro",
+        "in today's fast-paced world",
+        "let's dive in",
+        "buckle up",
+        "in conclusion",
+        "at the end of the day",
+    ]
+    for phrase in originals:
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
+def test_possessive_its_is_not_an_antithesis_reframe():
+    """The load-bearing false-positive guard: possessive "its" must not trip it."""
+    assert not scoring._TELL_RE.search(
+        "The service isn't down, but its replacement is still warming up."
+    )
+
+
+def test_ai_word_detector_still_catches_the_original_register():
+    for word in ("delve", "leveraging", "seamlessly", "nestled", "genuinely"):
+        assert scoring._AI_WORD_RE.search(f"we {word} here"), word
