@@ -14,6 +14,7 @@ Pattern taxonomy adapted from the no-ai-slop skill by Peter Yang
 (https://github.com/petergyang/no-ai-slop), MIT licensed.
 """
 
+import re
 from typing import NamedTuple
 
 
@@ -91,8 +92,15 @@ AI_REGISTER: tuple[Register, ...] = (
 
 AI_WORDS: tuple[str, ...] = tuple(f for r in AI_REGISTER for f in r.forms)
 
-# Filler connectives that pad machine text. Scored as their own `transitions` signal,
-# but named here so the prompts and the detector can't drift apart.
+# Filler connectives that pad machine text. Scored as their own `transitions` signal.
+# scoring.py compiles its `_EMPTY_TRANSITION_RE` detector from this tuple (mirroring
+# how `_AI_WORD_RE` is built from AI_WORDS), so the DETECTOR genuinely can't drift from
+# this list. It does NOT reach the prompts, though: `fix_instruction("transitions")`
+# below renders from it, but the six other prompt/explanation sites that mention these
+# same four words (the readability judge prompt, the writer/reviser/LinkedIn prompts,
+# and the `transitions` score explanation in scoring.py) still hardcode their own
+# copies — changing a word here updates the detector immediately but NOT those six
+# call sites; they'd need to be edited by hand to match.
 EMPTY_TRANSITIONS: tuple[str, ...] = (
     "moreover", "furthermore", "additionally", "that said",
 )
@@ -133,6 +141,12 @@ PATTERNS: tuple[Pattern, ...] = (
         name='The "in today\'s … world" opener',
         examples=("in today's fast-paced world", "in today's digital era"),
         fix="Open on the specific thing that changed, with a date or a number.",
+        # "landscape" is deliberately NOT in this group. It's already a register word
+        # (AI_REGISTER) scored by ai_vocabulary, and the no-overlap rule says a
+        # construction must not embed an already-banned word — "in today's landscape"
+        # would otherwise score the same sin twice. "world"/"era"/"age" aren't
+        # register words on their own, so they still need this construction-level
+        # pattern to be caught at all.
         regex=r"\bin today['’]?s\b.{0,40}?\b(?:world|era|age)\b",
     ),
     Pattern(
@@ -264,6 +278,7 @@ PATTERNS: tuple[Pattern, ...] = (
             "to sum up, the cache was cold",
             "in summary, the tradeoffs are clear",
             "In summary: the tradeoffs are clear",
+            "to wrap up, the key results are clear",
         ),
         fix="End on the last concrete point, takeaway, or next action.",
         # Requires one of ,.!?: to immediately follow "in summary" via lookahead, so the
@@ -272,7 +287,14 @@ PATTERNS: tuple[Pattern, ...] = (
         # "$" here would match end-of-LINE, not end-of-string — firing on ordinary
         # sentences that merely happen to wrap right after "in summary". The lookahead
         # avoids that trap entirely, since it never matches on a line break.
-        regex=r"\bto sum up\b|\bin summary(?=[,.!?:])|\bto wrap (?:up|things up)\b",
+        # "to wrap up"/"to wrap things up" gets the SAME recap-punctuation lookahead:
+        # unguarded, it matched the ordinary verb phrase "we need to wrap up the
+        # migration" — a real false positive, not a recap. Requiring the comma/colon
+        # right after restricts it to the recap-opener shape ("to wrap up, ...").
+        regex=(
+            r"\bto sum up\b|\bin summary(?=[,.!?:])"
+            r"|\bto wrap (?:up|things up)\b(?=[,.!?:])"
+        ),
     ),
     Pattern(
         key="fake_strong_verb",
@@ -299,16 +321,41 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="empty_phrase",
         name="Empty phrase",
-        examples=("it's worth noting", "when it comes to", "at its core"),
+        examples=("it's worth noting", "at its core", "the reality is"),
         fix="Delete the phrase and start on the point it was delaying.",
         # Only the distinctive fillers. "in order to" / "in terms of" are deliberately
         # excluded — too common in ordinary technical prose to penalize at 15 a hit.
+        # "when it comes to", "going forward", and "in this article" are excluded for
+        # the same reason: they're ordinary English connectives, and "in this article"
+        # is the standard SEO-blog "here's what we'll cover" opener this product
+        # itself generates — a regex hit there is a false positive, not a tell. The
+        # padding_connective pattern below covers the same concept for the judge,
+        # which can tell genuine padding from a legitimate section transition.
         regex=(
             r"\bit['’]?s worth noting\b|\bit is worth noting\b"
             r"|\bit['’]?s important to note\b|\bit is important to note\b"
             r"|\bat its core\b|\bthe (?:truth|reality) is\b"
-            r"|\bin this article\b|\bwhen it comes to\b|\bgoing forward\b"
         ),
+    ),
+    Pattern(
+        key="padding_connective",
+        name="Padding connective",
+        examples=(
+            "when it comes to onboarding, the docs cover it",
+            "in this article, we'll cover the basics",
+            "going forward, we'll pin the version",
+        ),
+        fix=(
+            "Cut the connective and start the sentence on the actual point — but only "
+            "when it's pure padding. A genuine section transition (e.g. \"in this "
+            "article, we'll cover X, Y, Z\" as a real preview of distinct sections) is "
+            "fine; the tell is using the phrase as a content-free stall."
+        ),
+        # Judge-only: "when it comes to", "going forward", and "in this article" are
+        # ordinary connectives that also show up as legitimate section transitions —
+        # a regex can't tell padding from a real preview, so this is described to the
+        # judge (judge_taxonomy) but never scored deterministically.
+        regex=None,
     ),
     Pattern(
         key="hype_declaration",
@@ -378,10 +425,38 @@ def tell_examples_summary(limit: int = 6) -> str:
     return ", ".join(f'"{p.examples[0]}"' for p in shown)
 
 
+# Compiled once at import time (not per call) so `matched_pattern_examples` stays
+# cheap enough to run on every readability score — each entry is one pattern's own
+# regex, individually compiled, so we can tell WHICH pattern matched rather than only
+# THAT something in the combined alternation did.
+_COMPILED_PATTERNS: tuple[tuple[Pattern, re.Pattern], ...] = tuple(
+    (p, re.compile(p.regex, re.I | re.M)) for p in PATTERNS if p.regex
+)
+
+
+def matched_pattern_examples(text: str, limit: int = 4) -> str:
+    """Which formulaic constructions actually fired in `text`, for a score
+    explanation that names the real offenders instead of a fixed sample (see
+    `tell_examples_summary`, whose first-N-in-declaration-order list can never
+    surface anything past its cutoff). Empty string when nothing matched."""
+    matched = [p for p, rx in _COMPILED_PATTERNS if rx.search(text)]
+    if not matched:
+        return ""
+    shown = ", ".join(f'"{p.examples[0]}"' for p in matched[:limit])
+    return shown + (", …" if len(matched) > limit else "")
+
+
+SAMPLE_LEMMAS: tuple[str, ...] = (
+    "delve", "leverage", "robust", "seamless", "elevate",
+)
+
+
 def register_sample(limit: int = 5) -> str:
     """A short slash-joined sample of the register, for UI-facing score explanations
-    where the full list would be far too long."""
-    return "/".join(r.lemma for r in AI_REGISTER[:limit])
+    where the full list would be far too long. Rendered from the fixed, curated
+    SAMPLE_LEMMAS rather than AI_REGISTER declaration order, so it doesn't silently
+    drift to whatever the least-representative words happen to be added first."""
+    return "/".join(SAMPLE_LEMMAS[:limit])
 
 
 def writer_block() -> str:
@@ -429,8 +504,13 @@ def fix_instruction(signal_key: str) -> str:
             "language."
         )
     elif signal_key == "tell_phrases":
-        shapes = "; ".join(f'"{p.examples[0]}"' for p in PATTERNS if p.regex)
-        body = f"Rewrite formulaic AI constructions in a natural voice: {shapes}."
+        # Capped the same way tell_examples_summary() is: this renders once per
+        # matched paragraph on the surgical-rewrite hot path, so the full ~21-shape
+        # list (~914 chars) is a real cost at 30 paragraphs/iteration. A sample reads
+        # just as actionably as an exhaustive list — the reviser only needs the shape.
+        shown = [p for p in PATTERNS if p.regex][:8]
+        shapes = "; ".join(f'"{p.examples[0]}"' for p in shown)
+        body = f"Rewrite formulaic AI constructions in a natural voice: {shapes}; …"
     elif signal_key == "transitions":
         listed = ", ".join(w.capitalize() for w in EMPTY_TRANSITIONS)
         body = (

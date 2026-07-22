@@ -167,6 +167,17 @@ def test_readability_clean_prose_scores_well():
     assert by["tell_phrases"] == 100
 
 
+def test_tell_phrases_explanation_names_what_actually_fired():
+    """The score explanation must name real offenders in the article, not the fixed
+    first-six-in-declaration-order sample — otherwise an author is told to fix
+    phrases that aren't in their text."""
+    md = "Buckle up: this migration story has a twist. Buckle up, seriously."
+    s = scoring.score_readability(md, None)
+    tp = next(x for x in s["signals"] if x["key"] == "tell_phrases")
+    assert "buckle up" in tp["explanation"]  # genuinely fired
+    assert "let's dive in" not in tp["explanation"]  # did not fire
+
+
 def test_readability_flags_antithesis_reframe():
     # "X isn't A. It's B" / "isn't about A, it's about B" — the negate-then-reveal tic.
     md = (
@@ -332,12 +343,12 @@ def test_new_constructions_are_detected():
 def test_empty_phrases_hype_and_recap_openers_are_detected():
     for phrase in (
         "it's worth noting that the cache is cold",
+        "it is worth noting the tradeoff",
+        "it's important to note the risk",
         "it is important to note the tradeoff",
         "at its core, the runtime is a queue",
         "the truth is nobody measured it",
-        "in this article we cover indexing",
-        "when it comes to latency, p99 matters",
-        "going forward we will pin the version",
+        "the reality is nobody measured it",
         "this is huge for the team",
         "this changes everything about deploys",
     ):
@@ -377,10 +388,22 @@ def test_precision_guards_hold_for_the_new_constructions():
         # the noun "summary" ("summary view", "summary tables") must not trip it.
         "In summary view, the crawler shows one row per host.",
         "In summary tables, the median is preferred.",
+        # summary_recap: "to wrap up"/"to wrap things up" now needs the same recap
+        # punctuation right after it — the ordinary verb phrase must not trip it.
+        "We need to wrap up the migration before the freeze.",
+        "Let's wrap things up before the deploy window closes.",
         # a named, linked source is exactly what we want, not weasel attribution
         "The 2025 Stack Overflow survey reports a 12% drop.",
         # "the source of truth is" must not trip the "the truth is" filler
         "The single source of truth is the ledger table.",
+        # empty_phrase: "when it comes to", "going forward", and "in this article"
+        # are ordinary English connectives (and "in this article" is the standard
+        # SEO-blog opener this product itself generates) — round-2 false-positive
+        # fix removed all three from the regex. padding_connective covers the same
+        # concept for the judge instead.
+        "When it comes to caching, the p99 improved after the fix.",
+        "Going forward we'll pin the dependency version in CI.",
+        "In this article, we'll cover indexing, caching, and replication.",
     ):
         assert not scoring._TELL_RE.search(clean), clean
 
@@ -398,6 +421,9 @@ def test_narrowed_patterns_still_catch_genuine_slop():
         "The API is playing a vital role in the ecosystem.",
         # summary_recap: colon-punctuated recap opener must fire.
         "In summary: the tradeoffs are clear.",
+        # summary_recap: the comma-punctuated "to wrap up" recap opener must still
+        # fire even after restricting it to the recap-punctuation shape.
+        "To wrap up, the key results are clear.",
     ):
         assert scoring._TELL_RE.search(phrase), phrase
 

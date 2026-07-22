@@ -35,8 +35,15 @@ _AI_WORD_RE = re.compile(
 # re.M so a pattern can anchor on line start (recap openers like "Ultimately,").
 # Harmless to every other pattern — none of them use ^ or $.
 _TELL_RE = re.compile(prose_style.tell_regex_source(), re.I | re.M)
+# Compiled from prose_style.EMPTY_TRANSITIONS (mirroring _AI_WORD_RE above) so the
+# DETECTOR genuinely can't drift from that list. The six prompt/explanation sites that
+# also mention these four words are still hand-written — see the comment on
+# EMPTY_TRANSITIONS in prose_style.py for what that does and doesn't cover.
 _EMPTY_TRANSITION_RE = re.compile(
-    r"(?<![a-z])(?:moreover|furthermore|additionally|that said)(?![a-z])", re.I
+    r"(?<![a-z])(?:"
+    + "|".join(re.escape(w) for w in prose_style.EMPTY_TRANSITIONS)
+    + r")(?![a-z])",
+    re.I,
 )
 # Detached brand voice: the brand's OWN blog referring to itself as a third party
 # ("the vendor asserts…") or hedging its own docs ("according to <Brand>'s own docs…").
@@ -379,10 +386,14 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     # would drive articles to 0 now the taxonomy carries ~21. The gate fires below 40,
     # so 4 hits sits on the boundary and 5 trips it.
     tell_score = max(0.0, 100.0 - tell_hits * 15)
+    # Name the constructions that actually fired, not a fixed first-N sample — the
+    # latter (tell_examples_summary) is a declaration-order slice, so it can never
+    # surface any of the patterns past its cutoff no matter what the article contains.
+    matched_examples = prose_style.matched_pattern_examples(content_md)
+    tell_examples = matched_examples or f"{prose_style.tell_examples_summary()}, …"
     sig.append(_signal(
         "tell_phrases", "Formulaic constructions", tell_score, 0.14,
-        f"{tell_hits} AI-tell construction(s) "
-        f"({prose_style.tell_examples_summary()}, …).",
+        f"{tell_hits} AI-tell construction(s) ({tell_examples}).",
         ["Rewrite the formulaic openers/closers in a natural voice; for \"X isn't A, "
          "it's B\", just state what it is."]
         if tell_hits else []))
