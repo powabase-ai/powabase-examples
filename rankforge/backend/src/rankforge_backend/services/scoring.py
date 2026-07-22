@@ -370,7 +370,7 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     sig.append(_signal(
         "ai_vocabulary", "AI-tell vocabulary", ai_score, 0.16,
         f"{ai_hits} flagged word(s) (~{ai_density:.1f}/1k) from the "
-        "delve/leverage/robust/seamless/elevate register.",
+        f"{prose_style.register_sample()} register.",
         ["Swap the flagged words for plain language; never stack several in a "
          "paragraph."] if ai_score < 80 else []))
 

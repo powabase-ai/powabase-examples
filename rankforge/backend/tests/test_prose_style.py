@@ -123,3 +123,29 @@ def test_every_regex_pattern_matches_its_own_examples():
         rx = re.compile(p.regex, re.I | re.M)
         for example in p.examples:
             assert rx.search(example), f"{p.key} does not match its own example: {example}"
+
+
+def test_register_sample_returns_slash_joined_lemmas():
+    """register_sample() renders the first N lemmas from the register, slash-joined."""
+    sample = ps.register_sample()
+    assert "/" in sample  # should be slash-joined
+    assert sample == "delve/tapestry/realm/landscape/leverage"  # first 5 lemmas
+
+
+def test_register_sample_respects_limit():
+    """register_sample() honors the limit parameter."""
+    sample_2 = ps.register_sample(limit=2)
+    assert sample_2 == "delve/tapestry"
+    assert sample_2.count("/") == 1  # exactly one slash for two lemmas
+
+    sample_1 = ps.register_sample(limit=1)
+    assert sample_1 == "delve"
+    assert "/" not in sample_1  # no slash for one lemma
+
+
+def test_register_sample_lemmas_are_in_ai_words():
+    """Every lemma in register_sample() is actually in ps.AI_WORDS."""
+    sample = ps.register_sample()
+    lemmas = sample.split("/")
+    for lemma in lemmas:
+        assert lemma in ps.AI_WORDS, f"{lemma} from register_sample() not in AI_WORDS"

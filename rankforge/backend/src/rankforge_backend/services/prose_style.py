@@ -378,6 +378,12 @@ def tell_examples_summary(limit: int = 6) -> str:
     return ", ".join(f'"{p.examples[0]}"' for p in shown)
 
 
+def register_sample(limit: int = 5) -> str:
+    """A short slash-joined sample of the register, for UI-facing score explanations
+    where the full list would be far too long."""
+    return "/".join(r.lemma for r in AI_REGISTER[:limit])
+
+
 def writer_block() -> str:
     """Prescriptive "don't write this" block for the writer and LinkedIn prompts."""
     lines = [
