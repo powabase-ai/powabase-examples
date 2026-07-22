@@ -307,7 +307,7 @@ def test_new_register_words_are_detected():
     for word in (
         "utilize", "facilitates", "empowering", "streamlined", "multifaceted",
         "meticulously", "intricate", "paramount", "transformative", "supercharge",
-        "beacon", "cutting-edge", "ever-evolving", "paradigm shift", "game changer",
+        "cutting-edge", "ever-evolving", "paradigm shift", "game changer",
     ):
         assert scoring._AI_WORD_RE.search(f"a {word} thing"), word
 
@@ -354,20 +354,33 @@ def test_recap_opener_needs_line_start_and_a_comma():
 
 
 def test_precision_guards_hold_for_the_new_constructions():
-    """High-precision only: ordinary technical prose must not trip the new patterns."""
+    """High-precision only: ordinary technical prose must not trip the new patterns.
+
+    Each case is a genuine near-miss boundary for a pattern that DOES exist —
+    not a construct the regexes never contained.
+    """
     for clean in (
-        # "acts as a" was deliberately excluded — it's normal technical writing
-        "The proxy acts as a load balancer for the cluster.",
+        # fake_strong_verb: infra nouns ("gateway", "backbone", "foundation",
+        # "resource") were dropped from the noun set — only "hub"/"cornerstone" remain.
+        "The nginx container serves as a gateway to the internal network.",
+        "The fiber ring serves as a backbone between the two datacenters.",
+        "The connection pool serves as a shared resource across workers.",
+        "Cloudflare's edge serves as a caching foundation for the site.",
+        # superficial_analysis: requires an ABSTRACT signal noun as the object of
+        # highlighting/reflecting/showcasing — concrete, number-carrying clauses
+        # must not match.
+        "We split the sitemap into four files, reflecting the four content types.",
+        "Traffic fell 30%, reflecting a Google core update in March.",
+        "The bar turns amber, highlighting the slowest query in the trace.",
+        "The chart uses a log scale, reflecting the wide range of latencies.",
+        # summary_recap: requires the recap punctuation right after "in summary" —
+        # the noun "summary" ("summary view", "summary tables") must not trip it.
+        "In summary view, the crawler shows one row per host.",
+        "In summary tables, the median is preferred.",
         # a named, linked source is exactly what we want, not weasel attribution
         "The 2025 Stack Overflow survey reports a 12% drop.",
-        # a Markdown label colon is not a colon reveal
-        "- **Latency**: 40ms at p99.",
-        # "summary" as a noun, not a recap opener
-        "The summary field accepts 160 characters.",
         # "the source of truth is" must not trip the "the truth is" filler
         "The single source of truth is the ledger table.",
-        # "in order to" / "in terms of" were deliberately left out of empty_phrase
-        "We shard the table in order to keep writes under 5ms.",
     ):
         assert not scoring._TELL_RE.search(clean), clean
 

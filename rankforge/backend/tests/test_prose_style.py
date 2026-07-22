@@ -39,6 +39,12 @@ def test_no_pattern_example_contains_a_registered_word():
     for p in ps.PATTERNS:
         for example in p.examples:
             assert not banned.search(example), f"{p.key} example overlaps: {example}"
+        # The rule applies just as much to the regex SOURCE: if a pattern's own regex
+        # text embeds a registered word literally, real prose that matches the pattern
+        # will score in both ai_vocabulary and tell_phrases for the same sin.
+        if p.regex is None:
+            continue
+        assert not banned.search(p.regex), f"{p.key} regex source overlaps a registered word"
 
 
 def test_tell_regex_source_compiles_and_excludes_judge_only_patterns():
@@ -68,8 +74,7 @@ def test_tell_patterns_match_typographic_apostrophes():
     handles the straight apostrophe silently misses most real input."""
     detector = re.compile(ps.tell_regex_source(), re.I)
     assert detector.search("it’s not just a database, it’s a platform")
-    # Note: the `isn'?t` branch does not (yet) handle the curly apostrophe, so a
-    # curly-quoted "isn’t" does not match here — widening that is a later task.
+    assert detector.search("the way forward isn’t more tools. It’s better process")
 
 
 def test_tell_examples_summary_returns_examples_and_respects_limit():

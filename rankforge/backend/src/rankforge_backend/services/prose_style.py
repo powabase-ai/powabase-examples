@@ -83,7 +83,6 @@ AI_REGISTER: tuple[Register, ...] = (
         "supercharge",
         ("supercharge", "supercharges", "supercharged", "supercharging"),
     ),
-    Register("beacon", ("beacon",)),
     Register("cutting-edge", ("cutting-edge",)),
     Register("ever-evolving", ("ever-evolving",)),
     Register("paradigm shift", ("paradigm shift", "paradigm shifts")),
@@ -134,7 +133,7 @@ PATTERNS: tuple[Pattern, ...] = (
         name='The "in today\'s … world" opener',
         examples=("in today's fast-paced world", "in today's digital era"),
         fix="Open on the specific thing that changed, with a date or a number.",
-        regex=r"\bin today['’]?s\b.{0,40}?\b(?:world|landscape|era|age)\b",
+        regex=r"\bin today['’]?s\b.{0,40}?\b(?:world|era|age)\b",
     ),
     Pattern(
         key="lets_dive_in",
@@ -184,10 +183,10 @@ PATTERNS: tuple[Pattern, ...] = (
         # Avoids "pivotal" and "testament" — already in the register, and matching them
         # here would score one sin twice.
         regex=(
-            r"\bplays? a (?:vital|key|critical) role\b"
-            r"|\bsolidif(?:y|ies|ying) its position\b"
-            r"|\bcements? its (?:position|status)\b"
-            r"|\bmarks? a turning point\b"
+            r"\b(?:plays?|played) a (?:vital|key|critical) role\b"
+            r"|\bsolidif(?:y|ies|ied|ying) its position\b"
+            r"|\b(?:cements?|cemented) its (?:position|status)\b"
+            r"|\b(?:marks?|marked) a turning point\b"
         ),
     ),
     Pattern(
@@ -229,7 +228,15 @@ PATTERNS: tuple[Pattern, ...] = (
         ),
         fix="Say what the fact lets someone DO, not what it supposedly signals.",
         # "underscoring" is excluded on purpose — it's already in the register.
-        regex=r",\s*(?:highlighting|reflecting|showcasing)\s+(?:the|its|their|a)\b",
+        # Requires an ABSTRACT signal noun as the object, so concrete/number-carrying
+        # clauses ("reflecting the four content types", "reflecting a Google core
+        # update") do not match.
+        regex=(
+            r",\s*(?:highlighting|reflecting|showcasing)\s+(?:the|its|their|a)\s+"
+            r"(?:[\w'’-]+\s+){0,2}"
+            r"(?:commitment|dedication|focus|importance|significance|expertise"
+            r"|priorities|values?|mission|vision|ambition)\b"
+        ),
     ),
     Pattern(
         key="negative_listing",
@@ -248,22 +255,25 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="summary_recap",
         name="Summary-recap ending",
-        examples=("to sum up", "in summary"),
+        examples=("to sum up, the cache was cold", "in summary, the tradeoffs are clear"),
         fix="End on the last concrete point, takeaway, or next action.",
-        # Anchored to the recap phrasing so the noun "summary" ("the summary field")
+        # Requires the recap punctuation (a comma or sentence end right after "in
+        # summary") so the noun "summary" ("in summary view", "in summary tables")
         # doesn't trip it.
-        regex=r"\bto sum up\b|\bin summary\b|\bto wrap (?:up|things up)\b",
+        regex=r"\bto sum up\b|\bin summary(?:[,.!?]|$)|\bto wrap (?:up|things up)\b",
     ),
     Pattern(
         key="fake_strong_verb",
         name="Fake-strong verb",
         examples=("serves as a centralized hub",),
         fix='Prefer "is" or "has", then name what it actually does.',
-        # Anchored to the puffy noun: "acts as a load balancer" is ordinary technical
-        # writing and must not match.
+        # Anchored to a small set of reliably-puffy nouns only. "gateway", "backbone",
+        # "foundation", and "resource" are ordinary infra nouns ("serves as a gateway
+        # to the internal network") and must not match; "acts as a load balancer" is
+        # likewise excluded by not matching "acts as".
         regex=(
             r"\bserves as an? (?:[a-z-]+ ){0,2}"
-            r"(?:hub|cornerstone|foundation|gateway|backbone|resource)\b"
+            r"(?:hub|cornerstone)\b"
         ),
     ),
     Pattern(
