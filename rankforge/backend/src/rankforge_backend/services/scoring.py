@@ -561,11 +561,10 @@ knowledgeable person clearly wrote it; low means it reads as machine-generated.
 
 ## Axes
 - human_voice — a real point of view, confident unqualified claims, and concrete \
-specificity (numbers, names, dates, examples). Penalize: the AI register (delve, \
-leverage, robust, seamless, navigate, elevate, unlock, pivotal, crucial, vibrant, \
-boasts, nestled…); formulaic constructions ("it's not just X, it's Y"; "whether \
-you're a beginner or a pro"; "in today's fast-paced world"; "let's dive in"; "in \
-conclusion"); and generic, hedge-everything, specificity-free prose.
+specificity (numbers, names, dates, examples). Penalize every pattern below:
+
+""" + prose_style.judge_taxonomy() + """
+
 - flow — natural rhythm (a mix of short and long sentences, uneven section lengths) \
 that reads smoothly, NOT the mechanical evenness and over-even paragraphing of \
 machine text. Penalize excessive em-dashes and filler transitions (moreover, \

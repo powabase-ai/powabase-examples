@@ -87,6 +87,31 @@ def test_tell_examples_summary_returns_examples_and_respects_limit():
     assert limited == f'"{first_pattern_with_regex.examples[0]}"'
 
 
+def test_every_prompt_renders_the_shared_register():
+    """Drift-proofing: this is the actual bug being fixed. The writer, the LinkedIn
+    generator, and the readability judge must all show the SAME register, so the
+    seven hand-maintained copies can never diverge again."""
+    from rankforge_backend.services import generation, linkedin_gen, scoring
+
+    sample = ps.AI_REGISTER[0].lemma  # "delve"
+    newest = ps.AI_REGISTER[-1].lemma  # a word added in the widening task
+    for prompt in (
+        generation._SYSTEM_PROMPT,
+        linkedin_gen._SYSTEM,
+        scoring._READ_JUDGE_PROMPT,
+    ):
+        assert sample in prompt
+        assert newest in prompt, "a prompt is not rendering the shared register"
+
+
+def test_prompts_name_the_new_constructions():
+    from rankforge_backend.services import generation, scoring
+
+    for name in ("Weasel attribution", "Faux-insight setup"):
+        assert name in generation._SYSTEM_PROMPT
+        assert name in scoring._READ_JUDGE_PROMPT
+
+
 def test_every_regex_pattern_matches_its_own_examples():
     """Each pattern's examples are what we tell the writer, the judge, and the reviser
     the pattern means. If an example doesn't match its own regex, the documentation and

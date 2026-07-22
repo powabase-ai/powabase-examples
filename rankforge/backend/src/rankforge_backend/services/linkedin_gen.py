@@ -12,7 +12,7 @@ from ..db import Database
 from ..powabase import PowabaseClient, PowabaseError
 from . import business_profiles as brands
 from . import generation as gen
-from . import linking
+from . import linking, prose_style
 from .agents import ensure_agent
 
 log = logging.getLogger("rankforge.linkedin")
@@ -89,20 +89,9 @@ purports".
 not by selling. Not salesy.
 - Ground every claim in the article. Invent nothing.
 
-NEVER USE these AI-tell words: delve, tapestry, realm, landscape (as metaphor), \
-leverage, robust, seamless, navigate (as metaphor), underscore, foster, harness, \
-elevate, unlock, embark, testament, pivotal, crucial, vibrant, boasts, nestled, \
-genuinely (as intensifier).
+""" + prose_style.writer_block() + """
 
-NEVER USE these AI-tell constructions:
-- "It's not just X, it's Y" / "This isn't merely X, it's Y".
-- The antithesis reframe ("The way forward isn't X. It's Y").
-- "Whether you're a beginner or a seasoned pro…".
-- "Let's dive in / Let's explore / Buckle up".
-- Reflexive rule-of-three triads ("fast, reliable, and scalable").
-- "From X to Y" framing. Empty transitions (Moreover, Furthermore, Additionally, That \
-said). Use em-dashes sparingly. Vary sentence length. Generic, specificity-free prose \
-is the clearest AI tell — be concrete.
+Generic, specificity-free prose is the clearest AI tell — be concrete.
 
 OUTPUT: only the post text itself, ready to paste — no preamble, no quotes, no \
 "Here's your post". Fixed trailing order: hook + body, then the discussion question as \
