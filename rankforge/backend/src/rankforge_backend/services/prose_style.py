@@ -231,9 +231,13 @@ PATTERNS: tuple[Pattern, ...] = (
         # Requires the object to be one of a closed whitelist of abstract signal nouns,
         # so concrete/number-carrying clauses ("reflecting the four content types",
         # "reflecting a Google core update") do not match regardless of determiner.
+        # Determiners are limited to the/its/their/our/my/a. "your", "his", "her",
+        # and "this" were dropped: they fire on ordinary bio/résumé/team-page prose
+        # ("highlighting his expertise", "reflecting this focus") rather than the
+        # first-person brand-voice tell ("our"/"my") this pattern targets.
         regex=(
             r",\s*(?:highlighting|reflecting|showcasing)\s+"
-            r"(?:the|its|their|our|my|your|his|her|this|a)\s+"
+            r"(?:the|its|their|our|my|a)\s+"
             r"(?:[\w'’-]+\s+){0,2}"
             r"(?:commitment|dedication|focus|importance|significance|expertise"
             r"|priorities|values?|mission|vision|ambition)\b"

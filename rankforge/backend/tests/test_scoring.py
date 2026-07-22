@@ -402,6 +402,33 @@ def test_narrowed_patterns_still_catch_genuine_slop():
         assert scoring._TELL_RE.search(phrase), phrase
 
 
+def test_superficial_analysis_dropped_determiners_stay_precise():
+    """Fix-pass-3 precision guard: the determiner group was widened to include
+    "your"/"his"/"her"/"this" and that fired on ordinary bio/résumé/team-page
+    prose. Those four determiners were dropped; "the"/"its"/"their"/"our"/"my"/"a"
+    remain. Each case here is a genuine near-miss, not a construct the pattern
+    was ever meant to catch."""
+    for clean in (
+        "The candidate's resume lists Python and Go, highlighting his expertise in backend systems.",
+        "Her talk covered the outage postmortem, highlighting her expertise in incident response.",
+        "The engineer's LinkedIn lists three prior roles, highlighting his expertise in Kubernetes.",
+        "The speaker roster includes two keynote slots, highlighting his focus on distributed systems.",
+        "The team page lists past projects, reflecting this focus on developer tooling.",
+    ):
+        assert not scoring._TELL_RE.search(clean), clean
+
+
+def test_superficial_analysis_first_person_recall_survives_the_narrowing():
+    """Recall regression guard: dropping "your"/"his"/"her"/"this" must not touch
+    the first-person brand-voice determiners ("our", "my") the pattern exists to
+    catch."""
+    for phrase in (
+        "We rebuilt the homepage, reflecting our commitment to accessibility.",
+        "The team shipped early, showcasing my dedication to the roadmap.",
+    ):
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
 def test_fake_profound_kicker_is_judge_only():
     """The closing-metaphor pattern is recognizable only in context, so it must reach
     the judge but never the deterministic detector."""
