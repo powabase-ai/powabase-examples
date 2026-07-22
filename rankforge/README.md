@@ -275,5 +275,5 @@ frontend gets only the **Anon (Publishable)** key. App tables enable RLS from
 
 ## License
 
-**MIT** — see [`LICENSE`](../LICENSE). An open-source Powabase example app, free to
+**Apache 2.0** — see [`LICENSE`](../LICENSE). An open-source Powabase example app, free to
 clone, modify, and ship.
