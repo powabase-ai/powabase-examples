@@ -167,6 +167,17 @@ def test_readability_clean_prose_scores_well():
     assert by["tell_phrases"] == 100
 
 
+def test_tell_phrases_explanation_names_what_actually_fired():
+    """The score explanation must name real offenders in the article, not the fixed
+    first-six-in-declaration-order sample — otherwise an author is told to fix
+    phrases that aren't in their text."""
+    md = "Buckle up: this migration story has a twist. Buckle up, seriously."
+    s = scoring.score_readability(md, None)
+    tp = next(x for x in s["signals"] if x["key"] == "tell_phrases")
+    assert "buckle up" in tp["explanation"]  # genuinely fired
+    assert "let's dive in" not in tp["explanation"]  # did not fire
+
+
 def test_readability_flags_antithesis_reframe():
     # "X isn't A. It's B" / "isn't about A, it's about B" — the negate-then-reveal tic.
     md = (
@@ -273,3 +284,240 @@ def test_readability_gate_fails_on_em_dash_spam():
     assert by["em_dashes"] < 40
     assert not s["met"]  # gated to not-met despite a high weighted average
     assert s["total"] == scoring.READABILITY_TARGET - 1
+
+
+def test_tell_detector_still_catches_every_original_construction():
+    """Refactor guard: sourcing the regex from prose_style must not drop a pattern."""
+    originals = [
+        "it's not just a database, it's a platform",
+        "the way forward isn't more tools. It's better process",
+        "whether you're a beginner or a pro",
+        "in today's fast-paced world",
+        "let's dive in",
+        "buckle up",
+        "in conclusion",
+        "at the end of the day",
+    ]
+    for phrase in originals:
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
+def test_possessive_its_is_not_an_antithesis_reframe():
+    """The load-bearing false-positive guard: possessive "its" must not trip it."""
+    assert not scoring._TELL_RE.search(
+        "The service isn't down, but its replacement is still warming up."
+    )
+
+
+def test_ai_word_detector_still_catches_the_original_register():
+    for word in ("delve", "leveraging", "seamlessly", "nestled", "genuinely"):
+        assert scoring._AI_WORD_RE.search(f"we {word} here"), word
+
+
+def test_new_register_words_are_detected():
+    for word in (
+        "utilize", "facilitates", "empowering", "streamlined", "multifaceted",
+        "meticulously", "intricate", "paramount", "transformative", "supercharge",
+        "cutting-edge", "ever-evolving", "paradigm shift", "game changer",
+    ):
+        assert scoring._AI_WORD_RE.search(f"a {word} thing"), word
+
+
+def test_new_constructions_are_detected():
+    for phrase in (
+        "studies show that teams ship faster",
+        "experts agree this is the way",
+        "it plays a vital role in the pipeline",
+        "what most people get wrong is the eval",
+        "here's the thing, nobody measures it",
+        "what if I told you the index was stale",
+        "the launch adds search, highlighting the team's focus",
+        "Not a framework. Not a library. A runtime.",
+        "That's it. That's the whole migration.",
+        "to sum up, the cache was cold",
+        "the gateway serves as a central hub",
+    ):
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
+def test_empty_phrases_hype_and_recap_openers_are_detected():
+    for phrase in (
+        "it's worth noting that the cache is cold",
+        "it is worth noting the tradeoff",
+        "it's important to note the risk",
+        "it is important to note the tradeoff",
+        "at its core, the runtime is a queue",
+        "the truth is nobody measured it",
+        "the reality is nobody measured it",
+        "this is huge for the team",
+        "this changes everything about deploys",
+    ):
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
+def test_recap_opener_needs_line_start_and_a_comma():
+    """Line-anchored so ordinary sentences survive: "Overall performance improved" is
+    a fact, "Overall, ..." is a recap. Requires the detector to compile with re.M."""
+    assert scoring._TELL_RE.search("Ultimately, the migration paid off.")
+    assert scoring._TELL_RE.search("## Section\nOverall, we cut latency in half.")
+    assert not scoring._TELL_RE.search("Overall performance improved by 12%.")
+    assert not scoring._TELL_RE.search("We ultimately, and reluctantly, rolled back.")
+
+
+def test_precision_guards_hold_for_the_new_constructions():
+    """High-precision only: ordinary technical prose must not trip the new patterns.
+
+    Each case is a genuine near-miss boundary for a pattern that DOES exist —
+    not a construct the regexes never contained.
+    """
+    for clean in (
+        # fake_strong_verb: infra nouns ("gateway", "backbone", "foundation",
+        # "resource") were dropped from the noun set — only "hub"/"cornerstone" remain.
+        "The nginx container serves as a gateway to the internal network.",
+        "The fiber ring serves as a backbone between the two datacenters.",
+        "The connection pool serves as a shared resource across workers.",
+        "Cloudflare's edge serves as a caching foundation for the site.",
+        # superficial_analysis: requires an ABSTRACT signal noun as the object of
+        # highlighting/reflecting/showcasing — concrete, number-carrying clauses
+        # must not match.
+        "We split the sitemap into four files, reflecting the four content types.",
+        "Traffic fell 30%, reflecting a Google core update in March.",
+        "The bar turns amber, highlighting the slowest query in the trace.",
+        "The chart uses a log scale, reflecting the wide range of latencies.",
+        # summary_recap: requires the recap punctuation right after "in summary" —
+        # the noun "summary" ("summary view", "summary tables") must not trip it.
+        "In summary view, the crawler shows one row per host.",
+        "In summary tables, the median is preferred.",
+        # summary_recap: "to wrap up"/"to wrap things up" now needs the same recap
+        # punctuation right after it — the ordinary verb phrase must not trip it.
+        "We need to wrap up the migration before the freeze.",
+        "Let's wrap things up before the deploy window closes.",
+        # a named, linked source is exactly what we want, not weasel attribution
+        "The 2025 Stack Overflow survey reports a 12% drop.",
+        # "the source of truth is" must not trip the "the truth is" filler
+        "The single source of truth is the ledger table.",
+        # empty_phrase: "when it comes to", "going forward", and "in this article"
+        # are ordinary English connectives (and "in this article" is the standard
+        # SEO-blog opener this product itself generates) — round-2 false-positive
+        # fix removed all three from the regex. padding_connective covers the same
+        # concept for the judge instead.
+        "When it comes to caching, the p99 improved after the fix.",
+        "Going forward we'll pin the dependency version in CI.",
+        "In this article, we'll cover indexing, caching, and replication.",
+    ):
+        assert not scoring._TELL_RE.search(clean), clean
+
+
+def test_narrowed_patterns_still_catch_genuine_slop():
+    """Recall regression guard: the round-1 false-positive fix pass narrowed these
+    patterns to kill false positives. A future over-narrowing pass must not silently
+    lose the genuine slop each pattern exists to catch."""
+    for phrase in (
+        # fake_strong_verb: "hub"/"cornerstone" must still fire.
+        "The platform serves as a centralized hub for everything.",
+        # superficial_analysis: first-person determiners ("our", "my") must fire.
+        "We rebuilt the homepage, reflecting our commitment to accessibility.",
+        # importance_puffery: gerund forms must fire.
+        "The API is playing a vital role in the ecosystem.",
+        # summary_recap: colon-punctuated recap opener must fire.
+        "In summary: the tradeoffs are clear.",
+        # summary_recap: the comma-punctuated "to wrap up" recap opener must still
+        # fire even after restricting it to the recap-punctuation shape.
+        "To wrap up, the key results are clear.",
+    ):
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
+def test_superficial_analysis_dropped_determiners_stay_precise():
+    """Fix-pass-3 precision guard: the determiner group was widened to include
+    "your"/"his"/"her"/"this" and that fired on ordinary bio/résumé/team-page
+    prose. Those four determiners were dropped; "the"/"its"/"their"/"our"/"my"/"a"
+    remain. Each case here is a genuine near-miss, not a construct the pattern
+    was ever meant to catch."""
+    for clean in (
+        "The candidate's resume lists Python and Go, highlighting his expertise in backend systems.",
+        "Her talk covered the outage postmortem, highlighting her expertise in incident response.",
+        "The engineer's LinkedIn lists three prior roles, highlighting his expertise in Kubernetes.",
+        "The speaker roster includes two keynote slots, highlighting his focus on distributed systems.",
+        "The team page lists past projects, reflecting this focus on developer tooling.",
+    ):
+        assert not scoring._TELL_RE.search(clean), clean
+
+
+def test_superficial_analysis_first_person_recall_survives_the_narrowing():
+    """Recall regression guard: dropping "your"/"his"/"her"/"this" must not touch
+    the first-person brand-voice determiners ("our", "my") the pattern exists to
+    catch."""
+    for phrase in (
+        "We rebuilt the homepage, reflecting our commitment to accessibility.",
+        "The team shipped early, showcasing my dedication to the roadmap.",
+    ):
+        assert scoring._TELL_RE.search(phrase), phrase
+
+
+def test_fake_profound_kicker_is_judge_only():
+    """The closing-metaphor pattern is recognizable only in context, so it must reach
+    the judge but never the deterministic detector."""
+    from rankforge_backend.services import prose_style as ps
+
+    kicker = next(p for p in ps.PATTERNS if p.key == "fake_profound_kicker")
+    assert kicker.regex is None
+    assert kicker.name in ps.judge_taxonomy()
+    assert not scoring._TELL_RE.search(
+        "The best systems are the ones you never think about."
+    )
+
+
+def test_every_contraction_matches_both_apostrophe_forms():
+    """Rendered Markdown and LLM output emit the typographic apostrophe (U+2019) far
+    more than the straight one, so a straight-only branch misses most real prose."""
+    straight = [
+        "it isn't just a database, it's a platform",
+        "whether you're a beginner or a pro",
+        "in today's fast-paced world",
+        "let's dive in",
+        "it's worth noting the cache is cold",
+        "here's the thing, nobody measures it",
+        "That's it. That's the whole migration.",
+    ]
+    for phrase in straight:
+        assert scoring._TELL_RE.search(phrase), f"straight: {phrase}"
+        curly = phrase.replace("'", "’")
+        assert scoring._TELL_RE.search(curly), f"typographic: {curly}"
+
+
+def _md_with_tells(n: int) -> str:
+    """An article body carrying exactly `n` distinct AI-tell constructions."""
+    tells = [
+        "In conclusion, we shipped.",
+        "Let's dive in.",
+        "Buckle up.",
+        "At the end of the day it worked.",
+        "Studies show teams ship faster.",
+        "Here's the thing, nobody measures it.",
+    ]
+    body = " ".join("filler word here ok" for _ in range(50))
+    return "# T\n\n" + body + "\n\n" + "\n\n".join(tells[:n])
+
+
+def test_tell_score_slope_is_fifteen_per_hit():
+    for hits, expected in ((1, 85), (2, 70), (3, 55), (4, 40), (5, 25)):
+        s = scoring.score_readability(_md_with_tells(hits), None)
+        tp = next(x for x in s["signals"] if x["key"] == "tell_phrases")
+        assert tp["score"] == expected, (hits, tp["score"])
+
+
+def test_gate_boundary_four_hits_does_not_gate_five_does():
+    """The gate fires below 40, so at the new slope 4 constructions sit exactly on the
+    boundary and pass, while 5 trips it. This is the intended sensitivity."""
+    four = scoring.score_readability(_md_with_tells(4), {"human_voice": 95, "flow": 95})
+    five = scoring.score_readability(_md_with_tells(5), {"human_voice": 95, "flow": 95})
+    tp4 = next(x for x in four["signals"] if x["key"] == "tell_phrases")
+    tp5 = next(x for x in five["signals"] if x["key"] == "tell_phrases")
+    assert tp4["score"] == 40 and tp5["score"] == 25
+    # 4 hits sits exactly on boundary and passes; this assertion catches < → <=
+    # off-by-one in the gate condition (the < is critical).
+    assert four["met"] is True
+    # 5 hits is below the gate floor, so the axis cannot be "met" however well it
+    # scores elsewhere.
+    assert five["met"] is False

@@ -1,0 +1,522 @@
+"""Shared prose-quality taxonomy — one source of truth for what "reads as AI-written".
+
+The same knowledge is needed in four framings: the writer must be told what to avoid,
+the readability judge what to detect, the reviser how to fix it, and the deterministic
+scorer needs word lists and regex sources to compile. Those four used to live as seven
+hand-maintained copies (generation.py, revise.py x3, scoring.py x2, linkedin_gen.py)
+that had already drifted apart. Adding a pattern here updates the detector AND every
+prompt at once.
+
+Pure data plus string rendering: no I/O, and no imports from other services modules, so
+nothing can cycle through it.
+
+Pattern taxonomy adapted from the no-ai-slop skill by Peter Yang
+(https://github.com/petergyang/no-ai-slop), MIT licensed.
+"""
+
+import re
+from typing import NamedTuple
+
+
+class Register(NamedTuple):
+    """One overused word plus every inflection the detector should catch.
+
+    `forms` feeds the deterministic regex; `lemma` + `gloss` are what prompts show, so
+    a prompt reads "landscape (as metaphor)" instead of dumping every conjugation.
+    """
+
+    lemma: str
+    forms: tuple[str, ...]
+    gloss: str = ""
+
+
+class Pattern(NamedTuple):
+    """One formulaic construction: how to name it, show it, fix it, and match it.
+
+    `regex` is None for patterns that need human judgment (synonym cycling, colon
+    reveals). Those are described to the LLM judge but never scored deterministically —
+    a regex for them would false-positive constantly on Markdown labels and lists.
+    """
+
+    key: str
+    name: str
+    examples: tuple[str, ...]
+    fix: str
+    regex: str | None = None
+
+
+AI_REGISTER: tuple[Register, ...] = (
+    Register("delve", ("delve", "delved", "delving")),
+    Register("tapestry", ("tapestry",)),
+    Register("realm", ("realm", "realms")),
+    Register("landscape", ("landscape",), "(as metaphor)"),
+    Register("leverage", ("leverage", "leverages", "leveraging", "leveraged")),
+    Register("robust", ("robust",)),
+    Register("seamless", ("seamless", "seamlessly")),
+    Register("navigate", ("navigate", "navigating"), "(as metaphor)"),
+    Register("underscore", ("underscore", "underscores", "underscoring")),
+    Register("foster", ("foster", "fosters", "fostering")),
+    Register("harness", ("harness", "harnessing")),
+    Register("elevate", ("elevate", "elevates", "elevating")),
+    Register("unlock", ("unlock", "unlocks", "unlocking")),
+    Register("embark", ("embark", "embarking")),
+    Register("testament", ("testament",)),
+    Register("pivotal", ("pivotal",)),
+    Register("crucial", ("crucial",)),
+    Register("vibrant", ("vibrant",)),
+    Register("boasts", ("boasts", "boasting"), "(for a feature)"),
+    Register("nestled", ("nestled",), "(for a place)"),
+    Register("genuinely", ("genuinely",), "(as an intensifier)"),
+    Register("utilize", ("utilize", "utilizes", "utilized", "utilizing")),
+    Register(
+        "facilitate", ("facilitate", "facilitates", "facilitated", "facilitating")
+    ),
+    Register("empower", ("empower", "empowers", "empowered", "empowering")),
+    Register(
+        "streamline", ("streamline", "streamlines", "streamlined", "streamlining")
+    ),
+    Register("multifaceted", ("multifaceted",)),
+    Register("meticulous", ("meticulous", "meticulously")),
+    Register("intricate", ("intricate",)),
+    Register("paramount", ("paramount",)),
+    Register("transformative", ("transformative",)),
+    Register(
+        "supercharge",
+        ("supercharge", "supercharges", "supercharged", "supercharging"),
+    ),
+    Register("cutting-edge", ("cutting-edge",)),
+    Register("ever-evolving", ("ever-evolving",)),
+    Register("paradigm shift", ("paradigm shift", "paradigm shifts")),
+    Register("game changer", ("game changer", "game-changer", "game changers")),
+)
+
+AI_WORDS: tuple[str, ...] = tuple(f for r in AI_REGISTER for f in r.forms)
+
+# Filler connectives that pad machine text. Scored as their own `transitions` signal.
+# scoring.py compiles its `_EMPTY_TRANSITION_RE` detector from this tuple (mirroring
+# how `_AI_WORD_RE` is built from AI_WORDS), so the DETECTOR genuinely can't drift from
+# this list. It does NOT reach the prompts, though: `fix_instruction("transitions")`
+# below renders from it, but the six other prompt/explanation sites that mention these
+# same four words (the readability judge prompt, the writer/reviser/LinkedIn prompts,
+# and the `transitions` score explanation in scoring.py) still hardcode their own
+# copies — changing a word here updates the detector immediately but NOT those six
+# call sites; they'd need to be edited by hand to match.
+EMPTY_TRANSITIONS: tuple[str, ...] = (
+    "moreover", "furthermore", "additionally", "that said",
+)
+
+PATTERNS: tuple[Pattern, ...] = (
+    Pattern(
+        key="not_just",
+        name='The "not just X, it\'s Y" intensifier',
+        examples=("it's not just a database, it's a platform",),
+        fix="State what it is and drop the negated half.",
+        regex=r"it['’]s not (?:just|merely)\b|\bisn['’]?t (?:just|merely)\b",
+    ),
+    Pattern(
+        key="antithesis_reframe",
+        name="The antithesis reframe",
+        examples=(
+            "the way forward isn't more tools. It's better process",
+            "it isn't about speed, it's about correctness",
+        ),
+        fix="Name what something IS, directly, without the negate-then-reveal setup.",
+        # Bounded span so it can't run away. REQUIRE the contraction apostrophe in the
+        # payoff so possessive "its" ("…isn't down, but its replacement is") is not a
+        # false positive. This guard is load-bearing — do not loosen it.
+        regex=(
+            r"\b(?:is|are|was|were)(?:n['’]?t| not)\b[^.!?\n]{0,70}"
+            r"[,.!?—–-]\s*it['’]s\b"
+        ),
+    ),
+    Pattern(
+        key="whether_youre",
+        name='The "whether you\'re a…" inclusivity hedge',
+        examples=("whether you're a beginner or a seasoned pro",),
+        fix="Address the actual reader the brief names; drop the catch-all.",
+        regex=r"\bwhether you['’]?re an?\b",
+    ),
+    Pattern(
+        key="in_todays_world",
+        name='The "in today\'s … world" opener',
+        examples=("in today's fast-paced world", "in today's digital era"),
+        fix="Open on the specific thing that changed, with a date or a number.",
+        # "landscape" is deliberately NOT in this group. It's already a register word
+        # (AI_REGISTER) scored by ai_vocabulary, and the no-overlap rule says a
+        # construction must not embed an already-banned word — "in today's landscape"
+        # would otherwise score the same sin twice. "world"/"era"/"age" aren't
+        # register words on their own, so they still need this construction-level
+        # pattern to be caught at all.
+        regex=r"\bin today['’]?s\b.{0,40}?\b(?:world|era|age)\b",
+    ),
+    Pattern(
+        key="lets_dive_in",
+        name='The "let\'s dive in" transition',
+        examples=("let's dive in", "let's explore", "let's unpack"),
+        fix="Just start the section.",
+        regex=r"\blet['’]?s (?:dive in|explore|take a look|unpack)\b",
+    ),
+    Pattern(
+        key="buckle_up",
+        name='The "buckle up" hype opener',
+        examples=("buckle up",),
+        fix="Cut it and make the claim.",
+        regex=r"\bbuckle up\b",
+    ),
+    Pattern(
+        key="in_conclusion",
+        name='The "in conclusion" recap',
+        examples=("in conclusion",),
+        fix="Close on a specific takeaway, number, or next step instead.",
+        regex=r"\bin conclusion\b",
+    ),
+    Pattern(
+        key="end_of_the_day",
+        name='The "at the end of the day" filler',
+        examples=("at the end of the day",),
+        fix="Delete it; the sentence usually stands without it.",
+        regex=r"\bat the end of the day\b",
+    ),
+    Pattern(
+        key="weasel_attribution",
+        name="Weasel attribution",
+        examples=("studies show", "experts agree", "widely regarded as"),
+        fix="Name the source and link it, or cut the claim. Never invent a source.",
+        # Deliberately narrow: "research shows [linked source]" is legitimate here, so
+        # only the unattributable appeals are matched.
+        regex=(
+            r"\bstudies show\b|\bexperts agree\b|\bwidely regarded as\b"
+            r"|\bmany argue\b|\bit is widely believed\b"
+        ),
+    ),
+    Pattern(
+        key="importance_puffery",
+        name="Importance puffery",
+        examples=("plays a vital role", "solidifies its position"),
+        fix="State the fact and let the reader judge whether it matters.",
+        # Avoids "pivotal" and "testament" — already in the register, and matching them
+        # here would score one sin twice.
+        regex=(
+            r"\b(?:plays?|played|playing) a (?:vital|key|critical) role\b"
+            r"|\bsolidif(?:y|ies|ied|ying) its position\b"
+            r"|\b(?:cements?|cemented|cementing) its (?:position|status)\b"
+            r"|\b(?:marks?|marked|marking) a turning point\b"
+        ),
+    ),
+    Pattern(
+        key="faux_insight",
+        name="Faux-insight setup",
+        examples=("what most people get wrong", "the part everyone misses"),
+        fix="Cut the setup and let the claim stand on its own.",
+        regex=(
+            r"\bwhat (?:most people|nobody|everyone) (?:gets? wrong|tells you|misses)\b"
+            r"|\bthe part (?:most people|everyone) (?:skips?|misses)\b"
+            r"|\bhere['’]?s what nobody\b"
+        ),
+    ),
+    Pattern(
+        key="throat_clearing",
+        name="Throat-clearing opener",
+        examples=("here's the thing", "let me be clear"),
+        fix="Delete the opener and state the point.",
+        regex=(
+            r"\bhere['’]?s the thing\b|\blet me be clear\b"
+            r"|\bhere['’]?s what I mean\b|\bthe uncomfortable truth\b"
+        ),
+    ),
+    Pattern(
+        key="rhetorical_setup",
+        name="Rhetorical setup",
+        examples=("what if I told you", "plot twist"),
+        fix="Drop the setup and make the point.",
+        regex=r"\bwhat if I told you\b|\bplot twist\b|\bthink about it[:.]",
+    ),
+    Pattern(
+        key="superficial_analysis",
+        name="Superficial -ing analysis",
+        # The examples carry the leading comma the regex requires — an example that
+        # can't match its own pattern means the docs and the detector disagree.
+        examples=(
+            "the launch adds search, highlighting the team's focus",
+            "shipped in March, reflecting its new priorities",
+        ),
+        fix="Say what the fact lets someone DO, not what it supposedly signals.",
+        # "underscoring" is excluded on purpose — it's already in the register.
+        # Requires the object to be one of a closed whitelist of abstract signal nouns,
+        # so concrete/number-carrying clauses ("reflecting the four content types",
+        # "reflecting a Google core update") do not match regardless of determiner.
+        # Determiners are limited to the/its/their/our/my/a. "your", "his", "her",
+        # and "this" were dropped: they fire on ordinary bio/résumé/team-page prose
+        # ("highlighting his expertise", "reflecting this focus") rather than the
+        # first-person brand-voice tell ("our"/"my") this pattern targets.
+        regex=(
+            r",\s*(?:highlighting|reflecting|showcasing)\s+"
+            r"(?:the|its|their|our|my|a)\s+"
+            r"(?:[\w'’-]+\s+){0,2}"
+            r"(?:commitment|dedication|focus|importance|significance|expertise"
+            r"|priorities|values?|mission|vision|ambition)\b"
+        ),
+    ),
+    Pattern(
+        key="negative_listing",
+        name="Negative listing",
+        examples=("Not a framework. Not a library. A runtime.",),
+        fix="Just say what it is.",
+        regex=r"\bnot an? [^.!?\n]{1,40}\.\s*not an? \b",
+    ),
+    Pattern(
+        key="dramatic_fragmentation",
+        name="Dramatic fragmentation",
+        examples=("That's it. That's the whole thing.",),
+        fix="Use a complete sentence.",
+        regex=r"\bthat['’]?s it\.\s*that['’]?s\b",
+    ),
+    Pattern(
+        key="summary_recap",
+        name="Summary-recap ending",
+        examples=(
+            "to sum up, the cache was cold",
+            "in summary, the tradeoffs are clear",
+            "In summary: the tradeoffs are clear",
+            "to wrap up, the key results are clear",
+        ),
+        fix="End on the last concrete point, takeaway, or next action.",
+        # Requires one of ,.!?: to immediately follow "in summary" via lookahead, so the
+        # noun "summary" ("in summary view", "in summary tables") doesn't trip it. NOTE:
+        # the detector compiles with re.M (for recap_opener's line anchor), so a bare
+        # "$" here would match end-of-LINE, not end-of-string — firing on ordinary
+        # sentences that merely happen to wrap right after "in summary". The lookahead
+        # avoids that trap entirely, since it never matches on a line break.
+        # "to wrap up"/"to wrap things up" gets the SAME recap-punctuation lookahead:
+        # unguarded, it matched the ordinary verb phrase "we need to wrap up the
+        # migration" — a real false positive, not a recap. Requiring the comma/colon
+        # right after restricts it to the recap-opener shape ("to wrap up, ...").
+        regex=(
+            r"\bto sum up\b|\bin summary(?=[,.!?:])"
+            r"|\bto wrap (?:up|things up)\b(?=[,.!?:])"
+        ),
+    ),
+    Pattern(
+        key="fake_strong_verb",
+        name="Fake-strong verb",
+        examples=("serves as a centralized hub",),
+        fix=(
+            'Prefer "is" or "has", then name what it actually does. This includes the '
+            'abstract-object form — "serves as a gateway to endless possibilities", '
+            '"serves as the backbone of modern transformation" — where the object is a '
+            "concept rather than a concrete system."
+        ),
+        # Anchored to a small set of reliably-puffy nouns only. "gateway", "backbone",
+        # "foundation", and "resource" are ordinary infra nouns ("serves as a gateway
+        # to the internal network") and must not match; "acts as a load balancer" is
+        # likewise excluded by not matching "acts as". The abstract-object form (object
+        # is a concept, not a concrete system) is real slop too, but a regex can't tell
+        # concrete from abstract objects reliably — that judgment is pushed to the fix
+        # text above, which reaches the writer/judge/reviser prompts instead.
+        regex=(
+            r"\bserves as an? (?:[a-z-]+ ){0,2}"
+            r"(?:hub|cornerstone)\b"
+        ),
+    ),
+    Pattern(
+        key="empty_phrase",
+        name="Empty phrase",
+        examples=("it's worth noting", "at its core", "the reality is"),
+        fix="Delete the phrase and start on the point it was delaying.",
+        # Only the distinctive fillers. "in order to" / "in terms of" are deliberately
+        # excluded — too common in ordinary technical prose to penalize at 15 a hit.
+        # "when it comes to", "going forward", and "in this article" are excluded for
+        # the same reason: they're ordinary English connectives, and "in this article"
+        # is the standard SEO-blog "here's what we'll cover" opener this product
+        # itself generates — a regex hit there is a false positive, not a tell. The
+        # padding_connective pattern below covers the same concept for the judge,
+        # which can tell genuine padding from a legitimate section transition.
+        regex=(
+            r"\bit['’]?s worth noting\b|\bit is worth noting\b"
+            r"|\bit['’]?s important to note\b|\bit is important to note\b"
+            r"|\bat its core\b|\bthe (?:truth|reality) is\b"
+        ),
+    ),
+    Pattern(
+        key="padding_connective",
+        name="Padding connective",
+        examples=(
+            "when it comes to onboarding, the docs cover it",
+            "in this article, we'll cover the basics",
+            "going forward, we'll pin the version",
+        ),
+        fix=(
+            "Cut the connective and start the sentence on the actual point — but only "
+            "when it's pure padding. A genuine section transition (e.g. \"in this "
+            "article, we'll cover X, Y, Z\" as a real preview of distinct sections) is "
+            "fine; the tell is using the phrase as a content-free stall."
+        ),
+        # Judge-only: "when it comes to", "going forward", and "in this article" are
+        # ordinary connectives that also show up as legitimate section transitions —
+        # a regex can't tell padding from a real preview, so this is described to the
+        # judge (judge_taxonomy) but never scored deterministically.
+        regex=None,
+    ),
+    Pattern(
+        key="hype_declaration",
+        name="Hype declaration",
+        examples=("this is huge", "this changes everything"),
+        fix="Give the number or the mechanism that makes it matter, or cut the line.",
+        regex=r"\bthis is huge\b|\bthis changes everything\b",
+    ),
+    Pattern(
+        key="recap_opener",
+        name="Recap opener",
+        examples=("Ultimately, the migration paid off",),
+        fix="End on the last concrete point instead of restating the piece.",
+        # Line-anchored AND comma-anchored: "Overall performance improved" is an
+        # ordinary sentence, "Overall, …" is a recap. Needs re.M at the compile site.
+        regex=r"^\s*(?:ultimately|overall),",
+    ),
+    Pattern(
+        key="fake_profound_kicker",
+        name="Fake-profound kicker",
+        examples=(
+            "The best systems are the ones you never think about.",
+            "And that, in the end, is what really counts.",
+        ),
+        fix=(
+            "Delete the line — do NOT rewrite it into a better metaphor and do not "
+            "preserve its rhythm. End on the clearest concrete sentence already in the "
+            "draft, or add a plain takeaway or next action."
+        ),
+        regex=None,  # a closing metaphor is recognizable only in context
+    ),
+    Pattern(
+        key="synonym_cycling",
+        name="Synonym cycling",
+        examples=("the agent reviews it, then the assistant scores it",),
+        fix="If the clear word is right, repeat it. Don't rotate terms for style.",
+        regex=None,  # needs judgment — no precise regex exists
+    ),
+    Pattern(
+        key="colon_reveal",
+        name="Colon reveal",
+        examples=("The detail that makes it work: a separate agent grades it.",),
+        fix="Rewrite as a plain sentence. Colons are for lists, labels, and quotes.",
+        regex=None,  # would false-positive on every Markdown label and bulleted lead-in
+    ),
+)
+
+
+def register_list() -> str:
+    """The overused register as prompts should show it: lemmas with their glosses."""
+    return ", ".join(f"{r.lemma} {r.gloss}".strip() for r in AI_REGISTER)
+
+
+def _examples(p: Pattern) -> str:
+    return "; ".join(f'"{e}"' for e in p.examples)
+
+
+def tell_regex_source() -> str:
+    """Alternation source for the deterministic tell detector (scoring.py compiles it
+    with re.I). Judge-only patterns (regex=None) are excluded."""
+    return "|".join(p.regex for p in PATTERNS if p.regex)
+
+
+def tell_examples_summary(limit: int = 6) -> str:
+    """A short, UI-facing list of construction shapes for the score explanation."""
+    shown = [p for p in PATTERNS if p.regex][:limit]
+    return ", ".join(f'"{p.examples[0]}"' for p in shown)
+
+
+# Compiled once at import time (not per call) so `matched_pattern_examples` stays
+# cheap enough to run on every readability score — each entry is one pattern's own
+# regex, individually compiled, so we can tell WHICH pattern matched rather than only
+# THAT something in the combined alternation did.
+_COMPILED_PATTERNS: tuple[tuple[Pattern, re.Pattern], ...] = tuple(
+    (p, re.compile(p.regex, re.I | re.M)) for p in PATTERNS if p.regex
+)
+
+
+def matched_pattern_examples(text: str, limit: int = 4) -> str:
+    """Which formulaic constructions actually fired in `text`, for a score
+    explanation that names the real offenders instead of a fixed sample (see
+    `tell_examples_summary`, whose first-N-in-declaration-order list can never
+    surface anything past its cutoff). Empty string when nothing matched."""
+    matched = [p for p, rx in _COMPILED_PATTERNS if rx.search(text)]
+    if not matched:
+        return ""
+    shown = ", ".join(f'"{p.examples[0]}"' for p in matched[:limit])
+    return shown + (", …" if len(matched) > limit else "")
+
+
+SAMPLE_LEMMAS: tuple[str, ...] = (
+    "delve", "leverage", "robust", "seamless", "elevate",
+)
+
+
+def register_sample(limit: int = 5) -> str:
+    """A short slash-joined sample of the register, for UI-facing score explanations
+    where the full list would be far too long. Rendered from the fixed, curated
+    SAMPLE_LEMMAS rather than AI_REGISTER declaration order, so it doesn't silently
+    drift to whatever the least-representative words happen to be added first."""
+    return "/".join(SAMPLE_LEMMAS[:limit])
+
+
+def writer_block() -> str:
+    """Prescriptive "don't write this" block for the writer and LinkedIn prompts."""
+    lines = [
+        "### Overused words (worst when stacked)",
+        f"- Avoid this register: {register_list()}.",
+        "- Any one can be fine in isolation; never reach for several in a paragraph. "
+        "Prefer plain, concrete words.",
+        "",
+        "### Constructions to avoid",
+    ]
+    lines += [f"- {p.name}: {_examples(p)}. {p.fix}" for p in PATTERNS]
+    return "\n".join(lines)
+
+
+def judge_taxonomy() -> str:
+    """Detection framing for the readability judge — every pattern, including the
+    judgment-only ones the regexes deliberately skip."""
+    lines = [f"- Overused register: {register_list()}."]
+    lines += [f"- {p.name}: {_examples(p)}" for p in PATTERNS]
+    return "\n".join(lines)
+
+
+# The reviser runs in a loop that chases a score, and loops like that sand prose smooth:
+# each pass has a local reason to rewrite one more sentence. This rule is what keeps a
+# slop fix from becoming a rewrite — it rides on every instruction the reviser gets.
+MINIMUM_EDIT_RULE = (
+    "Rewrite ONLY the flagged span. Leave clean sentences alone, and never trade a "
+    "concrete detail (a number, name, date, version, or mechanism) for smoother "
+    "phrasing — losing a specific is worse than the tell you removed."
+)
+
+
+def fix_instruction(signal_key: str) -> str:
+    """The surgical rewrite instruction for a readability signal this module owns.
+
+    Raises KeyError for `brand_voice` and `em_dashes`: those aren't part of the prose
+    taxonomy (one is brand-specific, the other is punctuation policy), so they stay
+    hand-written in revise.py. Failing loudly beats returning plausible generic text.
+    """
+    if signal_key == "ai_vocabulary":
+        body = (
+            f"Replace AI-register words ({register_list()}) with plain, specific "
+            "language."
+        )
+    elif signal_key == "tell_phrases":
+        # Name EVERY detected construction, not a sample. Detection widened to 21 shapes
+        # but a capped list left the reviser blind to the ones it wasn't told about, so a
+        # targeted "formulaic constructions" refine silently under-fixed them (e.g. a
+        # throat-clearing opener the scorer flags but the instruction never described).
+        # This renders once per matched paragraph on the surgical hot path; the fuller
+        # ~1.3 KB list is the accepted cost of detection and fix-guidance staying in sync.
+        shapes = "; ".join(f'"{p.examples[0]}"' for p in PATTERNS if p.regex)
+        body = f"Rewrite formulaic AI constructions in a natural voice: {shapes}."
+    elif signal_key == "transitions":
+        listed = ", ".join(w.capitalize() for w in EMPTY_TRANSITIONS)
+        body = (
+            f"Cut filler transitions ({listed}); let the sentences connect directly."
+        )
+    else:
+        raise KeyError(signal_key)
+    return f"{body} {MINIMUM_EDIT_RULE}"

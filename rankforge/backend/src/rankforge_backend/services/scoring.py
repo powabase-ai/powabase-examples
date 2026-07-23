@@ -15,6 +15,7 @@ from ..powabase import PowabaseClient
 from ..util import extract_json
 from . import brief as brief_svc
 from . import generation as gen_svc
+from . import prose_style
 from . import templates as templates_svc
 from .agents import ensure_agent
 
@@ -24,35 +25,25 @@ READABILITY_TARGET = 80
 
 # AI "tells" — the register/constructions search engines now penalize as machine-
 # written. Detected deterministically (density matters more than any single use).
-_AI_WORDS = (
-    "delve", "delved", "delving", "tapestry", "realm", "realms", "landscape",
-    "leverage", "leverages", "leveraging", "leveraged", "robust", "seamless",
-    "seamlessly", "navigate", "navigating", "underscore", "underscores",
-    "underscoring", "foster", "fosters", "fostering", "harness", "harnessing",
-    "elevate", "elevates", "elevating", "unlock", "unlocks", "unlocking",
-    "embark", "embarking", "testament", "pivotal", "crucial", "vibrant",
-    "boasts", "boasting", "nestled", "genuinely",
-)
-_AI_WORD_RE = re.compile(r"(?<![a-z])(?:" + "|".join(_AI_WORDS) + r")(?![a-z])", re.I)
-_TELL_RE = re.compile(
-    r"it['’]s not (?:just|merely)\b"
-    r"|\bisn'?t (?:just|merely)\b"
-    # The antithesis reframe: "X isn't A. It's B" / "isn't about A, it's about B" —
-    # negate-then-reveal-the-real-truth. A heavy AI tic ("the way forward isn't more
-    # tools. It's better process."). Bounded span so it can't run away. REQUIRE the
-    # contraction apostrophe in the payoff so possessive "its" ("…isn't down, but its
-    # replacement is") isn't a false positive.
-    r"|\b(?:is|are|was|were)(?:n'?t| not)\b[^.!?\n]{0,70}[,.!?—–-]\s*it['’]s\b"
-    r"|\bwhether you'?re an?\b"
-    r"|\bin today'?s\b.{0,40}?\b(?:world|landscape|era|age)\b"
-    r"|\blet'?s (?:dive in|explore|take a look|unpack)\b"
-    r"|\bbuckle up\b"
-    r"|\bin conclusion\b"
-    r"|\bat the end of the day\b",
+# The taxonomy itself lives in prose_style so the detector and every prompt stay in
+# sync; only the compilation is here.
+_AI_WORDS = prose_style.AI_WORDS
+_AI_WORD_RE = re.compile(
+    r"(?<![a-z])(?:" + "|".join(re.escape(w) for w in _AI_WORDS) + r")(?![a-z])",
     re.I,
 )
+# re.M so a pattern can anchor on line start (recap openers like "Ultimately,").
+# Harmless to every other pattern — none of them use ^ or $.
+_TELL_RE = re.compile(prose_style.tell_regex_source(), re.I | re.M)
+# Compiled from prose_style.EMPTY_TRANSITIONS (mirroring _AI_WORD_RE above) so the
+# DETECTOR genuinely can't drift from that list. The six prompt/explanation sites that
+# also mention these four words are still hand-written — see the comment on
+# EMPTY_TRANSITIONS in prose_style.py for what that does and doesn't cover.
 _EMPTY_TRANSITION_RE = re.compile(
-    r"(?<![a-z])(?:moreover|furthermore|additionally|that said)(?![a-z])", re.I
+    r"(?<![a-z])(?:"
+    + "|".join(re.escape(w) for w in prose_style.EMPTY_TRANSITIONS)
+    + r")(?![a-z])",
+    re.I,
 )
 # Detached brand voice: the brand's OWN blog referring to itself as a third party
 # ("the vendor asserts…") or hedging its own docs ("according to <Brand>'s own docs…").
@@ -386,17 +377,23 @@ def score_readability(content_md: str, llm: dict | None) -> dict:
     sig.append(_signal(
         "ai_vocabulary", "AI-tell vocabulary", ai_score, 0.16,
         f"{ai_hits} flagged word(s) (~{ai_density:.1f}/1k) from the "
-        "delve/leverage/robust/seamless/elevate register.",
+        f"{prose_style.register_sample()} register.",
         ["Swap the flagged words for plain language; never stack several in a "
          "paragraph."] if ai_score < 80 else []))
 
     tell_hits = len(_TELL_RE.findall(content_md))
-    tell_score = max(0.0, 100.0 - tell_hits * 25)
+    # 15 per hit, not 25: the steeper slope was calibrated against 9 constructions and
+    # would drive articles to 0 now the taxonomy carries ~21. The gate fires below 40,
+    # so 4 hits sits on the boundary and 5 trips it.
+    tell_score = max(0.0, 100.0 - tell_hits * 15)
+    # Name the constructions that actually fired, not a fixed first-N sample — the
+    # latter (tell_examples_summary) is a declaration-order slice, so it can never
+    # surface any of the patterns past its cutoff no matter what the article contains.
+    matched_examples = prose_style.matched_pattern_examples(content_md)
+    tell_examples = matched_examples or f"{prose_style.tell_examples_summary()}, …"
     sig.append(_signal(
         "tell_phrases", "Formulaic constructions", tell_score, 0.14,
-        f"{tell_hits} AI-tell construction(s) (\"it's not just X…\", the \"X isn't A, "
-        "it's B\" reframe, \"whether you're a…\", \"in today's… world\", \"let's dive "
-        "in\", \"in conclusion\").",
+        f"{tell_hits} AI-tell construction(s) ({tell_examples}).",
         ["Rewrite the formulaic openers/closers in a natural voice; for \"X isn't A, "
          "it's B\", just state what it is."]
         if tell_hits else []))
@@ -575,11 +572,11 @@ knowledgeable person clearly wrote it; low means it reads as machine-generated.
 
 ## Axes
 - human_voice — a real point of view, confident unqualified claims, and concrete \
-specificity (numbers, names, dates, examples). Penalize: the AI register (delve, \
-leverage, robust, seamless, navigate, elevate, unlock, pivotal, crucial, vibrant, \
-boasts, nestled…); formulaic constructions ("it's not just X, it's Y"; "whether \
-you're a beginner or a pro"; "in today's fast-paced world"; "let's dive in"; "in \
-conclusion"); and generic, hedge-everything, specificity-free prose.
+specificity (numbers, names, dates, examples). Penalize every pattern below:
+
+""" + prose_style.judge_taxonomy() + """
+- Also generic, hedge-everything, specificity-free prose.
+
 - flow — natural rhythm (a mix of short and long sentences, uneven section lengths) \
 that reads smoothly, NOT the mechanical evenness and over-even paragraphing of \
 machine text. Penalize excessive em-dashes and filler transitions (moreover, \
