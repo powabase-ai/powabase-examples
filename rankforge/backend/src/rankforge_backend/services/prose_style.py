@@ -504,13 +504,14 @@ def fix_instruction(signal_key: str) -> str:
             "language."
         )
     elif signal_key == "tell_phrases":
-        # Capped the same way tell_examples_summary() is: this renders once per
-        # matched paragraph on the surgical-rewrite hot path, so the full ~21-shape
-        # list (~914 chars) is a real cost at 30 paragraphs/iteration. A sample reads
-        # just as actionably as an exhaustive list — the reviser only needs the shape.
-        shown = [p for p in PATTERNS if p.regex][:8]
-        shapes = "; ".join(f'"{p.examples[0]}"' for p in shown)
-        body = f"Rewrite formulaic AI constructions in a natural voice: {shapes}; …"
+        # Name EVERY detected construction, not a sample. Detection widened to 21 shapes
+        # but a capped list left the reviser blind to the ones it wasn't told about, so a
+        # targeted "formulaic constructions" refine silently under-fixed them (e.g. a
+        # throat-clearing opener the scorer flags but the instruction never described).
+        # This renders once per matched paragraph on the surgical hot path; the fuller
+        # ~1.3 KB list is the accepted cost of detection and fix-guidance staying in sync.
+        shapes = "; ".join(f'"{p.examples[0]}"' for p in PATTERNS if p.regex)
+        body = f"Rewrite formulaic AI constructions in a natural voice: {shapes}."
     elif signal_key == "transitions":
         listed = ", ".join(w.capitalize() for w in EMPTY_TRANSITIONS)
         body = (

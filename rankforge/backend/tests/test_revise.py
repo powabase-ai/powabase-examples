@@ -724,6 +724,17 @@ def test_fix_instructions_carry_the_minimum_edit_guardrail():
         assert prose_style.MINIMUM_EDIT_RULE in prose_style.fix_instruction(key), key
 
 
+def test_tell_phrases_fix_instruction_names_every_detected_construction():
+    """Detection and fix-guidance must not drift: the scorer flags 21 constructions, so
+    the reviser has to be told about all 21. A capped sample left it blind to the ones
+    it never named — a targeted 'formulaic constructions' refine then couldn't act on a
+    throat-clearing opener or a faux-insight setup because nothing described them."""
+    instr = prose_style.fix_instruction("tell_phrases")
+    for p in prose_style.PATTERNS:
+        if p.regex:
+            assert p.examples[0] in instr, f"reviser not told about {p.key}"
+
+
 def test_fix_instruction_rejects_signals_it_does_not_own():
     """brand_voice and em_dashes are hand-written in revise.py — they aren't part of
     the shared taxonomy, and silently returning generic text for them would be worse
