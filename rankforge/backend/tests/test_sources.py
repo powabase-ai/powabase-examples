@@ -224,3 +224,41 @@ def test_source_page_image_rejects_negative_index(monkeypatch):
     monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: True)
     resp = _client().get(f"/api/sources/{SID}/pages/-1")
     assert resp.status_code == 422
+
+
+# --- markdown (the /markdown proxy: failed/extracting sources have no derivative) ---
+def test_source_markdown_ok(monkeypatch):
+    monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: True)
+    pb = MagicMock()
+    pb.get_source_markdown = AsyncMock(return_value="# Title\n\nreal content")
+    resp = _client(pb=pb).get(f"/api/sources/{SID}/markdown")
+    assert resp.status_code == 200
+    assert resp.json() == {"source_id": SID, "markdown": "# Title\n\nreal content"}
+
+
+def test_source_markdown_empty_when_no_derivative(monkeypatch):
+    """A failed/extracting scrape has no markdown derivative — Powabase 404s. That's a
+    normal empty state, so the route returns empty markdown (200), NOT a 502."""
+    monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: True)
+    pb = MagicMock()
+    pb.get_source_markdown = AsyncMock(
+        side_effect=PowabaseError(404, '{"error":"No markdown derivative found"}')
+    )
+    resp = _client(pb=pb).get(f"/api/sources/{SID}/markdown")
+    assert resp.status_code == 200
+    assert resp.json() == {"source_id": SID, "markdown": ""}
+
+
+def test_source_markdown_502_on_upstream_fault(monkeypatch):
+    """A genuine upstream error (5xx) is still a gateway fault → 502, not an empty body."""
+    monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: True)
+    pb = MagicMock()
+    pb.get_source_markdown = AsyncMock(side_effect=PowabaseError(500, "boom"))
+    resp = _client(pb=pb).get(f"/api/sources/{SID}/markdown")
+    assert resp.status_code == 502
+
+
+def test_source_markdown_404_cross_org(monkeypatch):
+    monkeypatch.setattr(svc, "source_in_org", lambda db, sid, org: False)
+    resp = _client().get(f"/api/sources/{SID}/markdown")
+    assert resp.status_code == 404
