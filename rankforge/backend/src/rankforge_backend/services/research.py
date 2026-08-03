@@ -521,10 +521,13 @@ def list_brand_sources(db: Database, business_id: UUID) -> list[dict[str, Any]]:
     )
 
 
-async def _scrape_one(
-    client: PowabaseClient, url: str, title_by_url: dict[str, str]
-) -> dict[str, Any] | None:
-    """Import one competitor URL as a Source, wait for extraction, build a teardown."""
+async def _scrape_attempt(
+    client: PowabaseClient, url: str
+) -> tuple[str | None, str | None, str, str | None]:
+    """One import + poll cycle. Returns (source_id, status, markdown, error_message).
+    source_id is None only if the import produced no source at all. Paced so scrape
+    starts stay spread out."""
+    await _scrape_pacer.wait()
     try:
         imp = await client.import_url(url)
         source_id = (imp.get("sources") or [{}])[0].get("id")
@@ -532,12 +535,14 @@ async def _scrape_one(
         body = e.body if isinstance(e.body, dict) else {}
         source_id = (body.get("duplicate") or {}).get("id")
     if not source_id:
-        return None
+        return None, None, "", None
 
     status = None
+    error_message = None
     for _ in range(40):  # poll up to ~80s
         src = await client.get_source(source_id)
         status = src.get("extraction_status")
+        error_message = src.get("error_message")
         if status in EXTRACTION_TERMINAL:
             break
         await asyncio.sleep(2)
@@ -548,6 +553,35 @@ async def _scrape_one(
             md = await client.get_source_markdown(source_id)
         except PowabaseError:
             md = ""
+    return source_id, status, md, error_message
+
+
+async def _scrape_one(
+    client: PowabaseClient, url: str, title_by_url: dict[str, str]
+) -> dict[str, Any] | None:
+    """Import one competitor URL as a Source, wait for extraction, build a teardown.
+
+    A TRANSIENT extraction failure (Firecrawl 429/5xx — see _is_transient_failure) is
+    retried up to MAX_SCRAPE_RETRIES times with backoff, re-importing the URL to
+    re-dispatch extraction. Permanent failures (dead/blocked page) are not retried."""
+    source_id, status, md, error_message = await _scrape_attempt(client, url)
+    if source_id is None:
+        return None
+    attempts = 1
+
+    for i in range(MAX_SCRAPE_RETRIES):
+        if status != "failed" or not _is_transient_failure(error_message):
+            break
+        delay = RETRY_BACKOFF[i]
+        log.info(
+            "transient scrape failure — retrying %s in %.0fs (attempt %d/%d)",
+            url, delay, i + 1, MAX_SCRAPE_RETRIES,
+        )
+        await asyncio.sleep(delay)
+        # Re-import re-dispatches extraction on the same (URL-deduped) source.
+        new_sid, status, md, error_message = await _scrape_attempt(client, url)
+        source_id = new_sid or source_id
+        attempts += 1
 
     teardown = CompetitorTeardown(
         url=url,
@@ -561,6 +595,7 @@ async def _scrape_one(
         "status": status,
         "source_id": source_id,
         "url": url,
+        "attempts": attempts,
         # A short excerpt of the real content so the source-quality judge can assess more
         # than the domain name (a thin SEO blog and an authoritative guide look identical
         # from URL + title alone).

@@ -415,3 +415,51 @@ async def test_scrape_pacer_spaces_consecutive_starts():
 
 def test_scrape_concurrency_lowered():
     assert svc.SCRAPE_CONCURRENCY == 3
+
+
+def _failed(msg):
+    return {"extraction_status": "failed", "error_message": msg}
+
+
+_EXTRACTED = {"extraction_status": "extracted", "error_message": None}
+
+
+async def test_scrape_one_retries_transient_then_succeeds(monkeypatch):
+    monkeypatch.setattr(svc.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(svc._scrape_pacer, "wait", AsyncMock())
+    client = MagicMock()
+    client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
+    # attempt 1 polls once → failed(429); attempt 2 polls once → extracted
+    client.get_source = AsyncMock(
+        side_effect=[_failed("Client error '429 Too Many Requests'"), _EXTRACTED]
+    )
+    client.get_source_markdown = AsyncMock(return_value="# Title\n\nreal content here")
+    out = await svc._scrape_one(client, "https://x.com/a", {})
+    assert client.import_url.await_count == 2
+    assert out["status"] == "extracted"
+    assert out["attempts"] == 2
+    assert (out["teardown"].word_count or 0) > 0
+
+
+async def test_scrape_one_does_not_retry_permanent_failure(monkeypatch):
+    monkeypatch.setattr(svc.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(svc._scrape_pacer, "wait", AsyncMock())
+    client = MagicMock()
+    client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
+    client.get_source = AsyncMock(return_value=_failed("Client error '404 Not Found'"))
+    out = await svc._scrape_one(client, "https://x.com/dead", {})
+    assert client.import_url.await_count == 1
+    assert out["status"] == "failed"
+    assert out["attempts"] == 1
+
+
+async def test_scrape_one_gives_up_after_max_retries(monkeypatch):
+    monkeypatch.setattr(svc.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(svc._scrape_pacer, "wait", AsyncMock())
+    client = MagicMock()
+    client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
+    client.get_source = AsyncMock(return_value=_failed("429 Too Many Requests"))
+    out = await svc._scrape_one(client, "https://x.com/rl", {})
+    assert client.import_url.await_count == 1 + svc.MAX_SCRAPE_RETRIES
+    assert out["status"] == "failed"
+    assert out["attempts"] == 1 + svc.MAX_SCRAPE_RETRIES
