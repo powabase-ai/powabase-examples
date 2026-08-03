@@ -45,25 +45,36 @@ MAX_BACKFILL = 12
 # DISTINCT sources to cite (otherwise the writer re-cites the same one or two).
 DEPTH_PRESETS = {"quick": (10, 6), "standard": (20, 12), "deep": (40, 22)}
 
-# How many competitor pages to import/poll/extract concurrently. Kept well below the
-# original 8 so the simultaneous Firecrawl dispatch doesn't trip its rate limit;
-# combined with the pacer below, scrape starts stay spread out. Each page polls ~80s.
+# How many competitor pages to import/poll/extract concurrently. Concurrency exists at
+# all because each page polls up to ~80s, so sequential scraping ≈ the sum; bounded
+# concurrency ≈ the slowest single page. Kept moderate (not the original 8) so the
+# simultaneous Firecrawl dispatch doesn't trip its rate limit; the pacer below further
+# spreads scrape starts.
 SCRAPE_CONCURRENCY = 5
 
 # --- scrape resilience (Firecrawl rate limits) -------------------------------------
 # Powabase runs each scrape through Firecrawl in a background job, so a burst of
 # concurrent imports rate-limits it and the source ends `failed` with a 429/5xx
 # error_message — a failure RankForge never sees as an HTTP status. We dispatch gently
-# (see _ScrapePacer) and retry the TRANSIENT failures (re-import re-runs extraction).
+# (see _ScrapePacer) and retry the TRANSIENT failures. A retry re-imports the URL, which
+# creates a FRESH source and re-runs extraction (verified against a live project — a
+# re-import of a failed URL does NOT re-extract in place), so the stale failed source is
+# deleted first to avoid orphaning sources project-wide.
 MIN_SCRAPE_INTERVAL = 0.75   # min seconds between scrape dispatches (_ScrapePacer)
 MAX_SCRAPE_RETRIES = 2       # extra attempts after the first, for transient failures
-RETRY_BACKOFF = (5.0, 15.0)  # backoff before retry 1, retry 2 (len == MAX_SCRAPE_RETRIES)
+# Backoff before retry 1, retry 2, … The index is clamped to the last element, so this
+# tuple may be shorter than MAX_SCRAPE_RETRIES without an IndexError.
+RETRY_BACKOFF = (5.0, 15.0)
+# Cap total retries across a whole run so a run that is being broadly rate-limited can't
+# balloon unbounded (each retry adds a poll budget + backoff). Shared by the main scrape
+# loop and the sequential backfill.
+MAX_RUN_RETRIES = 25
 
 # Substrings marking a TRANSIENT extraction failure worth retrying (rate limit / upstream
-# blip). Anything else (404, blocked, parse error, no message) is permanent and never
-# retried, so a genuinely dead page is not re-scraped.
+# blip / our own poll timeout). Anything else (404, blocked, parse error, no message) is
+# permanent and never retried, so a genuinely dead page is not re-scraped.
 _TRANSIENT_MARKERS = (
-    "429", "too many requests", "502", "bad gateway",
+    "429", "too many requests", "rate limit", "502", "bad gateway",
     "503", "service unavailable", "504", "gateway timeout",
     "timeout", "timed out",
 )
@@ -75,6 +86,21 @@ def _is_transient_failure(error_message: str | None) -> bool:
         return False
     low = error_message.lower()
     return any(m in low for m in _TRANSIENT_MARKERS)
+
+
+class _RetryBudget:
+    """A run-scoped cap on total scrape retries, so a broadly rate-limited run can't
+    balloon into an unbounded chain of poll-budget + backoff waits. `take()` returns
+    False once the budget is spent. Not thread-shared — one run, one event loop."""
+
+    def __init__(self, total: int) -> None:
+        self._remaining = total
+
+    def take(self) -> bool:
+        if self._remaining <= 0:
+            return False
+        self._remaining -= 1
+        return True
 
 
 class _ScrapePacer:
@@ -525,8 +551,11 @@ async def _scrape_attempt(
     client: PowabaseClient, url: str
 ) -> tuple[str | None, str | None, str, str | None]:
     """One import + poll cycle. Returns (source_id, status, markdown, error_message).
-    source_id is None only if the import produced no source at all. Paced so scrape
-    starts stay spread out."""
+
+    source_id is None only when the import produced no source (logged). A poll-time
+    upstream error or a poll timeout is degraded to a synthetic transient `failed` so the
+    caller's retry machinery can pick it up — never raised, so one bad poll can't fail the
+    whole `asyncio.gather`. Paced so scrape starts stay spread out."""
     await _scrape_pacer.wait()
     try:
         imp = await client.import_url(url)
@@ -534,36 +563,70 @@ async def _scrape_attempt(
     except PowabaseError as e:
         body = e.body if isinstance(e.body, dict) else {}
         source_id = (body.get("duplicate") or {}).get("id")
+        if not source_id:
+            # The import itself failed with no reusable source (quota/auth/rate limit
+            # after the client's own retries, …). Log it — otherwise a run that imports
+            # nothing reports "done" with zero sources and no trace of why.
+            log.warning("scrape import failed for %s: %s", url, e)
     if not source_id:
         return None, None, "", None
 
     status = None
     error_message = None
     for _ in range(40):  # poll up to ~80s
-        src = await client.get_source(source_id)
+        try:
+            src = await client.get_source(source_id)
+        except PowabaseError as e:
+            # A poll-time upstream error (500/502/504) must NOT propagate into
+            # asyncio.gather and fail the whole run. Degrade to a transient failure so
+            # this one URL retries.
+            log.warning("scrape poll error for %s (%s): %s", url, source_id, e)
+            return source_id, "failed", "", f"poll error: {e}"
         status = src.get("extraction_status")
         error_message = src.get("error_message")
         if status in EXTRACTION_TERMINAL:
             break
         await asyncio.sleep(2)
+    else:
+        # Never reached a terminal status within the poll budget. Treat as a transient
+        # timeout (retry-eligible) instead of silently returning a stuck non-terminal
+        # status that nothing will ever re-poll.
+        log.warning(
+            "scrape poll timed out for %s (%s), last status=%s", url, source_id, status
+        )
+        return source_id, "failed", "", "poll timeout"
 
+    if status == "failed":
+        log.info("scrape failed for %s (%s): %s", url, source_id, error_message)
     md = ""
     if status == "extracted":
         try:
             md = await client.get_source_markdown(source_id)
-        except PowabaseError:
+        except PowabaseError as e:
+            # Extraction succeeded but the markdown fetch didn't — the teardown ends
+            # empty. Log it so the run summary's "ok" count isn't silently inflated.
+            log.warning(
+                "markdown fetch failed for extracted source %s (%s): %s",
+                url, source_id, e,
+            )
             md = ""
     return source_id, status, md, error_message
 
 
 async def _scrape_one(
-    client: PowabaseClient, url: str, title_by_url: dict[str, str]
+    client: PowabaseClient,
+    url: str,
+    title_by_url: dict[str, str],
+    retry_budget: "_RetryBudget | None" = None,
 ) -> dict[str, Any] | None:
     """Import one competitor URL as a Source, wait for extraction, build a teardown.
 
-    A TRANSIENT extraction failure (Firecrawl 429/5xx — see _is_transient_failure) is
-    retried up to MAX_SCRAPE_RETRIES times with backoff, re-importing the URL to
-    re-dispatch extraction. Permanent failures (dead/blocked page) are not retried."""
+    A TRANSIENT failure (Firecrawl 429/5xx, or our own poll timeout — see
+    _is_transient_failure) is retried up to MAX_SCRAPE_RETRIES times with backoff. A
+    retry re-imports the URL, which creates a FRESH source and re-runs extraction; the
+    stale failed source is deleted first (best-effort) so retries don't orphan sources
+    project-wide. Permanent failures (dead/blocked page) are not retried. `retry_budget`,
+    when given, caps total retries across the run."""
     source_id, status, md, error_message = await _scrape_attempt(client, url)
     if source_id is None:
         return None
@@ -572,16 +635,31 @@ async def _scrape_one(
     for i in range(MAX_SCRAPE_RETRIES):
         if status != "failed" or not _is_transient_failure(error_message):
             break
+        if retry_budget is not None and not retry_budget.take():
+            log.info("scrape retry budget exhausted — not retrying %s", url)
+            break
         delay = RETRY_BACKOFF[min(i, len(RETRY_BACKOFF) - 1)]
         log.info(
-            "transient scrape failure — retrying %s in %.0fs (attempt %d/%d)",
-            url, delay, i + 1, MAX_SCRAPE_RETRIES,
+            "transient scrape failure for %s (%s) — retrying in %.0fs (attempt %d/%d)",
+            url, error_message, delay, i + 1, MAX_SCRAPE_RETRIES,
         )
         await asyncio.sleep(delay)
-        # Re-import re-dispatches extraction on the same (URL-deduped) source.
-        new_sid, status, md, error_message = await _scrape_attempt(client, url)
-        source_id = new_sid or source_id
+        new_sid, new_status, new_md, new_err = await _scrape_attempt(client, url)
         attempts += 1
+        if new_sid is None:
+            # The retry's import produced no source — keep the prior failed diagnosis
+            # (status + error_message) and its still-existing source rather than blanking
+            # everything to None. Stop retrying; a failing import won't fix itself here.
+            break
+        # The re-import created a fresh source. Delete the stale one so the run doesn't
+        # leave orphaned failed sources behind (best-effort — a failed delete just leaves
+        # the prior orphan, same as before this fix).
+        if new_sid != source_id:
+            try:
+                await client.delete_source(source_id)
+            except Exception:  # noqa: BLE001 — cleanup is best-effort
+                log.warning("could not delete stale source %s before retry", source_id)
+        source_id, status, md, error_message = new_sid, new_status, new_md, new_err
 
     teardown = CompetitorTeardown(
         url=url,
@@ -654,6 +732,7 @@ async def evaluate_and_prune(
     by_url: dict[str, dict[str, Any]],
     backfill_pool: list[str],
     title_by_url: dict[str, str],
+    retry_budget: "_RetryBudget | None" = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Score the run's sources for authority/trust and SWAP each weak source for a
     higher-authority replacement scraped from spare SERP pages (one bounded round).
@@ -702,7 +781,7 @@ async def evaluate_and_prune(
         )
         fresh: list[dict[str, Any]] = []
         for u in candidates:
-            res = await _scrape_one(client, u, title_by_url)
+            res = await _scrape_one(client, u, title_by_url, retry_budget)
             if res is None:
                 continue
             t = res["teardown"]
@@ -809,12 +888,15 @@ async def run_research_task(
 
         # 2) import competitor URLs as Sources concurrently (bounded), then teardown
         sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+        # One retry budget for the whole run (main scrape + backfill), so a broadly
+        # rate-limited run can't balloon into an unbounded chain of retries.
+        retry_budget = _RetryBudget(MAX_RUN_RETRIES)
         done = 0
 
         async def _scrape_bounded(u: str) -> dict[str, Any] | None:
             nonlocal done
             async with sem:
-                result = await _scrape_one(client, u, title_by_url)
+                result = await _scrape_one(client, u, title_by_url, retry_budget)
             done += 1  # advisory live progress (racy writes are fine)
             # Offload the DB write so it doesn't block the loop these run on.
             try:
@@ -864,6 +946,7 @@ async def run_research_task(
                     r.url for r in search.serp if r.url and r.url not in by_url
                 ],
                 title_by_url=title_by_url,
+                retry_budget=retry_budget,
             )
             log.info("research %s source evaluation: %s", run_id, stats)
         else:

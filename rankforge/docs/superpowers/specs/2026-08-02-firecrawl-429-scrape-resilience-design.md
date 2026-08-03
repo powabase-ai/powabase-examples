@@ -45,9 +45,15 @@ A failed source exposes the failure reason in `error_message` (confirmed against
 data). That lets RankForge classify a failure as transient (retry) vs permanent (leave
 it) without guessing, so retries never re-hammer a dead page.
 
-The user confirmed a second fact: **re-importing the same URL re-runs extraction** on the
-existing source. Recovery therefore needs no new client method — a retry is another
-`import_url(url)` call plus a re-poll.
+A retry re-runs extraction by re-importing the URL — no new client method needed.
+
+> **Correction (post code-review, verified against a live project):** a re-import does
+> NOT re-extract the failed source in place. `import_url` on a failed URL returns **200
+> with a brand-new source id** and runs a fresh extraction on that new source (there is
+> no dedup against a failed source). So the recovery arm works, but each retry would
+> orphan the previous failed source. The shipped code therefore **deletes the stale
+> failed source before adopting the fresh one**, and caps total retries per run with a
+> `_RetryBudget`. See the plan's status banner for the full deviation list.
 
 ## Design
 

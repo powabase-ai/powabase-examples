@@ -1,6 +1,6 @@
 """Research — JSON extraction (unit) + async route wiring (hermetic)."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 from uuid import UUID
 
 import pytest
@@ -174,7 +174,7 @@ async def test_evaluate_prunes_low_and_backfills(monkeypatch):
     async def fake_drop(_client, _db, _run, source_id):
         dropped.append(source_id)
 
-    async def fake_scrape(_client, url, _titles):
+    async def fake_scrape(_client, url, _titles, _budget=None):
         return {
             "teardown": svc.CompetitorTeardown(
                 url=url, title="Fresh", word_count=900, headings=[],
@@ -424,45 +424,143 @@ def _failed(msg):
 _EXTRACTED = {"extraction_status": "extracted", "error_message": None}
 
 
-async def test_scrape_one_retries_transient_then_succeeds(monkeypatch):
-    monkeypatch.setattr(svc.asyncio, "sleep", AsyncMock())
-    monkeypatch.setattr(svc._scrape_pacer, "wait", AsyncMock())
+def _scrape_client(import_ids, get_source, md="# T\n\nreal words here"):
+    """A PowabaseClient mock for scrape tests. `import_ids`: source ids returned by
+    successive import_url calls (a fresh id per call models a real re-import). `get_source`:
+    a single return value or a list side_effect for the poll(s)."""
     client = MagicMock()
-    client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
-    # attempt 1 polls once → failed(429); attempt 2 polls once → extracted
-    client.get_source = AsyncMock(
-        side_effect=[_failed("Client error '429 Too Many Requests'"), _EXTRACTED]
+    client.import_url = AsyncMock(
+        side_effect=[{"sources": [{"id": i}]} for i in import_ids]
     )
-    client.get_source_markdown = AsyncMock(return_value="# Title\n\nreal content here")
+    client.get_source = AsyncMock(
+        **({"side_effect": get_source} if isinstance(get_source, list)
+           else {"return_value": get_source})
+    )
+    client.get_source_markdown = AsyncMock(return_value=md)
+    client.delete_source = AsyncMock()
+    return client
+
+
+def _patch_scrape_waits(monkeypatch):
+    """Patch out the poll/backoff sleep and the pacer so scrape tests run instantly.
+    Returns (sleep_mock, pacer_wait_mock) for asserting on."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(svc.asyncio, "sleep", sleep)
+    wait = AsyncMock()
+    monkeypatch.setattr(svc._scrape_pacer, "wait", wait)
+    return sleep, wait
+
+
+async def test_scrape_one_retries_transient_then_succeeds(monkeypatch):
+    _, wait = _patch_scrape_waits(monkeypatch)
+    # attempt 1 polls s1 → failed(429); the re-import makes a FRESH source s2 that
+    # extracts, and the stale s1 is deleted so it isn't orphaned.
+    client = _scrape_client(
+        ["s1", "s2"], [_failed("Client error '429 Too Many Requests'"), _EXTRACTED]
+    )
     out = await svc._scrape_one(client, "https://x.com/a", {})
     assert client.import_url.await_count == 2
+    client.delete_source.assert_awaited_once_with("s1")
     assert out["status"] == "extracted"
+    assert out["source_id"] == "s2"
     assert out["attempts"] == 2
     assert (out["teardown"].word_count or 0) > 0
+    assert wait.await_count == client.import_url.await_count  # pacer gates every import
 
 
 async def test_scrape_one_does_not_retry_permanent_failure(monkeypatch):
-    monkeypatch.setattr(svc.asyncio, "sleep", AsyncMock())
-    monkeypatch.setattr(svc._scrape_pacer, "wait", AsyncMock())
-    client = MagicMock()
-    client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
-    client.get_source = AsyncMock(return_value=_failed("Client error '404 Not Found'"))
+    _patch_scrape_waits(monkeypatch)
+    client = _scrape_client(["s1"], _failed("Client error '404 Not Found'"))
     out = await svc._scrape_one(client, "https://x.com/dead", {})
     assert client.import_url.await_count == 1
+    client.delete_source.assert_not_awaited()
     assert out["status"] == "failed"
     assert out["attempts"] == 1
 
 
 async def test_scrape_one_gives_up_after_max_retries(monkeypatch):
-    monkeypatch.setattr(svc.asyncio, "sleep", AsyncMock())
-    monkeypatch.setattr(svc._scrape_pacer, "wait", AsyncMock())
-    client = MagicMock()
-    client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
-    client.get_source = AsyncMock(return_value=_failed("429 Too Many Requests"))
+    sleep, _ = _patch_scrape_waits(monkeypatch)
+    client = _scrape_client(["s1", "s2", "s3"], _failed("429 Too Many Requests"))
     out = await svc._scrape_one(client, "https://x.com/rl", {})
     assert client.import_url.await_count == 1 + svc.MAX_SCRAPE_RETRIES
+    # each retry deleted the prior stale source (no orphans left behind)
+    assert client.delete_source.await_args_list == [call("s1"), call("s2")]
     assert out["status"] == "failed"
     assert out["attempts"] == 1 + svc.MAX_SCRAPE_RETRIES
+    # backoff used the CONFIGURED values, not a mocked-away sleep(0)
+    slept = [c.args[0] for c in sleep.await_args_list]
+    assert 5.0 in slept and 15.0 in slept
+
+
+async def test_scrape_one_preserves_status_when_retry_import_fails(monkeypatch):
+    _patch_scrape_waits(monkeypatch)
+    client = MagicMock()
+    client.import_url = AsyncMock(side_effect=[
+        {"sources": [{"id": "s1"}]},
+        svc.PowabaseError(402, {"error": "quota exhausted"}),  # retry import fails
+    ])
+    client.get_source = AsyncMock(return_value=_failed("429 Too Many Requests"))
+    client.get_source_markdown = AsyncMock(return_value="")
+    client.delete_source = AsyncMock()
+    out = await svc._scrape_one(client, "https://x.com/a", {})
+    # the retry's import produced no source → keep the prior failed source + status,
+    # never a NULL status, and don't delete the source we fell back to.
+    assert out["status"] == "failed"
+    assert out["source_id"] == "s1"
+    assert out["attempts"] == 2
+    client.delete_source.assert_not_awaited()
+
+
+async def test_scrape_one_respects_retry_budget(monkeypatch):
+    _patch_scrape_waits(monkeypatch)
+    client = _scrape_client(["s1", "s2", "s3"], _failed("429 Too Many Requests"))
+    out = await svc._scrape_one(client, "https://x.com/rl", {}, svc._RetryBudget(1))
+    assert client.import_url.await_count == 2  # first attempt + one budgeted retry
+    assert out["attempts"] == 2
+
+
+async def test_scrape_one_clamps_backoff_when_retries_exceed_schedule(monkeypatch):
+    # If MAX_SCRAPE_RETRIES is ever bumped past len(RETRY_BACKOFF), PRODUCTION must not
+    # IndexError — this exercises the clamp in the code, not just in the test.
+    sleep, _ = _patch_scrape_waits(monkeypatch)
+    monkeypatch.setattr(svc, "MAX_SCRAPE_RETRIES", 3)  # RETRY_BACKOFF stays len 2
+    client = _scrape_client(["s1", "s2", "s3", "s4"], _failed("429 Too Many Requests"))
+    out = await svc._scrape_one(client, "https://x.com/rl", {})
+    assert out["attempts"] == 4  # 1 + 3 retries, no IndexError
+    slept = [c.args[0] for c in sleep.await_args_list]
+    assert slept.count(15.0) >= 2  # 2nd and 3rd retry both clamp to the last backoff
+
+
+async def test_scrape_attempt_degrades_poll_error_to_transient(monkeypatch):
+    _patch_scrape_waits(monkeypatch)
+    client = MagicMock()
+    client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
+    client.get_source = AsyncMock(side_effect=svc.PowabaseError(502, "bad gateway"))
+    sid, status, md, err = await svc._scrape_attempt(client, "https://x.com/a")
+    # a poll-time upstream error degrades to a retry-eligible transient failure,
+    # never raised (which would fail the whole asyncio.gather).
+    assert sid == "s1" and status == "failed" and md == ""
+    assert svc._is_transient_failure(err)
+
+
+async def test_scrape_attempt_degrades_poll_timeout_to_transient(monkeypatch):
+    _patch_scrape_waits(monkeypatch)
+    client = MagicMock()
+    client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
+    client.get_source = AsyncMock(
+        return_value={"extraction_status": "extracting", "error_message": None}
+    )
+    sid, status, md, err = await svc._scrape_attempt(client, "https://x.com/slow")
+    assert status == "failed" and err == "poll timeout"
+    assert svc._is_transient_failure(err)
+
+
+async def test_scrape_attempt_returns_none_on_import_failure(monkeypatch):
+    _patch_scrape_waits(monkeypatch)
+    client = MagicMock()
+    client.import_url = AsyncMock(side_effect=svc.PowabaseError(402, {"error": "quota"}))
+    sid, status, _md, _err = await svc._scrape_attempt(client, "https://x.com/a")
+    assert sid is None and status is None
 
 
 def test_scrape_summary_counts_ok_recovered_failed():
@@ -473,6 +571,11 @@ def test_scrape_summary_counts_ok_recovered_failed():
         None,                                       # import produced no source
     ]
     assert svc._scrape_summary(results) == (2, 1, 2)
+
+
+def test_scrape_summary_edge_cases():
+    assert svc._scrape_summary([]) == (0, 0, 0)
+    assert svc._scrape_summary([None, None]) == (0, 0, 2)
 
 
 def test_retry_backoff_index_is_clamped():

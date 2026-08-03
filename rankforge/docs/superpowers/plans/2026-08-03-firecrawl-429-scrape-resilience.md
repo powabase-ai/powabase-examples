@@ -1,5 +1,14 @@
 # Research scrape resilience (Firecrawl 429/5xx) — Implementation Plan
 
+> **STATUS: EXECUTED, then revised in code review — this plan is a historical record, not a build instruction. Do not re-execute it.** The shipped code deviates from the steps below:
+> - `SCRAPE_CONCURRENCY` is **5**, not 3 (chosen after measuring the clean-run latency cost).
+> - `RETRY_BACKOFF` indexing is **clamped** (`RETRY_BACKOFF[min(i, len-1)]`), so the tuple may be shorter than `MAX_SCRAPE_RETRIES`.
+> - The summary log says **"not extracted"**, not "failed permanently".
+> - **Re-import creates a NEW source and re-runs extraction** (verified against a live project) — it does NOT re-extract the failed source in place, as this plan assumed. So a retry now **deletes the stale failed source first** to avoid orphaning it, and a run-level `_RetryBudget` (`MAX_RUN_RETRIES`) caps total retries.
+> - `_scrape_attempt` now **logs and degrades** import errors, poll-time upstream errors, poll timeouts, and markdown-fetch failures (a poll error/timeout becomes a retry-eligible transient failure rather than raising into `asyncio.gather` and failing the whole run).
+>
+> Line numbers and absolute paths below are from the author's machine and may be stale.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop research scrapes from silently dropping URLs to Firecrawl rate limits — dispatch gentler, and retry the transiently-failed sources instead of losing them.
