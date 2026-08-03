@@ -414,7 +414,7 @@ async def test_scrape_pacer_spaces_consecutive_starts():
 
 
 def test_scrape_concurrency_lowered():
-    assert svc.SCRAPE_CONCURRENCY == 3
+    assert svc.SCRAPE_CONCURRENCY == 5
 
 
 def _failed(msg):
@@ -473,3 +473,9 @@ def test_scrape_summary_counts_ok_recovered_failed():
         None,                                       # import produced no source
     ]
     assert svc._scrape_summary(results) == (2, 1, 2)
+
+
+def test_retry_backoff_index_is_clamped():
+    bo = svc.RETRY_BACKOFF
+    assert [bo[min(i, len(bo) - 1)] for i in range(svc.MAX_SCRAPE_RETRIES)] == [5.0, 15.0]
+    assert bo[min(5, len(bo) - 1)] == 15.0  # a future MAX_SCRAPE_RETRIES bump won't IndexError

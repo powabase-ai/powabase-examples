@@ -45,10 +45,10 @@ MAX_BACKFILL = 12
 # DISTINCT sources to cite (otherwise the writer re-cites the same one or two).
 DEPTH_PRESETS = {"quick": (10, 6), "standard": (20, 12), "deep": (40, 22)}
 
-# How many competitor pages to import/poll/extract concurrently. Kept low (was 8) so the
-# simultaneous Firecrawl dispatch doesn't trip its rate limit; combined with the pacer
-# below, scrape starts stay spread out. Each page still polls up to ~80s.
-SCRAPE_CONCURRENCY = 3
+# How many competitor pages to import/poll/extract concurrently. Kept well below the
+# original 8 so the simultaneous Firecrawl dispatch doesn't trip its rate limit;
+# combined with the pacer below, scrape starts stay spread out. Each page polls ~80s.
+SCRAPE_CONCURRENCY = 5
 
 # --- scrape resilience (Firecrawl rate limits) -------------------------------------
 # Powabase runs each scrape through Firecrawl in a background job, so a burst of
@@ -572,7 +572,7 @@ async def _scrape_one(
     for i in range(MAX_SCRAPE_RETRIES):
         if status != "failed" or not _is_transient_failure(error_message):
             break
-        delay = RETRY_BACKOFF[i]
+        delay = RETRY_BACKOFF[min(i, len(RETRY_BACKOFF) - 1)]
         log.info(
             "transient scrape failure — retrying %s in %.0fs (attempt %d/%d)",
             url, delay, i + 1, MAX_SCRAPE_RETRIES,
@@ -846,7 +846,7 @@ async def run_research_task(
 
         ok, recovered, failed = _scrape_summary(results)
         log.info(
-            "research %s scrape summary: %d ok (%d recovered on retry), %d failed",
+            "research %s scrape summary: %d ok (%d recovered on retry), %d not extracted",
             run_id, ok, recovered, failed,
         )
 
