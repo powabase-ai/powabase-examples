@@ -340,8 +340,12 @@ class PowabaseClient:
 
     async def import_url(self, url: str) -> Any:
         """Import a web page as a Source (Firecrawl-backed). Returns
-        {count, sources:[{id, name, url}]}. Project-wide dedup: re-importing the
-        same URL reuses the existing source."""
+        {count, sources:[{id, name, url}]}. Dedup is CONTENT-based, not URL-based:
+        re-importing the same URL was observed to fetch fresh and create a NEW Source
+        (URL scrapes aren't deduplicated), though an identical result can still 409 with a
+        `duplicate` body. A caller that re-imports to retry must handle both — a fresh id,
+        or the 409 pointing back at the existing Source (see services.brand_materials
+        `_dedup_id` and services.research `_scrape_attempt`)."""
         return await self._request(
             "POST", "/api/sources/import-url", json={"mode": "urls", "urls": [url]}
         )

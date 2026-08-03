@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
+import httpx
 from psycopg.types.json import Json
 
 from ..db import Database
@@ -56,10 +57,12 @@ SCRAPE_CONCURRENCY = 5
 # Powabase runs each scrape through Firecrawl in a background job, so a burst of
 # concurrent imports rate-limits it and the source ends `failed` with a 429/5xx
 # error_message — a failure RankForge never sees as an HTTP status. We dispatch gently
-# (see _ScrapePacer) and retry the TRANSIENT failures. A retry re-imports the URL, which
-# creates a FRESH source and re-runs extraction (verified against a live project — a
-# re-import of a failed URL does NOT re-extract in place), so the stale failed source is
-# deleted first to avoid orphaning sources project-wide.
+# (see _ScrapePacer) and retry the TRANSIENT failures. A retry re-imports the URL. URL
+# imports were observed NOT to dedup — a re-import creates a FRESH source and runs a new
+# extraction rather than re-extracting the failed one in place — so the stale source is
+# deleted (ref-count-guarded) to avoid orphaning it. If a re-import ever 409-dedups back
+# to the same source instead, `_scrape_attempt` reuses that id and the retry is a safe
+# (budget-capped) no-op. Correct under both behaviors.
 MIN_SCRAPE_INTERVAL = 0.75   # min seconds between scrape dispatches (_ScrapePacer)
 MAX_SCRAPE_RETRIES = 2       # extra attempts after the first, for transient failures
 # Backoff before retry 1, retry 2, … The index is clamped to the last element, so this
@@ -77,6 +80,9 @@ _TRANSIENT_MARKERS = (
     "429", "too many requests", "rate limit", "502", "bad gateway",
     "503", "service unavailable", "504", "gateway timeout",
     "timeout", "timed out",
+    # Our own synthetic marker for a poll-time upstream/transport error we chose to
+    # degrade-and-retry (see _scrape_attempt) — regardless of the raw exception's text.
+    "poll error",
 )
 
 
@@ -560,13 +566,15 @@ async def _scrape_attempt(
     try:
         imp = await client.import_url(url)
         source_id = (imp.get("sources") or [{}])[0].get("id")
-    except PowabaseError as e:
-        body = e.body if isinstance(e.body, dict) else {}
+    except (PowabaseError, httpx.HTTPError) as e:
+        # httpx.HTTPError too: a raw transport error (ConnectError/ReadTimeout/…) isn't a
+        # PowabaseError and would otherwise escape and kill the whole run via gather.
+        body = e.body if isinstance(e, PowabaseError) and isinstance(e.body, dict) else {}
         source_id = (body.get("duplicate") or {}).get("id")
         if not source_id:
             # The import itself failed with no reusable source (quota/auth/rate limit
-            # after the client's own retries, …). Log it — otherwise a run that imports
-            # nothing reports "done" with zero sources and no trace of why.
+            # after the client's own retries, a transport blip, …). Log it — otherwise a
+            # run that imports nothing reports "done" with zero sources and no trace.
             log.warning("scrape import failed for %s: %s", url, e)
     if not source_id:
         return None, None, "", None
@@ -576,10 +584,11 @@ async def _scrape_attempt(
     for _ in range(40):  # poll up to ~80s
         try:
             src = await client.get_source(source_id)
-        except PowabaseError as e:
-            # A poll-time upstream error (500/502/504) must NOT propagate into
-            # asyncio.gather and fail the whole run. Degrade to a transient failure so
-            # this one URL retries.
+        except (PowabaseError, httpx.HTTPError) as e:
+            # A poll-time upstream/transport error must NOT propagate into asyncio.gather
+            # and fail the whole run. Degrade to a transient failure so this one URL
+            # retries. (get_source_markdown below bypasses _request, so httpx errors are
+            # a real path here.)
             log.warning("scrape poll error for %s (%s): %s", url, source_id, e)
             return source_id, "failed", "", f"poll error: {e}"
         status = src.get("extraction_status")
@@ -588,13 +597,15 @@ async def _scrape_attempt(
             break
         await asyncio.sleep(2)
     else:
-        # Never reached a terminal status within the poll budget. Treat as a transient
-        # timeout (retry-eligible) instead of silently returning a stuck non-terminal
-        # status that nothing will ever re-poll.
+        # Never reached a terminal status within the poll budget. The extraction is still
+        # running remotely and would likely finish — so do NOT mark it a transient
+        # failure (which would delete + re-scrape a nearly-done page). Return the last
+        # non-terminal status (not "failed"), so the caller does not retry it; just log.
         log.warning(
-            "scrape poll timed out for %s (%s), last status=%s", url, source_id, status
+            "scrape poll budget exhausted for %s (%s), last status=%s",
+            url, source_id, status,
         )
-        return source_id, "failed", "", "poll timeout"
+        return source_id, status, "", "poll budget exhausted"
 
     if status == "failed":
         log.info("scrape failed for %s (%s): %s", url, source_id, error_message)
@@ -602,7 +613,7 @@ async def _scrape_attempt(
     if status == "extracted":
         try:
             md = await client.get_source_markdown(source_id)
-        except PowabaseError as e:
+        except (PowabaseError, httpx.HTTPError) as e:
             # Extraction succeeded but the markdown fetch didn't — the teardown ends
             # empty. Log it so the run summary's "ok" count isn't silently inflated.
             log.warning(
@@ -615,18 +626,20 @@ async def _scrape_attempt(
 
 async def _scrape_one(
     client: PowabaseClient,
+    db: Database,
     url: str,
     title_by_url: dict[str, str],
     retry_budget: "_RetryBudget | None" = None,
 ) -> dict[str, Any] | None:
     """Import one competitor URL as a Source, wait for extraction, build a teardown.
 
-    A TRANSIENT failure (Firecrawl 429/5xx, or our own poll timeout — see
-    _is_transient_failure) is retried up to MAX_SCRAPE_RETRIES times with backoff. A
-    retry re-imports the URL, which creates a FRESH source and re-runs extraction; the
-    stale failed source is deleted first (best-effort) so retries don't orphan sources
-    project-wide. Permanent failures (dead/blocked page) are not retried. `retry_budget`,
-    when given, caps total retries across the run."""
+    A TRANSIENT failure (Firecrawl 429/5xx — see _is_transient_failure) is retried up to
+    MAX_SCRAPE_RETRIES times with backoff. A retry re-imports the URL, which creates a
+    FRESH source and re-runs extraction; the stale failed source is then deleted —
+    ref-count-guarded, so a Source shared with another run is never removed — so retries
+    don't orphan sources project-wide. Permanent failures (dead/blocked page) and pages
+    still extracting at the poll deadline are not retried. `retry_budget`, when given,
+    caps total retries across the run."""
     source_id, status, md, error_message = await _scrape_attempt(client, url)
     if source_id is None:
         return None
@@ -651,12 +664,14 @@ async def _scrape_one(
             # (status + error_message) and its still-existing source rather than blanking
             # everything to None. Stop retrying; a failing import won't fix itself here.
             break
-        # The re-import created a fresh source. Delete the stale one so the run doesn't
-        # leave orphaned failed sources behind (best-effort — a failed delete just leaves
-        # the prior orphan, same as before this fix).
         if new_sid != source_id:
+            # The re-import created a fresh source. Delete the stale one so the run
+            # doesn't orphan it — but honor the same ref-count contract as every other
+            # delete in this service (a re-import that 409-dedups could hand back a Source
+            # another run still references). Best-effort.
             try:
-                await client.delete_source(source_id)
+                if source_refs.source_reference_count(db, source_id) == 0:
+                    await client.delete_source(source_id)
             except Exception:  # noqa: BLE001 — cleanup is best-effort
                 log.warning("could not delete stale source %s before retry", source_id)
         source_id, status, md, error_message = new_sid, new_status, new_md, new_err
@@ -781,7 +796,7 @@ async def evaluate_and_prune(
         )
         fresh: list[dict[str, Any]] = []
         for u in candidates:
-            res = await _scrape_one(client, u, title_by_url, retry_budget)
+            res = await _scrape_one(client, db, u, title_by_url, retry_budget)
             if res is None:
                 continue
             t = res["teardown"]
@@ -896,7 +911,7 @@ async def run_research_task(
         async def _scrape_bounded(u: str) -> dict[str, Any] | None:
             nonlocal done
             async with sem:
-                result = await _scrape_one(client, u, title_by_url, retry_budget)
+                result = await _scrape_one(client, db, u, title_by_url, retry_budget)
             done += 1  # advisory live progress (racy writes are fine)
             # Offload the DB write so it doesn't block the loop these run on.
             try:

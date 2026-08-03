@@ -9,7 +9,7 @@
 >
 > Line numbers and absolute paths below are from the author's machine and may be stale.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** SUPERSEDED — do NOT execute this plan (see the status banner above). It shipped and was revised in review; the steps below no longer match the code. Kept only as a historical record.
 
 **Goal:** Stop research scrapes from silently dropping URLs to Firecrawl rate limits — dispatch gentler, and retry the transiently-failed sources instead of losing them.
 
