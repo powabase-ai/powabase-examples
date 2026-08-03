@@ -45,10 +45,10 @@ MAX_BACKFILL = 12
 # DISTINCT sources to cite (otherwise the writer re-cites the same one or two).
 DEPTH_PRESETS = {"quick": (10, 6), "standard": (20, 12), "deep": (40, 22)}
 
-# How many competitor pages to import/poll/extract concurrently. Each page can poll
-# up to ~80s, so sequential scraping was the research bottleneck (≈ sum); bounded
-# concurrency makes it ≈ the slowest single page.
-SCRAPE_CONCURRENCY = 8
+# How many competitor pages to import/poll/extract concurrently. Kept low (was 8) so the
+# simultaneous Firecrawl dispatch doesn't trip its rate limit; combined with the pacer
+# below, scrape starts stay spread out. Each page still polls up to ~80s.
+SCRAPE_CONCURRENCY = 3
 
 # --- scrape resilience (Firecrawl rate limits) -------------------------------------
 # Powabase runs each scrape through Firecrawl in a background job, so a burst of
@@ -75,6 +75,30 @@ def _is_transient_failure(error_message: str | None) -> bool:
         return False
     low = error_message.lower()
     return any(m in low for m in _TRANSIENT_MARKERS)
+
+
+class _ScrapePacer:
+    """Serialize scrape STARTS to at most one per `interval` seconds, so scrapes spread
+    over time even when several concurrency slots free at the same instant. Uses the
+    event loop clock (monotonic; every scrape shares the app's loop)."""
+
+    def __init__(self, interval: float) -> None:
+        self._interval = interval
+        self._lock = asyncio.Lock()
+        self._next = 0.0
+
+    async def wait(self) -> None:
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            delay = self._next - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next = loop.time() + self._interval
+
+
+# Module-level so it also paces across concurrent research runs — the rate Firecrawl
+# actually cares about.
+_scrape_pacer = _ScrapePacer(MIN_SCRAPE_INTERVAL)
 
 # A source is only trustworthy enough to cite if it actually extracted real content.
 MIN_SOURCE_WORDS = 200

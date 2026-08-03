@@ -397,3 +397,21 @@ def test_is_transient_failure_classifies_by_error_message():
         None,
     ):
         assert not svc._is_transient_failure(msg), msg
+
+
+async def test_scrape_pacer_spaces_consecutive_starts():
+    import asyncio as aio
+
+    pacer = svc._ScrapePacer(0.05)
+    loop = aio.get_running_loop()
+    start = loop.time()
+    await pacer.wait()  # first call returns immediately
+    mid = loop.time()
+    await pacer.wait()  # second call waits out the interval
+    end = loop.time()
+    assert mid - start < 0.05          # first didn't block
+    assert end - start >= 0.05         # second was spaced by >= interval
+
+
+def test_scrape_concurrency_lowered():
+    assert svc.SCRAPE_CONCURRENCY == 3
