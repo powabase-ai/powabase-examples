@@ -378,3 +378,22 @@ def test_create_research_unknown_brand_404(monkeypatch):
     client = make_client()
     resp = client.post("/api/research", json={"business_id": BID, "topic": "geo"})
     assert resp.status_code == 404
+
+
+def test_is_transient_failure_classifies_by_error_message():
+    for msg in (
+        "Client error '429 Too Many Requests' for url 'https://api.firecrawl.dev/v1/scrape'",
+        "Server error '502 Bad Gateway' for url 'https://api.firecrawl.dev/v1/scrape'",
+        "503 Service Unavailable",
+        "Gateway Timeout",
+        "read timed out",
+    ):
+        assert svc._is_transient_failure(msg), msg
+    for msg in (
+        "Client error '404 Not Found'",
+        "blocked by robots.txt",
+        "could not parse document",
+        "",
+        None,
+    ):
+        assert not svc._is_transient_failure(msg), msg

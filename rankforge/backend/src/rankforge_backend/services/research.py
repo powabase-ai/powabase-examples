@@ -50,6 +50,32 @@ DEPTH_PRESETS = {"quick": (10, 6), "standard": (20, 12), "deep": (40, 22)}
 # concurrency makes it ≈ the slowest single page.
 SCRAPE_CONCURRENCY = 8
 
+# --- scrape resilience (Firecrawl rate limits) -------------------------------------
+# Powabase runs each scrape through Firecrawl in a background job, so a burst of
+# concurrent imports rate-limits it and the source ends `failed` with a 429/5xx
+# error_message — a failure RankForge never sees as an HTTP status. We dispatch gently
+# (see _ScrapePacer) and retry the TRANSIENT failures (re-import re-runs extraction).
+MIN_SCRAPE_INTERVAL = 0.75   # min seconds between scrape dispatches (_ScrapePacer)
+MAX_SCRAPE_RETRIES = 2       # extra attempts after the first, for transient failures
+RETRY_BACKOFF = (5.0, 15.0)  # backoff before retry 1, retry 2 (len == MAX_SCRAPE_RETRIES)
+
+# Substrings marking a TRANSIENT extraction failure worth retrying (rate limit / upstream
+# blip). Anything else (404, blocked, parse error, no message) is permanent and never
+# retried, so a genuinely dead page is not re-scraped.
+_TRANSIENT_MARKERS = (
+    "429", "too many requests", "502", "bad gateway",
+    "503", "service unavailable", "504", "gateway timeout",
+    "timeout", "timed out",
+)
+
+
+def _is_transient_failure(error_message: str | None) -> bool:
+    """True if a failed extraction is worth retrying; False for a permanent failure."""
+    if not error_message:
+        return False
+    low = error_message.lower()
+    return any(m in low for m in _TRANSIENT_MARKERS)
+
 # A source is only trustworthy enough to cite if it actually extracted real content.
 MIN_SOURCE_WORDS = 200
 
