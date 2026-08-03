@@ -603,6 +603,19 @@ async def _scrape_one(
     }
 
 
+def _scrape_summary(
+    results: list[dict[str, Any] | None],
+) -> tuple[int, int, int]:
+    """(ok, recovered_on_retry, failed) counts for a run's scrape results."""
+    ok = recovered = 0
+    for r in results:
+        if r and r.get("status") == "extracted":
+            ok += 1
+            if (r.get("attempts") or 1) > 1:
+                recovered += 1
+    return ok, recovered, len(results) - ok
+
+
 async def _drop_source(
     client: PowabaseClient, db: Database, run_id: UUID, source_id: str
 ) -> None:
@@ -830,6 +843,12 @@ async def run_research_task(
                 "teardown": t, "source_id": r["source_id"], "status": r["status"],
                 "excerpt": r.get("excerpt", ""),
             }
+
+        ok, recovered, failed = _scrape_summary(results)
+        log.info(
+            "research %s scrape summary: %d ok (%d recovered on retry), %d failed",
+            run_id, ok, recovered, failed,
+        )
 
         # 3) evaluate source quality: score each source, prune weak ones, and backfill
         #    higher-authority replacements from spare SERP pages (opt-out, extra credits).

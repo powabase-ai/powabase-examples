@@ -463,3 +463,13 @@ async def test_scrape_one_gives_up_after_max_retries(monkeypatch):
     assert client.import_url.await_count == 1 + svc.MAX_SCRAPE_RETRIES
     assert out["status"] == "failed"
     assert out["attempts"] == 1 + svc.MAX_SCRAPE_RETRIES
+
+
+def test_scrape_summary_counts_ok_recovered_failed():
+    results = [
+        {"status": "extracted", "attempts": 1},
+        {"status": "extracted", "attempts": 3},   # recovered on retry
+        {"status": "failed", "attempts": 3},
+        None,                                       # import produced no source
+    ]
+    assert svc._scrape_summary(results) == (2, 1, 2)
