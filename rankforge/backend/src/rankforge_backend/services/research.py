@@ -57,12 +57,13 @@ SCRAPE_CONCURRENCY = 5
 # Powabase runs each scrape through Firecrawl in a background job, so a burst of
 # concurrent imports rate-limits it and the source ends `failed` with a 429/5xx
 # error_message — a failure RankForge never sees as an HTTP status. We dispatch gently
-# (see _ScrapePacer) and retry the TRANSIENT failures. A retry re-imports the URL. URL
-# imports were observed NOT to dedup — a re-import creates a FRESH source and runs a new
-# extraction rather than re-extracting the failed one in place — so the stale source is
-# deleted (ref-count-guarded) to avoid orphaning it. If a re-import ever 409-dedups back
-# to the same source instead, `_scrape_attempt` reuses that id and the retry is a safe
-# (budget-capped) no-op. Correct under both behaviors.
+# (see _ScrapePacer) and retry the TRANSIENT failures. A retry re-imports the URL. Dedup
+# is by URL only against a source that already EXTRACTED content; a FAILED source has no
+# content to dedup against, so the re-import is a real re-scrape that runs a new
+# extraction (a fresh source). The stale failed source is then deleted (ref-count-guarded)
+# to avoid orphaning it. If a re-import ever 409-dedups back to the same source instead,
+# `_scrape_attempt` reuses that id and the retry is a safe (budget-capped) no-op. Correct
+# under both behaviors.
 MIN_SCRAPE_INTERVAL = 0.75   # min seconds between scrape dispatches (_ScrapePacer)
 MAX_SCRAPE_RETRIES = 2       # extra attempts after the first, for transient failures
 # Backoff before retry 1, retry 2, … The index is clamped to the last element, so this
@@ -80,10 +81,16 @@ _TRANSIENT_MARKERS = (
     "429", "too many requests", "rate limit", "502", "bad gateway",
     "503", "service unavailable", "504", "gateway timeout",
     "timeout", "timed out",
-    # Our own synthetic marker for a poll-time upstream/transport error we chose to
-    # degrade-and-retry (see _scrape_attempt) — regardless of the raw exception's text.
-    "poll error",
+    # Our own synthetic marker, emitted by _scrape_attempt ONLY when a poll-time error is
+    # actually retryable (a retryable upstream status or a raw transport blip). A
+    # permanent poll error (402/401/404) uses a different message and stays non-transient,
+    # so it is never re-scraped (CLAUDE.md: 402 → no retry).
+    "poll error (transient)",
 )
+
+# Upstream statuses on a poll worth retrying. Everything else (402 quota, 401/403 auth,
+# 404 gone) is permanent — a paid re-scrape wouldn't help and 402 must never retry.
+_RETRYABLE_POLL_STATUSES = frozenset({429, 502, 503, 504})
 
 
 def _is_transient_failure(error_message: str | None) -> bool:
@@ -586,11 +593,20 @@ async def _scrape_attempt(
             src = await client.get_source(source_id)
         except (PowabaseError, httpx.HTTPError) as e:
             # A poll-time upstream/transport error must NOT propagate into asyncio.gather
-            # and fail the whole run. Degrade to a transient failure so this one URL
-            # retries. (get_source_markdown below bypasses _request, so httpx errors are
-            # a real path here.)
+            # and fail the whole run. Degrade to a `failed` — but only RETRYABLE when the
+            # cause is transient (a retryable upstream status, or any raw transport blip).
+            # A permanent status (402 quota, 401/403 auth, 404 gone) stays non-transient
+            # so it isn't re-scraped for paid nothing.
             log.warning("scrape poll error for %s (%s): %s", url, source_id, e)
-            return source_id, "failed", "", f"poll error: {e}"
+            permanent = (
+                isinstance(e, PowabaseError)
+                and e.status_code not in _RETRYABLE_POLL_STATUSES
+            )
+            msg = (
+                f"poll error {e.status_code} (permanent)" if permanent
+                else f"poll error (transient): {e}"
+            )
+            return source_id, "failed", "", msg
         status = src.get("extraction_status")
         error_message = src.get("error_message")
         if status in EXTRACTION_TERMINAL:
@@ -605,7 +621,9 @@ async def _scrape_attempt(
             "scrape poll budget exhausted for %s (%s), last status=%s",
             url, source_id, status,
         )
-        return source_id, status, "", "poll budget exhausted"
+        # Coerce a missing status to a non-terminal placeholder — never None, which would
+        # persist as a NULL research_sources.status row.
+        return source_id, status or "extracting", "", "poll budget exhausted"
 
     if status == "failed":
         log.info("scrape failed for %s (%s): %s", url, source_id, error_message)
@@ -636,10 +654,10 @@ async def _scrape_one(
     A TRANSIENT failure (Firecrawl 429/5xx — see _is_transient_failure) is retried up to
     MAX_SCRAPE_RETRIES times with backoff. A retry re-imports the URL, which creates a
     FRESH source and re-runs extraction; the stale failed source is then deleted —
-    ref-count-guarded, so a Source shared with another run is never removed — so retries
-    don't orphan sources project-wide. Permanent failures (dead/blocked page) and pages
-    still extracting at the poll deadline are not retried. `retry_budget`, when given,
-    caps total retries across the run."""
+    ref-count-guarded, so a Source with a committed reference from another run is never
+    removed — so retries don't orphan sources project-wide. Permanent failures
+    (dead/blocked page) and pages still extracting at the poll deadline are not retried.
+    `retry_budget`, when given, caps total retries across the run."""
     source_id, status, md, error_message = await _scrape_attempt(client, url)
     if source_id is None:
         return None
@@ -668,12 +686,16 @@ async def _scrape_one(
             # The re-import created a fresh source. Delete the stale one so the run
             # doesn't orphan it — but honor the same ref-count contract as every other
             # delete in this service (a re-import that 409-dedups could hand back a Source
-            # another run still references). Best-effort.
+            # another run still references). Best-effort. The ref-count read is a sync DB
+            # call, so offload it (like the progress write) rather than block this loop.
             try:
-                if source_refs.source_reference_count(db, source_id) == 0:
+                refs = await asyncio.to_thread(
+                    source_refs.source_reference_count, db, source_id
+                )
+                if refs == 0:
                     await client.delete_source(source_id)
             except Exception:  # noqa: BLE001 — cleanup is best-effort
-                log.warning("could not delete stale source %s before retry", source_id)
+                log.exception("could not delete stale source %s before retry", source_id)
         source_id, status, md, error_message = new_sid, new_status, new_md, new_err
 
     teardown = CompetitorTeardown(

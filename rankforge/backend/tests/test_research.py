@@ -414,7 +414,7 @@ async def test_scrape_pacer_spaces_consecutive_starts():
     assert end - start >= 0.05         # second was spaced by >= interval
 
 
-def test_scrape_concurrency_lowered():
+def test_scrape_concurrency_value():
     assert svc.SCRAPE_CONCURRENCY == 5
 
 
@@ -567,16 +567,63 @@ async def test_scrape_one_clamps_backoff_when_retries_exceed_schedule(monkeypatc
     assert slept.count(15.0) >= 2  # 2nd and 3rd retry both clamp to the last backoff
 
 
-async def test_scrape_attempt_degrades_poll_error_to_transient(monkeypatch):
+async def test_scrape_attempt_degrades_retryable_poll_error_to_transient(monkeypatch):
     _patch_scrape_waits(monkeypatch)
     client = MagicMock()
     client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
     client.get_source = AsyncMock(side_effect=svc.PowabaseError(502, "bad gateway"))
     sid, status, md, err = await svc._scrape_attempt(client, "https://x.com/a")
-    # a poll-time upstream error degrades to a retry-eligible transient failure,
-    # never raised (which would fail the whole asyncio.gather).
+    # a RETRYABLE poll-time upstream error degrades to a transient failure, never raised
+    # (which would fail the whole asyncio.gather).
     assert sid == "s1" and status == "failed" and md == ""
     assert svc._is_transient_failure(err)
+
+
+async def test_scrape_attempt_permanent_poll_error_is_not_retryable(monkeypatch):
+    # A 402/401/404 on the poll must NOT become retry-eligible — a paid re-scrape can't
+    # fix it, and 402 must never retry (CLAUDE.md). This is the bug the blanket
+    # "poll error" marker introduced.
+    _patch_scrape_waits(monkeypatch)
+    for status_code in (402, 401, 404):
+        client = MagicMock()
+        client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
+        client.get_source = AsyncMock(
+            side_effect=svc.PowabaseError(status_code, "nope")
+        )
+        _sid, status, _md, err = await svc._scrape_attempt(client, "https://x.com/a")
+        assert status == "failed"
+        assert not svc._is_transient_failure(err), f"{status_code} must not retry"
+
+
+async def test_scrape_one_does_not_retry_permanent_poll_error(monkeypatch):
+    # End-to-end: a 402 on the poll → single attempt, no paid re-scrape.
+    _patch_scrape_waits(monkeypatch)
+    client = _scrape_client(["s1"], None)
+    client.get_source = AsyncMock(side_effect=svc.PowabaseError(402, "quota exhausted"))
+    out = await svc._scrape_one(client, MagicMock(), "https://x.com/a", {})
+    assert client.import_url.await_count == 1  # NOT 1 + retries
+    assert out["attempts"] == 1
+
+
+async def test_scrape_attempt_import_httpx_error_returns_none(monkeypatch):
+    # A raw transport error on import (not a PowabaseError) is caught → no source, logged.
+    _patch_scrape_waits(monkeypatch)
+    client = MagicMock()
+    client.import_url = AsyncMock(side_effect=httpx.ConnectError("no route"))
+    sid, status, _md, _err = await svc._scrape_attempt(client, "https://x.com/a")
+    assert sid is None and status is None
+
+
+async def test_scrape_attempt_markdown_httpx_error_yields_empty(monkeypatch):
+    # get_source_markdown bypasses _request, so a raw httpx error is a real path — it is
+    # caught and the teardown ends empty rather than the run dying.
+    _patch_scrape_waits(monkeypatch)
+    client = MagicMock()
+    client.import_url = AsyncMock(return_value={"sources": [{"id": "s1"}]})
+    client.get_source = AsyncMock(return_value=_EXTRACTED)
+    client.get_source_markdown = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+    sid, status, md, _err = await svc._scrape_attempt(client, "https://x.com/a")
+    assert sid == "s1" and status == "extracted" and md == ""
 
 
 async def test_scrape_attempt_degrades_transport_error_on_poll(monkeypatch):

@@ -4,8 +4,8 @@
 > - `SCRAPE_CONCURRENCY` is **5**, not 3 (chosen after measuring the clean-run latency cost).
 > - `RETRY_BACKOFF` indexing is **clamped** (`RETRY_BACKOFF[min(i, len-1)]`), so the tuple may be shorter than `MAX_SCRAPE_RETRIES`.
 > - The summary log says **"not extracted"**, not "failed permanently".
-> - **Re-import creates a NEW source and re-runs extraction** (verified against a live project) — it does NOT re-extract the failed source in place, as this plan assumed. So a retry now **deletes the stale failed source first** to avoid orphaning it, and a run-level `_RetryBudget` (`MAX_RUN_RETRIES`) caps total retries.
-> - `_scrape_attempt` now **logs and degrades** import errors, poll-time upstream errors, poll timeouts, and markdown-fetch failures (a poll error/timeout becomes a retry-eligible transient failure rather than raising into `asyncio.gather` and failing the whole run).
+> - **Dedup is by URL only against a source that already extracted content.** A *failed* source has no content to dedup against, so re-importing it is a real re-scrape that runs a new extraction (this plan wrongly assumed re-import re-extracts in place). A retry now **deletes the stale failed source first** — ref-count-guarded — to avoid orphaning it, and a run-level `_RetryBudget` (`MAX_RUN_RETRIES`) caps total retries.
+> - `_scrape_attempt` now **logs and degrades** import errors, poll-time upstream/transport errors (`PowabaseError` and `httpx.HTTPError`), and markdown-fetch failures rather than raising into `asyncio.gather`. A poll error is retried ONLY when its status is retryable (429/5xx) or it is a raw transport blip — a permanent 402/401/404 is not. A page still *extracting* at the poll deadline is left non-terminal and NOT retried (its extraction is likely about to finish).
 >
 > Line numbers and absolute paths below are from the author's machine and may be stale.
 
