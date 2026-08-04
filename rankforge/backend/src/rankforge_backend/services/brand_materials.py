@@ -778,10 +778,12 @@ async def _refresh_one(
 ) -> bool:
     """Force a fresh re-scrape of one URL-backed brand page.
 
-    The platform dedups Sources by URL, so simply re-importing returns the SAME stale
-    content. To actually pick up a changed page we de-index + delete the old Source
-    first (clearing the dedup), then re-import the URL and re-index. Returns False for
-    a non-URL row (an uploaded file — nothing to re-scrape).
+    The platform dedups Sources by URL against content that already EXTRACTED, so
+    simply re-importing an extracted page returns the SAME stale content. To pick up a
+    changed page we de-index + delete the old Source first (clearing the dedup), then
+    re-import the URL and re-index. (A *failed* Source has no content to dedup against, so
+    services.research re-imports directly to retry — no delete needed there.) Returns
+    False for a non-URL row (an uploaded file — nothing to re-scrape).
     """
     url = row.get("url") or ""
     if not _is_refreshable_url(url):
