@@ -415,13 +415,20 @@ function RunDetail({
                         <ExternalLink className="size-3" /> page
                       </a>
                     )}
-                    {c.source_id && (
+                    {c.source_id && (c.word_count ?? 0) > 0 ? (
                       <button
                         onClick={() => onViewSource(c.source_id as string)}
                         className="ml-auto inline-flex items-center gap-1 text-[rgb(var(--accent-gold-hover))] hover:underline"
                       >
                         <FileText className="size-3" /> view scraped text
                       </button>
+                    ) : (
+                      // No text extracted (the scrape failed or is still running), so
+                      // there's nothing to view — say so instead of offering a link
+                      // that would 404 upstream.
+                      <span className="ml-auto text-muted-foreground/70">
+                        not scraped
+                      </span>
                     )}
                   </div>
                 </div>
@@ -466,7 +473,14 @@ function SourceDialog({
           {md.error && (
             <p className="text-sm text-destructive">{(md.error as Error).message}</p>
           )}
-          {md.data && <Markdown>{md.data.markdown}</Markdown>}
+          {md.data &&
+            (md.data.markdown ? (
+              <Markdown>{md.data.markdown}</Markdown>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                This page couldn&apos;t be scraped — no text was extracted.
+              </p>
+            ))}
         </div>
       </DialogContent>
     </Dialog>

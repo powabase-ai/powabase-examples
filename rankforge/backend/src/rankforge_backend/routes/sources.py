@@ -58,6 +58,13 @@ async def get_source_markdown(
     try:
         md = await pb.get_source_markdown(source_id)
     except PowabaseError as e:
+        # A source whose scrape failed (or is still extracting) has no markdown
+        # derivative and Powabase returns 404 "No markdown derivative found". That's a
+        # normal empty state, not a gateway fault — return empty markdown so the viewer
+        # shows "no extracted content" instead of a scary 502. Any OTHER upstream status
+        # (5xx, auth) is a genuine fault → 502, matching the /pages proxy.
+        if e.status_code == status.HTTP_404_NOT_FOUND:
+            return {"source_id": source_id, "markdown": ""}
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
     return {"source_id": source_id, "markdown": md}
 
