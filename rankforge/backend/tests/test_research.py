@@ -784,6 +784,32 @@ async def test_retry_brand_sources_one_failure_does_not_sink_batch(monkeypatch):
     await svc.retry_brand_sources(client, db, UUID(BID), [boom, ok])
 
     calls = [c.args for c in db.aexecute.await_args_list]
-    # the good row was updated to extracted, the boom row restored to failed
+    # the good row was updated to extracted; the boom row's scrape error was caught and
+    # logged, so it stays 'retrying' (no update). The key: the batch survived.
     assert any(a[1] == ("new2", 250, "extracted", RID) for a in calls)
-    assert any("set status = 'failed'" in a[0] and a[1] == (boom["id"],) for a in calls)
+
+
+async def test_retry_brand_sources_db_error_does_not_sink_batch(monkeypatch):
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(side_effect=lambda *a, **k: _scrape_result("new", "extracted", 200)),
+    )
+    boom_id = "44444444-4444-4444-4444-444444444444"
+
+    async def aexec(sql, params):
+        if params and params[-1] == boom_id:   # row_id is the last param in both updates
+            raise RuntimeError("db down")
+
+    db = MagicMock()
+    db.aexecute = AsyncMock(side_effect=aexec)
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+    boom = {"id": boom_id, "source_id": "o1", "url": "https://x.com/a", "title": "b"}
+    ok = {"id": RID, "source_id": "o2", "url": "https://x.com/a", "title": "ok"}
+
+    # Must NOT raise even though the boom row's UPDATE errors.
+    await svc.retry_brand_sources(client, db, UUID(BID), [boom, ok])
+
+    # The sibling row still got its success UPDATE (batch survived).
+    assert any(c.args[1] == ("new", 200, "extracted", RID) for c in db.aexecute.await_args_list)
