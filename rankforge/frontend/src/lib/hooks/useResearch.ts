@@ -8,8 +8,10 @@ import {
   sourcesApi,
   templatesApi,
   TERMINAL_RESEARCH,
+  type BrandSource,
   type BriefUpdate,
   type ResearchRun,
+  type ResearchSource,
 } from "@/lib/api";
 
 export function useTemplates() {
@@ -25,6 +27,11 @@ export function useBrandSources(businessId: string) {
     queryKey: ["sources", businessId],
     queryFn: () => sourcesApi.listByBrand(businessId),
     enabled: !!businessId,
+    // Poll while any source is mid-retry so its chip flips to extracted/failed live.
+    refetchInterval: (query) => {
+      const rows = query.state.data as BrandSource[] | undefined;
+      return rows?.some((s) => s.status === "retrying") ? 2500 : false;
+    },
   });
 }
 
@@ -114,6 +121,33 @@ export function useDeleteBrandSources(businessId: string) {
       qc.invalidateQueries({ queryKey: ["sources", businessId] });
       // Deleting sources can empty a run's source list — refresh the runs view too.
       qc.invalidateQueries({ queryKey: ["research", businessId] });
+    },
+  });
+}
+
+export function useRunSources(runId: string | null) {
+  return useQuery({
+    queryKey: ["run-sources", runId],
+    queryFn: () => researchApi.sources(runId as string),
+    enabled: !!runId,
+    // Poll while any of the run's sources is being retried, so the row flips live.
+    refetchInterval: (query) => {
+      const rows = query.state.data as ResearchSource[] | undefined;
+      return rows?.some((s) => s.status === "retrying") ? 2500 : false;
+    },
+  });
+}
+
+export function useRetrySources(businessId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rowIds: string[]) => sourcesApi.retry(businessId, rowIds),
+    // Rows are now 'retrying' server-side; refetch both source views so the chip flips
+    // and polling engages. Invalidate on settle — a partial error still claimed rows.
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["sources", businessId] });
+      qc.invalidateQueries({ queryKey: ["research", businessId] });
+      qc.invalidateQueries({ queryKey: ["run-sources"] });
     },
   });
 }
