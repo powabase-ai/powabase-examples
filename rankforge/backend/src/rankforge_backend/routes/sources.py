@@ -1,5 +1,6 @@
 """Centralized scraped-sources library."""
 
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
@@ -14,6 +15,8 @@ from ..services import research as svc
 from ..services import source_view
 from ..tasks import spawn
 from .deps import get_db, get_powabase
+
+log = logging.getLogger("rankforge.sources")
 
 router = APIRouter(
     prefix="/api/sources",
@@ -68,12 +71,19 @@ async def retry_sources(
     assert_brand_access(db, payload.business_id, user)
     rows = svc.mark_sources_retrying(db, payload.business_id, payload.row_ids)
     if rows:
+        coro = svc.retry_brand_sources(pb, db, payload.business_id, rows)
         try:
-            spawn(svc.retry_brand_sources(pb, db, payload.business_id, rows))
+            spawn(coro)
         except Exception:
-            # The claim already committed; if the worker couldn't be scheduled, revert it
-            # so the rows aren't stranded in 'retrying' with nothing behind them.
-            svc.reset_sources_to_failed(db, [r["id"] for r in rows])
+            # The claim already committed but the worker couldn't be scheduled. Close the
+            # un-awaited coroutine and revert the claim so the rows aren't stranded in
+            # 'retrying'. Guard the revert so a failing revert can't mask the original
+            # scheduling error the caller needs to see.
+            coro.close()
+            try:
+                svc.reset_sources_to_failed(db, [r["id"] for r in rows])
+            except Exception:
+                log.exception("retry: could not revert claim after spawn failure")
             raise
     return {"queued": len(rows)}
 
