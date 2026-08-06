@@ -561,6 +561,53 @@ def mark_sources_retrying(
     )
 
 
+async def _best_effort_delete_source(
+    client: PowabaseClient, db: Database, source_id: str
+) -> None:
+    """Delete a Powabase Source iff nothing else references it (the service-wide ref-count
+    contract). Best-effort — never raises, since a failed cleanup must not turn a
+    completed retry into an error. The ref-count read is a sync DB call, so it is
+    offloaded off the event loop."""
+    try:
+        refs = await asyncio.to_thread(
+            source_refs.source_reference_count, db, source_id
+        )
+        if refs == 0:
+            await client.delete_source(source_id)
+        else:
+            log.info("retry: source %s still referenced (refs=%s) — kept", source_id, refs)
+    except Exception:  # noqa: BLE001 — remote cleanup is best-effort
+        log.exception("retry: could not delete source %s", source_id)
+
+
+async def _best_effort_reset_failed(db: Database, row_id: Any) -> None:
+    """Move a claimed row from 'retrying' back to 'failed' so it stays retryable. Guarded
+    on the current status so it never clobbers a row that already reached a terminal state.
+    Best-effort; the startup reconciler is the guaranteed backstop for a row this couldn't
+    reach."""
+    try:
+        await db.aexecute(
+            "update public.research_sources set status = 'failed' "
+            "where id = %s and status = 'retrying'",
+            (row_id,),
+        )
+    except Exception:  # noqa: BLE001 — best-effort; reconciler backstops
+        log.exception("source retry: could not reset row %s", row_id)
+
+
+def reset_sources_to_failed(db: Database, row_ids: list[UUID]) -> None:
+    """Revert a claim: move rows from 'retrying' back to 'failed'. Used when the worker
+    could not be scheduled after the claim committed, so the rows aren't stranded in
+    'retrying' with nothing behind them."""
+    if not row_ids:
+        return
+    db.execute(
+        "update public.research_sources set status = 'failed' "
+        "where id = any(%s) and status = 'retrying'",
+        (list(row_ids),),
+    )
+
+
 async def retry_brand_sources(
     client: PowabaseClient,
     db: Database,
@@ -569,12 +616,18 @@ async def retry_brand_sources(
 ) -> None:
     """Re-scrape each claimed source row (already marked 'retrying' by
     mark_sources_retrying) and update it in place. Bounded concurrency + a shared retry
-    budget, mirroring the main run scrape. Per row: re-run _scrape_one on its URL, then
-    ADOPT the fresh Source (new source_id/word_count/status) and delete the OLD Source
-    when nothing else references it — so a retry never orphans a Source or leaves two per
-    row. If the re-import yields no Source at all (or the row has no URL), restore the row
-    to 'failed' with its original linkage. One row's failure never sinks the batch.
-    `business_id` is unused in the query bodies (rows were already brand-scoped by the
+    budget, mirroring the main run scrape.
+
+    Per row: re-run _scrape_one on its URL. If it yields no Source (no URL, or the import
+    produced nothing), restore the row to 'failed' with its original linkage. Otherwise
+    ADOPT the fresh Source (new source_id/word_count/status) and delete the OLD Source when
+    nothing else references it. If the adopt-UPDATE matches no row (the run was deleted
+    mid-retry) or fails, the freshly created Source is cleaned up so a retry never leaks an
+    orphan. One row's failure never sinks the batch; a CancelledError (shutdown drain)
+    resets the row and re-raises so it is not stranded in 'retrying' (the startup
+    reconciler is the guaranteed backstop).
+
+    `business_id` is not used in the query bodies (rows were already brand-scoped by the
     claim) but kept in the signature so the worker's provenance is explicit at the call
     site."""
     sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
@@ -585,6 +638,8 @@ async def retry_brand_sources(
         old_sid = row.get("source_id")
         url = row.get("url")
         title_by_url = {url: row.get("title") or ""} if url else {}
+        new_sid: str | None = None
+        adopted = False
         try:
             async with sem:
                 res = (
@@ -592,41 +647,43 @@ async def retry_brand_sources(
                     if url else None
                 )
             if res is None:
-                # transition the row from 'retrying' to 'failed' so it stays retryable;
-                # keep its original linkage.
-                await db.aexecute(
-                    "update public.research_sources set status = 'failed' where id = %s",
-                    (row_id,),
-                )
+                # Nothing re-scraped — move 'retrying' → 'failed' (keeps old linkage).
+                await _best_effort_reset_failed(db, row_id)
                 return
             new_sid = res["source_id"]
             t = res["teardown"]
-            await db.aexecute(
+            # `returning id`: if the row vanished mid-retry (its run was deleted), the
+            # UPDATE matches nothing — the fresh Source we just created would then be an
+            # orphan, so we detect that and clean it up rather than leak it.
+            updated = await db.afetch_one(
                 "update public.research_sources "
-                "set source_id = %s, word_count = %s, status = %s where id = %s",
+                "set source_id = %s, word_count = %s, status = %s where id = %s "
+                "returning id",
                 (new_sid, t.word_count, res["status"], row_id),
             )
-            # Adopt the fresh Source; delete the stale one if nothing else references it
-            # (same ref-count contract as every other delete in this service). The count
-            # is a sync DB call — offload it so it doesn't block the gather loop.
+            adopted = updated is not None
+            if not adopted:
+                if new_sid:
+                    await _best_effort_delete_source(client, db, new_sid)
+                return
+            # Adopt succeeded — retire the stale Source if nothing else references it.
             if old_sid and new_sid != old_sid:
-                try:
-                    refs = await asyncio.to_thread(
-                        source_refs.source_reference_count, db, old_sid
-                    )
-                    if refs == 0:
-                        await client.delete_source(old_sid)
-                except Exception:  # noqa: BLE001 — remote cleanup is best-effort
-                    log.exception("retry: could not delete old source %s", old_sid)
+                await _best_effort_delete_source(client, db, old_sid)
+        except asyncio.CancelledError:
+            # Shutdown drain / explicit cancel interrupted this row mid-flight. Reset it
+            # (best-effort; the reconciler guarantees it) and drop any un-adopted fresh
+            # Source, then re-raise so cancellation still propagates.
+            await _best_effort_reset_failed(db, row_id)
+            if new_sid and not adopted:
+                await _best_effort_delete_source(client, db, new_sid)
+            raise
         except Exception:  # noqa: BLE001 — one row must never sink the batch
             log.exception("source retry failed for row %s", row_id)
-            try:
-                await db.aexecute(
-                    "update public.research_sources set status = 'failed' where id = %s",
-                    (row_id,),
-                )
-            except Exception:  # noqa: BLE001 — recovery write is best-effort
-                log.exception("source retry: could not reset stuck row %s", row_id)
+            if not adopted:
+                await _best_effort_reset_failed(db, row_id)
+                if new_sid:
+                    # adopt-UPDATE failed after a fresh Source was created — don't leak it.
+                    await _best_effort_delete_source(client, db, new_sid)
 
     await asyncio.gather(*[_one(r) for r in rows])
 

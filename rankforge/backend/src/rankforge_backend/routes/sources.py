@@ -9,6 +9,7 @@ from ..db import Database
 from ..models.profile import CurrentUser
 from ..models.research import BrandSource, SourceBulkDelete, SourceMeta
 from ..powabase import PowabaseClient, PowabaseError
+from ..ratelimit import rate_limit
 from ..services import research as svc
 from ..services import source_view
 from ..tasks import spawn
@@ -47,7 +48,13 @@ async def bulk_delete_sources(
     return {"deleted": deleted}
 
 
-@router.post("/retry", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/retry",
+    status_code=status.HTTP_202_ACCEPTED,
+    # Triggers Firecrawl scrapes (credits + the background-task pool), exactly like
+    # POST /api/research — rate-limit it the same way so one user can't exhaust them.
+    dependencies=[Depends(rate_limit("sources:retry"))],
+)
 async def retry_sources(
     payload: SourceBulkDelete,
     db: Database = Depends(get_db),
@@ -61,7 +68,13 @@ async def retry_sources(
     assert_brand_access(db, payload.business_id, user)
     rows = svc.mark_sources_retrying(db, payload.business_id, payload.row_ids)
     if rows:
-        spawn(svc.retry_brand_sources(pb, db, payload.business_id, rows))
+        try:
+            spawn(svc.retry_brand_sources(pb, db, payload.business_id, rows))
+        except Exception:
+            # The claim already committed; if the worker couldn't be scheduled, revert it
+            # so the rows aren't stranded in 'retrying' with nothing behind them.
+            svc.reset_sources_to_failed(db, [r["id"] for r in rows])
+            raise
     return {"queued": len(rows)}
 
 

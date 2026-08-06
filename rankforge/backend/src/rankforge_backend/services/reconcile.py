@@ -63,10 +63,19 @@ def reconcile_interrupted(db: Database) -> None:
         "where materials_progress is not null "
         "and coalesce(materials_progress->>'phase', '') not in ('done', 'failed')",
     )
-    if opp or run or art or mat or scout:
+    # A scraped source claimed for retry (status='retrying') by a worker a restart killed
+    # mid-scrape is a dead end: the claim query refuses 'retrying' rows and the UI hides
+    # its Retry button, so only manual SQL could clear it. Reset it to 'failed' so the
+    # user can retry again. Safe under the single-instance deployment (nothing in flight
+    # at boot), exactly like the resets above.
+    src = _count_update(
+        db,
+        "update public.research_sources set status = 'failed' where status = 'retrying'",
+    )
+    if opp or run or art or mat or scout or src:
         log.info(
             "startup reconciliation: reset %s opportunity(ies), %s research run(s), "
-            "%s article(s), %s scout run(s), %s materials ingest(s) orphaned by a "
-            "prior restart",
-            opp, run, art, scout, mat,
+            "%s article(s), %s scout run(s), %s materials ingest(s), %s retrying "
+            "source(s) orphaned by a prior restart",
+            opp, run, art, scout, mat, src,
         )
