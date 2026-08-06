@@ -139,6 +139,15 @@ in the TS type.
   rows; task logs and moves on.
 - **Non-retryable input:** rows already `extracted` or `retrying` are filtered
   server-side, not merely hidden in the UI.
+- **Retrying a still-extracting source (accepted trade-off):** a poll-budget
+  timeout is persisted as `failed` (`_row_status`), so the user may retry a row
+  whose *remote* extraction is in fact still running. `import_url` dedups only
+  against a Source that already has extracted content, so that retry does **not**
+  dedup — it creates a fresh Source and deletes the old (still-extracting) one.
+  The window is small and the cost is credits, not corruption; and once the
+  original extraction has completed, a retry dedups back to the same `source_id`,
+  quietly becoming a useful manual re-poll. This is a net improvement over the
+  prior behavior, where a timed-out row was a permanent UI dead-end.
 
 ## Testing
 

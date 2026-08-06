@@ -63,7 +63,10 @@ export default function SourcesLibrary({
       const next = new Set([...prev].filter((x) => live.has(x)));
       return next.size === prev.size ? prev : next;
     });
-    setSelected((prev) => (prev && live.has(prev.id) ? prev : null));
+    // Re-bind `selected` to the FRESH row (by row id), not the stale snapshot: a retry
+    // keeps the row id but swaps source_id (and deletes the old Source), so keeping the
+    // old object would leave the viewer fetching a just-deleted source_id → empty content.
+    setSelected((prev) => (prev ? sources.find((s) => s.id === prev.id) ?? null : prev));
   }, [sources]);
 
   const allChecked = !!sources?.length && checked.size === sources.length;
