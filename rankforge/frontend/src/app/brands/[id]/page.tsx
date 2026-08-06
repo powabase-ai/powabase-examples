@@ -9,6 +9,7 @@ import {
   Loader2,
   Pencil,
   PenLine,
+  RotateCw,
   Search,
   Sparkles,
   Trash2,
@@ -38,11 +39,14 @@ import {
   useDeleteResearchRun,
   useGenerateBrief,
   useResearchRuns,
+  useRetrySources,
   useRunResearch,
+  useRunSources,
   useSourceMarkdown,
   useTemplates,
   useUpdateBrief,
 } from "@/lib/hooks/useResearch";
+import { StatusChip, isRetryable } from "@/components/SourceStatus";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { canApprove, TERMINAL_RESEARCH } from "@/lib/api";
 import type { Brief, BriefUpdate, CompetitorTeardown, ResearchRun } from "@/lib/api";
@@ -333,6 +337,23 @@ function RunDetail({
   onDeleted: () => void;
 }) {
   const del = useDeleteResearchRun(brandId);
+  const { data: runSources } = useRunSources(run.id);
+  const retry = useRetrySources(brandId);
+  const retryable = (runSources ?? []).filter((s) => isRetryable(s.status));
+  const anyRetrying = (runSources ?? []).some((s) => s.status === "retrying");
+
+  function onRetry(ids: string[]) {
+    if (!ids.length) return;
+    retry.mutate(ids, {
+      onSuccess: (r) =>
+        toast.success(
+          r.queued
+            ? `Retrying ${r.queued} source${r.queued === 1 ? "" : "s"}…`
+            : "Nothing to retry"
+        ),
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Retry failed"),
+    });
+  }
 
   function onDelete() {
     if (
@@ -433,6 +454,58 @@ function RunDetail({
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {canEdit && (retryable.length > 0 || anyRetrying) && (
+          <div>
+            <div className="mb-1.5 flex items-center gap-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Failed scrapes
+              </p>
+              {retryable.length > 1 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-7 text-muted-foreground hover:text-foreground"
+                  onClick={() => onRetry(retryable.map((s) => s.id))}
+                  disabled={retry.isPending}
+                >
+                  <RotateCw className="size-3.5" /> Retry all {retryable.length}
+                </Button>
+              )}
+            </div>
+            <div className="grid gap-2">
+              {(runSources ?? [])
+                .filter((s) => s.status !== "extracted")
+                .map((s) => (
+                  <div
+                    key={s.id}
+                    className="flex items-center gap-3 rounded-md border border-border p-2.5"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="line-clamp-1 text-sm font-medium">
+                        {s.title || s.url}
+                      </div>
+                      <div className="line-clamp-1 text-xs text-muted-foreground">
+                        {s.url}
+                      </div>
+                    </div>
+                    <StatusChip status={s.status} />
+                    {isRetryable(s.status) && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-muted-foreground hover:text-foreground"
+                        onClick={() => onRetry([s.id])}
+                        disabled={retry.isPending}
+                      >
+                        <RotateCw className="size-3.5" /> Retry
+                      </Button>
+                    )}
+                  </div>
+                ))}
             </div>
           </div>
         )}
