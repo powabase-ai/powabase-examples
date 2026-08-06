@@ -1,5 +1,6 @@
 """Centralized scraped-sources library."""
 
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
@@ -9,9 +10,13 @@ from ..db import Database
 from ..models.profile import CurrentUser
 from ..models.research import BrandSource, SourceBulkDelete, SourceMeta
 from ..powabase import PowabaseClient, PowabaseError
+from ..ratelimit import rate_limit
 from ..services import research as svc
 from ..services import source_view
+from ..tasks import spawn
 from .deps import get_db, get_powabase
+
+log = logging.getLogger("rankforge.sources")
 
 router = APIRouter(
     prefix="/api/sources",
@@ -44,6 +49,49 @@ async def bulk_delete_sources(
         pb, db, payload.business_id, payload.row_ids
     )
     return {"deleted": deleted}
+
+
+@router.post(
+    "/retry",
+    status_code=status.HTTP_202_ACCEPTED,
+    # Triggers Firecrawl scrapes (credits + the background-task pool), exactly like
+    # POST /api/research — rate-limit it the same way so one user can't exhaust them.
+    dependencies=[Depends(rate_limit("sources:retry"))],
+)
+async def retry_sources(
+    payload: SourceBulkDelete,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Re-scrape the selected failed / non-extracted sources. Editor/admin only. Rows are
+    brand-scoped and claimed atomically (already-extracted or in-flight rows are ignored),
+    then re-scraped in the background — poll GET /api/sources for each row's status
+    (retrying → extracted/failed). Returns how many rows were queued."""
+    assert_brand_access(db, payload.business_id, user)
+    rows = svc.mark_sources_retrying(db, payload.business_id, payload.row_ids)
+    if rows:
+        # Attribution: a retry burst spends scrape credits + the background-task pool, so
+        # record who kicked it off and how big it was.
+        log.info(
+            "source retry: user %s queued %s row(s) for business %s",
+            user.id, len(rows), payload.business_id,
+        )
+        coro = svc.retry_brand_sources(pb, db, payload.business_id, rows)
+        try:
+            spawn(coro)
+        except Exception:
+            # spawn is create_task; it realistically only fails with no running loop. Still,
+            # the claim already committed — close the un-awaited coroutine and revert the
+            # claim so the rows aren't stranded in 'retrying' (guarding the revert so it
+            # can't mask the original error the caller needs to see).
+            coro.close()
+            try:
+                svc.reset_sources_to_failed(db, [r["id"] for r in rows])
+            except Exception:
+                log.exception("retry: could not revert claim after spawn failure")
+            raise
+    return {"queued": len(rows)}
 
 
 @router.get("/{source_id}/markdown")

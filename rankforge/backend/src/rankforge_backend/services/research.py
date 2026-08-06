@@ -166,6 +166,17 @@ def is_usable_source(s: dict[str, Any]) -> bool:
         and (s.get("word_count") or 0) >= MIN_SOURCE_WORDS
     )
 
+
+def _row_status(status: str | None) -> str:
+    """The status to PERSIST on a research_sources row. Terminal statuses pass through; a
+    NON-terminal one — notably 'extracting', left by a poll-budget timeout that nothing
+    re-polls — collapses to 'failed'. Otherwise the row would rest forever in a state the
+    UI shows as an endless spinner with no Retry (nothing advances it, the reconciler
+    doesn't sweep it, and the claim query would refuse it). is_usable_source already treats
+    any non-'extracted' status as unusable, so this only changes how a row is surfaced and
+    retried, never grounding."""
+    return status if status in EXTRACTION_TERMINAL else "failed"
+
 _SYSTEM_PROMPT = """\
 You are RankForge's **SERP analyst**. Given a topic, you map its search landscape \
 with the `web_search` (Exa) tool and return a structured analysis. Your output is \
@@ -539,6 +550,163 @@ async def bulk_delete_brand_sources(
     return len(deleted)
 
 
+def mark_sources_retrying(
+    db: Database, business_id: UUID, row_ids: list[UUID]
+) -> list[dict[str, Any]]:
+    """Atomically CLAIM the retryable rows for a brand: set status='retrying' for rows
+    that belong to `business_id` and are neither already 'extracted' nor already
+    'retrying'. The UPDATE ... RETURNING is the claim — a duplicate/concurrent request
+    finds the rows already 'retrying' and gets nothing back (double-submit guard).
+    Returns the claimed rows (id, source_id, url, title) for the worker to re-scrape."""
+    if not row_ids:
+        return []
+    return db.fetch_all(
+        "update public.research_sources rs set status = 'retrying' "
+        "from public.research_runs rr "
+        "where rr.id = rs.research_run_id and rr.business_id = %s "
+        "and rs.id = any(%s) "
+        "and rs.status is distinct from 'extracted' "
+        "and rs.status is distinct from 'retrying' "
+        "returning rs.id, rs.source_id, rs.url, rs.title",
+        (business_id, list(row_ids)),
+    )
+
+
+async def _best_effort_delete_source(
+    client: PowabaseClient, db: Database, source_id: str
+) -> None:
+    """Delete a Powabase Source iff nothing else references it (the service-wide ref-count
+    contract). Best-effort — never raises, since a failed cleanup must not turn a
+    completed retry into an error. The ref-count read is a sync DB call, so it is
+    offloaded off the event loop."""
+    try:
+        refs = await asyncio.to_thread(
+            source_refs.source_reference_count, db, source_id
+        )
+        if refs == 0:
+            await client.delete_source(source_id)
+        else:
+            log.info("retry: source %s still referenced (refs=%s) — kept", source_id, refs)
+    except Exception:  # noqa: BLE001 — remote cleanup is best-effort
+        log.exception("retry: could not delete source %s", source_id)
+
+
+async def _best_effort_reset_failed(db: Database, row_id: Any) -> None:
+    """Move a claimed row from 'retrying' back to 'failed' so it stays retryable. Guarded
+    on the current status so it never clobbers a row that already reached a terminal state.
+    Best-effort; the startup reconciler is the guaranteed backstop for a row this couldn't
+    reach."""
+    try:
+        await db.aexecute(
+            "update public.research_sources set status = 'failed' "
+            "where id = %s and status = 'retrying'",
+            (row_id,),
+        )
+    except Exception:  # noqa: BLE001 — best-effort; reconciler backstops
+        log.exception("source retry: could not reset row %s", row_id)
+
+
+def reset_sources_to_failed(db: Database, row_ids: list[UUID]) -> None:
+    """Revert a claim: move rows from 'retrying' back to 'failed'. Used when the worker
+    could not be scheduled after the claim committed, so the rows aren't stranded in
+    'retrying' with nothing behind them."""
+    if not row_ids:
+        return
+    db.execute(
+        "update public.research_sources set status = 'failed' "
+        "where id = any(%s) and status = 'retrying'",
+        (list(row_ids),),
+    )
+
+
+async def retry_brand_sources(
+    client: PowabaseClient,
+    db: Database,
+    business_id: UUID,
+    rows: list[dict[str, Any]],
+) -> None:
+    """Re-scrape each claimed source row (already marked 'retrying' by
+    mark_sources_retrying) and update it in place. Bounded concurrency + a shared retry
+    budget, mirroring the main run scrape.
+
+    Per row: re-run _scrape_one on its URL. If it yields no Source (no URL, or the import
+    produced nothing), restore the row to 'failed' with its original linkage. Otherwise
+    ADOPT the fresh Source (new source_id/word_count/status) and delete the OLD Source when
+    nothing else references it. If the adopt-UPDATE matches no row (the run was deleted
+    mid-retry) or fails, the freshly created Source is cleaned up so a retry never leaks an
+    orphan. One row's failure never sinks the batch; a CancelledError (shutdown drain)
+    resets the row and re-raises so it is not stranded in 'retrying' (the startup
+    reconciler is the guaranteed backstop).
+
+    A non-terminal outcome (e.g. 'extracting' from a poll-budget timeout) is persisted as
+    'failed' via _row_status, so a retried row never rests in a spinner-forever state.
+    `business_id` scopes only the batch-completion summary log (rows were already
+    brand-scoped by the claim)."""
+    sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+    budget = _RetryBudget(MAX_RUN_RETRIES)
+
+    async def _one(row: dict[str, Any]) -> bool:
+        row_id = row["id"]
+        old_sid = row.get("source_id")
+        url = row.get("url")
+        title_by_url = {url: row.get("title") or ""} if url else {}
+        new_sid: str | None = None
+        adopted = False
+        try:
+            async with sem:
+                res = (
+                    await _scrape_one(client, db, url, title_by_url, budget)
+                    if url else None
+                )
+            if res is None:
+                # Nothing re-scraped — move 'retrying' → 'failed' (keeps old linkage).
+                await _best_effort_reset_failed(db, row_id)
+                return False
+            new_sid = res["source_id"]
+            t = res["teardown"]
+            # `returning id`: if the row vanished mid-retry (its run was deleted), the
+            # UPDATE matches nothing — the fresh Source we just created would then be an
+            # orphan, so we detect that and clean it up rather than leak it.
+            updated = await db.afetch_one(
+                "update public.research_sources "
+                "set source_id = %s, word_count = %s, status = %s where id = %s "
+                "returning id",
+                (new_sid, t.word_count, _row_status(res["status"]), row_id),
+            )
+            adopted = updated is not None
+            if not adopted:
+                if new_sid:
+                    await _best_effort_delete_source(client, db, new_sid)
+                return False
+            # Adopt succeeded — retire the stale Source if nothing else references it.
+            if old_sid and new_sid != old_sid:
+                await _best_effort_delete_source(client, db, old_sid)
+            return res["status"] == "extracted"
+        except asyncio.CancelledError:
+            # Shutdown drain / explicit cancel interrupted this row mid-flight. Reset it
+            # (best-effort; the reconciler guarantees it) and drop any un-adopted fresh
+            # Source, then re-raise so cancellation still propagates.
+            await _best_effort_reset_failed(db, row_id)
+            if new_sid and not adopted:
+                await _best_effort_delete_source(client, db, new_sid)
+            raise
+        except Exception:  # noqa: BLE001 — one row must never sink the batch
+            log.exception("source retry failed for row %s", row_id)
+            if not adopted:
+                await _best_effort_reset_failed(db, row_id)
+                if new_sid:
+                    # adopt-UPDATE failed after a fresh Source was created — don't leak it.
+                    await _best_effort_delete_source(client, db, new_sid)
+        return False
+
+    results = await asyncio.gather(*[_one(r) for r in rows])
+    extracted = sum(1 for r in results if r)
+    log.info(
+        "source retry for business %s: %s/%s row(s) re-extracted",
+        business_id, extracted, len(rows),
+    )
+
+
 def list_sources(db: Database, run_id: UUID) -> list[dict[str, Any]]:
     return db.fetch_all(
         f"select {_SOURCE_COLUMNS} from public.research_sources "
@@ -826,7 +994,8 @@ async def evaluate_and_prune(
                 "insert into public.research_sources "
                 "(research_run_id, source_id, url, title, word_count, status) "
                 "values (%s, %s, %s, %s, %s, %s)",
-                (run_id, res["source_id"], u, t.title, t.word_count, res["status"]),
+                (run_id, res["source_id"], u, t.title, t.word_count,
+                 _row_status(res["status"])),
             )
             fresh.append(
                 {"url": u, "teardown": t, "source_id": res["source_id"],
@@ -956,7 +1125,8 @@ async def run_research_task(
                 "insert into public.research_sources "
                 "(research_run_id, source_id, url, title, word_count, status) "
                 "values (%s, %s, %s, %s, %s, %s)",
-                (run_id, r["source_id"], r["url"], t.title, t.word_count, r["status"]),
+                (run_id, r["source_id"], r["url"], t.title, t.word_count,
+                 _row_status(r["status"])),
             )
             by_url[r["url"]] = {
                 "teardown": t, "source_id": r["source_id"], "status": r["status"],

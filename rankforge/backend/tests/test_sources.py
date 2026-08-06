@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
+import pytest
 from conftest import ADMIN_ORG, with_auth
 from fastapi.testclient import TestClient
 
@@ -152,6 +153,67 @@ async def test_bulk_delete_swallows_refcount_failure(monkeypatch):
     n = await svc.bulk_delete_brand_sources(client, db, UUID(BID), [UUID(RID)])
     assert n == 1
     client.delete_source.assert_not_awaited()
+
+
+# --- retry ---
+def test_retry_requires_editor():
+    writer = CurrentUser(id=BID, role="writer", org_id=ADMIN_ORG)
+    resp = _client(user=writer).post(
+        "/api/sources/retry", json={"business_id": BID, "row_ids": [RID]}
+    )
+    assert resp.status_code == 403
+
+
+def test_retry_cross_org_404():
+    # An editor in a DIFFERENT org gets 404 (not 403) so brand ids can't be probed across
+    # orgs — assert_brand_access is the tenant-isolation boundary.
+    other = CurrentUser(
+        id=BID, role="admin", org_id="99999999-9999-9999-9999-999999999999"
+    )
+    resp = _client(user=other).post(
+        "/api/sources/retry", json={"business_id": BID, "row_ids": [RID]}
+    )
+    assert resp.status_code == 404
+
+
+def test_retry_spawns_worker_with_claimed_rows(monkeypatch):
+    # The worker must receive the CLAIMED rows (from mark_sources_retrying), not the
+    # request's raw row_ids — the claim is what filters/authorizes them.
+    claimed = [{"id": RID2, "source_id": "s", "url": "u", "title": "t"}]
+    monkeypatch.setattr(svc, "mark_sources_retrying", lambda db, bid, ids: claimed)
+    worker = MagicMock(return_value=None)
+    monkeypatch.setattr(svc, "retry_brand_sources", worker)
+    monkeypatch.setattr("rankforge_backend.routes.sources.spawn", lambda coro: None)
+    resp = _client().post(
+        "/api/sources/retry", json={"business_id": BID, "row_ids": [RID, RID2]}
+    )
+    assert resp.status_code == 202
+    assert resp.json() == {"queued": 1}
+    _, _, _, rows_arg = worker.call_args.args
+    assert rows_arg == claimed
+
+
+def test_retry_reverts_claim_when_spawn_fails(monkeypatch):
+    # The claim commits before spawn; if the worker can't be scheduled, the claim must be
+    # reverted so rows aren't stranded in 'retrying' with nothing behind them.
+    claimed = [{"id": RID, "source_id": "old", "url": "https://x.com/a", "title": "A"}]
+    monkeypatch.setattr(svc, "mark_sources_retrying", lambda db, bid, ids: claimed)
+    monkeypatch.setattr(svc, "retry_brand_sources", AsyncMock())
+    reverted = []
+    monkeypatch.setattr(
+        svc, "reset_sources_to_failed", lambda db, ids: reverted.append(ids)
+    )
+
+    def boom_spawn(coro):
+        coro.close()  # we captured intent; don't leave an un-awaited coroutine
+        raise RuntimeError("no task slot")
+
+    monkeypatch.setattr("rankforge_backend.routes.sources.spawn", boom_spawn)
+    with pytest.raises(RuntimeError):
+        _client().post(
+            "/api/sources/retry", json={"business_id": BID, "row_ids": [RID]}
+        )
+    assert reverted == [[RID]]  # the claim was reverted before the error propagated
 
 
 # --- meta ---

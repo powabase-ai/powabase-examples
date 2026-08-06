@@ -1,5 +1,6 @@
 """Research — JSON extraction (unit) + async route wiring (hermetic)."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, call
 from uuid import UUID
 
@@ -353,6 +354,26 @@ async def test_delete_run_dedupes_same_source(monkeypatch):
     client.delete_source.assert_awaited_once_with("dup")
 
 
+def test_mark_sources_retrying_empty_returns_early():
+    db = MagicMock()
+    assert svc.mark_sources_retrying(db, UUID(BID), []) == []
+    db.fetch_all.assert_not_called()
+
+
+def test_mark_sources_retrying_claims_and_returns_rows():
+    db = MagicMock()
+    claimed = [{"id": RID, "source_id": "old", "url": "https://x.com/a", "title": "A"}]
+    db.fetch_all.return_value = claimed
+    out = svc.mark_sources_retrying(db, UUID(BID), [UUID(RID)])
+    assert out == claimed
+    sql, params = db.fetch_all.call_args[0]
+    assert "set status = 'retrying'" in sql
+    assert "rr.business_id = %s" in sql            # brand-scoped
+    assert "is distinct from 'extracted'" in sql   # never re-scrape a good source
+    assert "is distinct from 'retrying'" in sql    # double-submit guard
+    assert params == (UUID(BID), [UUID(RID)])
+
+
 def test_delete_research_route(monkeypatch):
     monkeypatch.setattr(svc, "get_run", lambda db, rid: {"id": RID, "business_id": BID})
     monkeypatch.setattr(svc, "delete_run", AsyncMock(return_value=True))
@@ -679,3 +700,279 @@ def test_retry_backoff_index_is_clamped():
     bo = svc.RETRY_BACKOFF
     assert [bo[min(i, len(bo) - 1)] for i in range(svc.MAX_SCRAPE_RETRIES)] == [5.0, 15.0]
     assert bo[min(5, len(bo) - 1)] == 15.0  # a future MAX_SCRAPE_RETRIES bump won't IndexError
+
+
+FAILED_ROW = {"id": RID, "source_id": "old", "url": "https://x.com/a", "title": "A"}
+
+
+def _scrape_result(source_id, status, word_count):
+    td = svc.CompetitorTeardown(
+        url="https://x.com/a", title="A", word_count=word_count, source_id=source_id
+    )
+    return {
+        "teardown": td, "status": status, "source_id": source_id,
+        "url": "https://x.com/a", "attempts": 1, "excerpt": "",
+    }
+
+
+async def test_retry_brand_sources_success_adopts_and_deletes_old(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    db.afetch_one = AsyncMock(return_value={"id": RID})   # adopt UPDATE ... returning id
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("new", "extracted", 321)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    upd = db.afetch_one.await_args_list[0].args
+    assert "set source_id = %s" in upd[0] and "returning id" in upd[0]
+    assert upd[1] == ("new", 321, "extracted", RID)   # row now points at the fresh Source
+    client.delete_source.assert_awaited_once_with("old")  # stale orphan removed
+
+
+async def test_retry_brand_sources_keeps_shared_old_source(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    db.afetch_one = AsyncMock(return_value={"id": RID})
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 1)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("new", "extracted", 200)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    client.delete_source.assert_not_awaited()  # old Source still referenced → kept
+
+
+async def test_retry_brand_sources_none_restores_failed(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    monkeypatch.setattr(svc, "_scrape_one", AsyncMock(return_value=None))
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    upd = db.aexecute.await_args_list[0].args
+    assert "set status = 'failed'" in upd[0]
+    assert upd[1] == (RID,)                       # linkage unchanged, back to failed
+    client.delete_source.assert_not_awaited()
+
+
+async def test_retry_brand_sources_failed_dict_adopts_and_deletes_old(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    db.afetch_one = AsyncMock(return_value={"id": RID})
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    # re-import succeeded but extraction failed → dict with a fresh source_id, status 'failed'
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("newfail", "failed", None)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    upd = db.afetch_one.await_args_list[0].args
+    assert upd[1] == ("newfail", None, "failed", RID)   # adopted the fresh failed source
+    client.delete_source.assert_awaited_once_with("old")  # old orphan removed
+
+
+def test_row_status_collapses_non_terminal_to_failed():
+    # terminal statuses pass through; anything non-terminal (incl. a poll-timeout
+    # 'extracting', None, or an unknown value) is persisted as 'failed'
+    assert svc._row_status("extracted") == "extracted"
+    assert svc._row_status("failed") == "failed"
+    assert svc._row_status("attention_required") == "attention_required"
+    assert svc._row_status("cancelled") == "cancelled"
+    assert svc._row_status("extracting") == "failed"
+    assert svc._row_status(None) == "failed"
+    assert svc._row_status("weird") == "failed"
+
+
+async def test_retry_brand_sources_persists_extracting_as_failed(monkeypatch):
+    # A poll-budget timeout yields a non-terminal 'extracting' — it must be stored as
+    # 'failed' (a clean terminal state the UI can retry), not a spinner nothing advances.
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    db.afetch_one = AsyncMock(return_value={"id": RID})
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("newsrc", "extracting", None)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    upd = db.afetch_one.await_args_list[0].args
+    assert upd[1] == ("newsrc", None, "failed", RID)   # 'extracting' collapsed to 'failed'
+
+
+async def test_retry_brand_sources_cleans_orphan_on_adopt_failure(monkeypatch):
+    # _scrape_one created a fresh Source, but the adopt-UPDATE raises — the fresh Source
+    # must be cleaned up (not leaked) and the row reset so it stays retryable.
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    db.afetch_one = AsyncMock(side_effect=RuntimeError("db down"))
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("newsrc", "extracted", 200)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    client.delete_source.assert_awaited_once_with("newsrc")   # fresh Source not leaked
+    assert any(
+        "set status = 'failed'" in c.args[0] and c.args[1] == (RID,)
+        for c in db.aexecute.await_args_list
+    )                                                          # row reset, stays retryable
+
+
+async def test_retry_brand_sources_cleans_orphan_when_row_deleted_midflight(monkeypatch):
+    # The adopt-UPDATE ... returning id matches 0 rows (the run was deleted mid-retry) →
+    # the fresh Source is an orphan and must be cleaned up; the old Source is left alone.
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    db.afetch_one = AsyncMock(return_value=None)   # 0 rows updated
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("newsrc", "extracted", 200)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    client.delete_source.assert_awaited_once_with("newsrc")   # orphan cleaned; old untouched
+
+
+async def test_retry_brand_sources_cancelled_resets_and_reraises(monkeypatch):
+    # A shutdown-drain cancellation must reset the row (so it isn't stranded in 'retrying')
+    # and still propagate the CancelledError.
+    async def scrape(*a, **k):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(svc, "_scrape_one", scrape)
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    assert any(
+        "set status = 'failed'" in c.args[0] and c.args[1] == (RID,)
+        for c in db.aexecute.await_args_list
+    )                                                          # reset before re-raise
+
+
+async def test_retry_brand_sources_one_failure_does_not_sink_batch(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    db.afetch_one = AsyncMock(return_value={"id": RID})   # the good row's adopt succeeds
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+
+    async def scrape(client, d, url, tbu, budget=None):
+        if url.endswith("boom"):
+            raise RuntimeError("kaboom")
+        return _scrape_result("new2", "extracted", 250)
+
+    monkeypatch.setattr(svc, "_scrape_one", scrape)
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+    boom = {"id": "44444444-4444-4444-4444-444444444444",
+            "source_id": "o1", "url": "https://x.com/boom", "title": "b"}
+    ok = {"id": RID, "source_id": "o2", "url": "https://x.com/ok", "title": "ok"}
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [boom, ok])
+
+    # the good row was adopted (afetch_one); the boom row's scrape error was caught,
+    # logged, and the row reset to 'failed' (aexecute). The key: batch survived.
+    assert any(
+        c.args[1] == ("new2", 250, "extracted", RID) for c in db.afetch_one.await_args_list
+    )
+    assert any(
+        "set status = 'failed'" in c.args[0] and c.args[1] == (boom["id"],)
+        for c in db.aexecute.await_args_list
+    )
+
+
+async def test_retry_brand_sources_db_error_does_not_sink_batch(monkeypatch):
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(side_effect=lambda *a, **k: _scrape_result("new", "extracted", 200)),
+    )
+    boom_id = "44444444-4444-4444-4444-444444444444"
+
+    async def afetch_one(sql, params):
+        if params and params[-1] == boom_id:   # the boom row's adopt UPDATE errors
+            raise RuntimeError("db down")
+        return {"id": params[-1]}              # the sibling adopt succeeds
+
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    db.afetch_one = AsyncMock(side_effect=afetch_one)
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+    boom = {"id": boom_id, "source_id": "o1", "url": "https://x.com/a", "title": "b"}
+    ok = {"id": RID, "source_id": "o2", "url": "https://x.com/a", "title": "ok"}
+
+    # Must NOT raise even though the boom row's adopt errors.
+    await svc.retry_brand_sources(client, db, UUID(BID), [boom, ok])
+
+    # sibling completed its adopt (via afetch_one); boom row was reset to 'failed'
+    assert any(c.args[1][-1] == RID for c in db.afetch_one.await_args_list)
+    assert any(
+        "set status = 'failed'" in c.args[0] and c.args[1] == (boom_id,)
+        for c in db.aexecute.await_args_list
+    )
+
+
+def test_retry_sources_route_queues_claimed_rows(monkeypatch):
+    claimed = [{"id": RID, "source_id": "old", "url": "https://x.com/a", "title": "A"}]
+    monkeypatch.setattr(svc, "mark_sources_retrying", lambda db, bid, ids: claimed)
+    monkeypatch.setattr(svc, "retry_brand_sources", AsyncMock())
+    spawned = []
+
+    def fake_spawn(coro):
+        spawned.append(coro)
+        coro.close()  # we asserted dispatch; don't actually run the worker
+
+    monkeypatch.setattr("rankforge_backend.routes.sources.spawn", fake_spawn)
+    resp = make_client().post(
+        "/api/sources/retry", json={"business_id": BID, "row_ids": [RID]}
+    )
+    assert resp.status_code == 202
+    assert resp.json() == {"queued": 1}
+    assert len(spawned) == 1
+
+
+def test_retry_sources_route_no_claimed_rows_no_spawn(monkeypatch):
+    monkeypatch.setattr(svc, "mark_sources_retrying", lambda db, bid, ids: [])
+    spawned = []
+    monkeypatch.setattr(
+        "rankforge_backend.routes.sources.spawn", lambda c: spawned.append(c)
+    )
+    resp = make_client().post(
+        "/api/sources/retry", json={"business_id": BID, "row_ids": [RID]}
+    )
+    assert resp.status_code == 202
+    assert resp.json() == {"queued": 0}
+    assert not spawned

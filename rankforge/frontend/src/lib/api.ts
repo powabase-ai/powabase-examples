@@ -178,6 +178,19 @@ export interface CompetitorTeardown {
   source_id?: string | null;
 }
 
+export interface ResearchSource {
+  id: string;
+  research_run_id: string;
+  source_id: string;
+  url?: string | null;
+  title?: string | null;
+  word_count?: number | null;
+  status?: string | null;
+  trust_score?: number | null;
+  trust_reason?: string | null;
+  created_at: string;
+}
+
 export type ResearchStatus =
   | "queued"
   | "searching"
@@ -211,6 +224,8 @@ export const researchApi = {
   listByBrand: (businessId: string) =>
     request<ResearchRun[]>(`/api/research?business_id=${businessId}`),
   get: (id: string) => request<ResearchRun>(`/api/research/${id}`),
+  sources: (runId: string) =>
+    request<ResearchSource[]>(`/api/research/${runId}/sources`),
   run: (data: {
     business_id: string;
     topic: string;
@@ -307,6 +322,24 @@ export const sourcesApi = {
       deleted += res.deleted;
     }
     return { deleted };
+  },
+  retry: async (
+    businessId: string,
+    rowIds: string[]
+  ): Promise<{ queued: number }> => {
+    const BATCH = 500;
+    let queued = 0;
+    for (let i = 0; i < rowIds.length; i += BATCH) {
+      const res = await request<{ queued: number }>(`/api/sources/retry`, {
+        method: "POST",
+        body: JSON.stringify({
+          business_id: businessId,
+          row_ids: rowIds.slice(i, i + BATCH),
+        }),
+      });
+      queued += res.queued;
+    }
+    return { queued };
   },
 };
 
