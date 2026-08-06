@@ -43,9 +43,9 @@ User clicks "Retry" (one row) or "Retry all failed"
   → backend authorizes rows in org, filters to retryable, marks each
     status='retrying', spawns background task, returns {queued: n}
   → background: for each row (bounded concurrency) re-run _scrape_one(url)
-       success → UPDATE row source_id/word_count/status='extracted';
-                 delete old orphan source (ref-count-guarded)
-       fail    → UPDATE row status='failed' (linkage unchanged)
+       None (import failed)  → UPDATE row status='failed' (linkage unchanged)
+       dict (extracted/fail) → UPDATE row source_id/word_count/status;
+                               delete old orphan source (ref-count-guarded)
   → frontend already polls the sources list; row flips
     retrying → extracted/failed live
 ```
@@ -66,12 +66,14 @@ User clicks "Retry" (one row) or "Retry all failed"
 - Per row, bounded by a semaphore like the main scrape loop:
   1. Capture `old_source_id`, `url`, `title`.
   2. `await _scrape_one(client, url, {url: title})`.
-  3. On `extracted`: `UPDATE research_sources SET source_id, word_count,
-     status='extracted' WHERE id = row`, then delete `old_source_id`
-     **only if** `source_reference_count(db, old_source_id) == 0` (a fresh
-     source id comes back on re-import; ref-count guard preserves shared
-     sources — the orphan-cleanup rule validated in the PR #19 work).
-  4. On non-`extracted`: `UPDATE ... SET status='failed'` (linkage unchanged).
+  3. If result is None (import produced no source): `UPDATE research_sources SET
+     status='failed' WHERE id = row` (linkage unchanged; row stays retryable).
+  4. If result is dict (re-import succeeded, any status): `UPDATE research_sources
+     SET source_id, word_count, status WHERE id = row`, then delete `old_source_id`
+     **only if** `source_reference_count(db, old_source_id) == 0` (a fresh source
+     id comes back on re-import; ref-count guard preserves shared sources — the
+     orphan-cleanup rule validated in PR #19 work). Covers both extracted success
+     and extraction-failed states with a fresh source.
 - Wrap each row so one failure (or exception) cannot sink the batch; log and
   continue.
 

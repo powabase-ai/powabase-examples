@@ -620,6 +620,13 @@ async def retry_brand_sources(
                     log.exception("retry: could not delete old source %s", old_sid)
         except Exception:  # noqa: BLE001 — one row must never sink the batch
             log.exception("source retry failed for row %s", row_id)
+            try:
+                await db.aexecute(
+                    "update public.research_sources set status = 'failed' where id = %s",
+                    (row_id,),
+                )
+            except Exception:  # noqa: BLE001 — recovery write is best-effort
+                log.exception("source retry: could not reset stuck row %s", row_id)
 
     await asyncio.gather(*[_one(r) for r in rows])
 

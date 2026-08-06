@@ -764,6 +764,25 @@ async def test_retry_brand_sources_none_restores_failed(monkeypatch):
     client.delete_source.assert_not_awaited()
 
 
+async def test_retry_brand_sources_failed_dict_adopts_and_deletes_old(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    # re-import succeeded but extraction failed → dict with a fresh source_id, status 'failed'
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("newfail", "failed", None)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    upd = db.aexecute.await_args_list[0].args
+    assert upd[1] == ("newfail", None, "failed", RID)   # adopted the fresh failed source
+    client.delete_source.assert_awaited_once_with("old")  # old orphan removed
+
+
 async def test_retry_brand_sources_one_failure_does_not_sink_batch(monkeypatch):
     db = MagicMock()
     db.aexecute = AsyncMock()
@@ -784,9 +803,10 @@ async def test_retry_brand_sources_one_failure_does_not_sink_batch(monkeypatch):
     await svc.retry_brand_sources(client, db, UUID(BID), [boom, ok])
 
     calls = [c.args for c in db.aexecute.await_args_list]
-    # the good row was updated to extracted; the boom row's scrape error was caught and
-    # logged, so it stays 'retrying' (no update). The key: the batch survived.
+    # the good row was updated to extracted; the boom row's scrape error was caught,
+    # logged, and the row reset to 'failed' by the outer except. The key: batch survived.
     assert any(a[1] == ("new2", 250, "extracted", RID) for a in calls)
+    assert any("set status = 'failed'" in a[0] and a[1] == (boom["id"],) for a in calls)
 
 
 async def test_retry_brand_sources_db_error_does_not_sink_batch(monkeypatch):
