@@ -2,15 +2,17 @@
 
 import * as React from "react";
 import { use } from "react";
-import { ExternalLink, FileText, Layers, Loader2, Trash2 } from "lucide-react";
+import { ExternalLink, FileText, Layers, Loader2, RotateCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { SourceContentViewer } from "@/components/SourceContentViewer";
+import { StatusChip, isRetryable } from "@/components/SourceStatus";
 import { Page, PageHeader } from "@/components/layout/PageHeader";
 import {
   useBrandSources,
   useDeleteBrandSources,
+  useRetrySources,
 } from "@/lib/hooks/useResearch";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { canApprove, type BrandSource } from "@/lib/api";
@@ -48,6 +50,7 @@ export default function SourcesLibrary({
   const canEdit = canApprove(profile?.role);
   const { data: sources, isLoading, error } = useBrandSources(id);
   const del = useDeleteBrandSources(id);
+  const retry = useRetrySources(id);
 
   const [selected, setSelected] = React.useState<BrandSource | null>(null);
   const [checked, setChecked] = React.useState<Set<string>>(new Set());
@@ -105,6 +108,21 @@ export default function SourcesLibrary({
     });
   }
 
+  function onRetry(ids: string[]) {
+    if (!ids.length) return;
+    retry.mutate(ids, {
+      onSuccess: (r) =>
+        toast.success(
+          r.queued
+            ? `Retrying ${r.queued} source${r.queued === 1 ? "" : "s"}…`
+            : "Nothing to retry"
+        ),
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Retry failed"),
+    });
+  }
+
+  const failedIds = (sources ?? []).filter((s) => isRetryable(s.status)).map((s) => s.id);
+
   return (
     <Page>
       <PageHeader
@@ -127,6 +145,22 @@ export default function SourcesLibrary({
                 />
                 {checked.size ? `${checked.size} selected` : "Select all"}
               </label>
+              {failedIds.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-muted-foreground hover:text-foreground"
+                  onClick={() => onRetry(failedIds)}
+                  disabled={retry.isPending}
+                >
+                  {retry.isPending ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <RotateCw />
+                  )}
+                  Retry {failedIds.length} failed
+                </Button>
+              )}
               {checked.size > 0 && (
                 <Button
                   variant="ghost"
@@ -194,11 +228,25 @@ export default function SourcesLibrary({
                         words
                       </span>
                       <TrustBadge score={s.trust_score} reason={s.trust_reason} />
+                      <StatusChip status={s.status} />
                       <span className="inline-flex items-center gap-1">
                         <FileText className="size-3" /> {s.run_topic}
                       </span>
                     </div>
                   </button>
+                  {canEdit && isRetryable(s.status) && (
+                    <div className="flex items-center border-b border-border pr-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-muted-foreground hover:text-foreground"
+                        onClick={() => onRetry([s.id])}
+                        disabled={retry.isPending}
+                      >
+                        <RotateCw className="size-3.5" /> Retry
+                      </Button>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
