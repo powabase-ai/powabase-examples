@@ -645,7 +645,7 @@ async def retry_brand_sources(
     sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
     budget = _RetryBudget(MAX_RUN_RETRIES)
 
-    async def _one(row: dict[str, Any]) -> None:
+    async def _one(row: dict[str, Any]) -> bool:
         row_id = row["id"]
         old_sid = row.get("source_id")
         url = row.get("url")

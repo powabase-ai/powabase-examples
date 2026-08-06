@@ -77,7 +77,7 @@ def reconcile_interrupted(db: Database) -> None:
     if opp or run or art or mat or scout or src:
         log.info(
             "startup reconciliation: reset %s opportunity(ies), %s research run(s), "
-            "%s article(s), %s scout run(s), %s materials ingest(s), %s retrying "
+            "%s article(s), %s scout run(s), %s materials ingest(s), %s stuck "
             "source(s) orphaned by a prior restart",
             opp, run, art, scout, mat, src,
         )
