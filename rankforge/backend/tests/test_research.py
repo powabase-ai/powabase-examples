@@ -813,3 +813,36 @@ async def test_retry_brand_sources_db_error_does_not_sink_batch(monkeypatch):
 
     # The sibling row still got its success UPDATE (batch survived).
     assert any(c.args[1] == ("new", 200, "extracted", RID) for c in db.aexecute.await_args_list)
+
+
+def test_retry_sources_route_queues_claimed_rows(monkeypatch):
+    claimed = [{"id": RID, "source_id": "old", "url": "https://x.com/a", "title": "A"}]
+    monkeypatch.setattr(svc, "mark_sources_retrying", lambda db, bid, ids: claimed)
+    monkeypatch.setattr(svc, "retry_brand_sources", AsyncMock())
+    spawned = []
+
+    def fake_spawn(coro):
+        spawned.append(coro)
+        coro.close()  # we asserted dispatch; don't actually run the worker
+
+    monkeypatch.setattr("rankforge_backend.routes.sources.spawn", fake_spawn)
+    resp = make_client().post(
+        "/api/sources/retry", json={"business_id": BID, "row_ids": [RID]}
+    )
+    assert resp.status_code == 202
+    assert resp.json() == {"queued": 1}
+    assert len(spawned) == 1
+
+
+def test_retry_sources_route_no_claimed_rows_no_spawn(monkeypatch):
+    monkeypatch.setattr(svc, "mark_sources_retrying", lambda db, bid, ids: [])
+    spawned = []
+    monkeypatch.setattr(
+        "rankforge_backend.routes.sources.spawn", lambda c: spawned.append(c)
+    )
+    resp = make_client().post(
+        "/api/sources/retry", json={"business_id": BID, "row_ids": [RID]}
+    )
+    assert resp.status_code == 202
+    assert resp.json() == {"queued": 0}
+    assert not spawned

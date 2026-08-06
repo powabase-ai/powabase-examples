@@ -11,6 +11,7 @@ from ..models.research import BrandSource, SourceBulkDelete, SourceMeta
 from ..powabase import PowabaseClient, PowabaseError
 from ..services import research as svc
 from ..services import source_view
+from ..tasks import spawn
 from .deps import get_db, get_powabase
 
 router = APIRouter(
@@ -44,6 +45,24 @@ async def bulk_delete_sources(
         pb, db, payload.business_id, payload.row_ids
     )
     return {"deleted": deleted}
+
+
+@router.post("/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_sources(
+    payload: SourceBulkDelete,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(require_editor),
+):
+    """Re-scrape the selected failed / non-extracted sources. Editor/admin only. Rows are
+    brand-scoped and claimed atomically (already-extracted or in-flight rows are ignored),
+    then re-scraped in the background — poll GET /api/sources for each row's status
+    (retrying → extracted/failed). Returns how many rows were queued."""
+    assert_brand_access(db, payload.business_id, user)
+    rows = svc.mark_sources_retrying(db, payload.business_id, payload.row_ids)
+    if rows:
+        spawn(svc.retry_brand_sources(pb, db, payload.business_id, rows))
+    return {"queued": len(rows)}
 
 
 @router.get("/{source_id}/markdown")
