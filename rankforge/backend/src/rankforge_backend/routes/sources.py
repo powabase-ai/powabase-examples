@@ -71,14 +71,20 @@ async def retry_sources(
     assert_brand_access(db, payload.business_id, user)
     rows = svc.mark_sources_retrying(db, payload.business_id, payload.row_ids)
     if rows:
+        # Attribution: a retry burst spends scrape credits + the background-task pool, so
+        # record who kicked it off and how big it was.
+        log.info(
+            "source retry: user %s queued %s row(s) for business %s",
+            user.id, len(rows), payload.business_id,
+        )
         coro = svc.retry_brand_sources(pb, db, payload.business_id, rows)
         try:
             spawn(coro)
         except Exception:
-            # The claim already committed but the worker couldn't be scheduled. Close the
-            # un-awaited coroutine and revert the claim so the rows aren't stranded in
-            # 'retrying'. Guard the revert so a failing revert can't mask the original
-            # scheduling error the caller needs to see.
+            # spawn is create_task; it realistically only fails with no running loop. Still,
+            # the claim already committed — close the un-awaited coroutine and revert the
+            # claim so the rows aren't stranded in 'retrying' (guarding the revert so it
+            # can't mask the original error the caller needs to see).
             coro.close()
             try:
                 svc.reset_sources_to_failed(db, [r["id"] for r in rows])

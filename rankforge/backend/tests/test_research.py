@@ -787,6 +787,38 @@ async def test_retry_brand_sources_failed_dict_adopts_and_deletes_old(monkeypatc
     client.delete_source.assert_awaited_once_with("old")  # old orphan removed
 
 
+def test_row_status_collapses_non_terminal_to_failed():
+    # terminal statuses pass through; anything non-terminal (incl. a poll-timeout
+    # 'extracting', None, or an unknown value) is persisted as 'failed'
+    assert svc._row_status("extracted") == "extracted"
+    assert svc._row_status("failed") == "failed"
+    assert svc._row_status("attention_required") == "attention_required"
+    assert svc._row_status("cancelled") == "cancelled"
+    assert svc._row_status("extracting") == "failed"
+    assert svc._row_status(None) == "failed"
+    assert svc._row_status("weird") == "failed"
+
+
+async def test_retry_brand_sources_persists_extracting_as_failed(monkeypatch):
+    # A poll-budget timeout yields a non-terminal 'extracting' — it must be stored as
+    # 'failed' (a clean terminal state the UI can retry), not a spinner nothing advances.
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    db.afetch_one = AsyncMock(return_value={"id": RID})
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("newsrc", "extracting", None)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    upd = db.afetch_one.await_args_list[0].args
+    assert upd[1] == ("newsrc", None, "failed", RID)   # 'extracting' collapsed to 'failed'
+
+
 async def test_retry_brand_sources_cleans_orphan_on_adopt_failure(monkeypatch):
     # _scrape_one created a fresh Source, but the adopt-UPDATE raises — the fresh Source
     # must be cleaned up (not leaked) and the row reset so it stays retryable.

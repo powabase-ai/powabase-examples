@@ -166,6 +166,17 @@ def is_usable_source(s: dict[str, Any]) -> bool:
         and (s.get("word_count") or 0) >= MIN_SOURCE_WORDS
     )
 
+
+def _row_status(status: str | None) -> str:
+    """The status to PERSIST on a research_sources row. Terminal statuses pass through; a
+    NON-terminal one — notably 'extracting', left by a poll-budget timeout that nothing
+    re-polls — collapses to 'failed'. Otherwise the row would rest forever in a state the
+    UI shows as an endless spinner with no Retry (nothing advances it, the reconciler
+    doesn't sweep it, and the claim query would refuse it). is_usable_source already treats
+    any non-'extracted' status as unusable, so this only changes how a row is surfaced and
+    retried, never grounding."""
+    return status if status in EXTRACTION_TERMINAL else "failed"
+
 _SYSTEM_PROMPT = """\
 You are RankForge's **SERP analyst**. Given a topic, you map its search landscape \
 with the `web_search` (Exa) tool and return a structured analysis. Your output is \
@@ -627,9 +638,10 @@ async def retry_brand_sources(
     resets the row and re-raises so it is not stranded in 'retrying' (the startup
     reconciler is the guaranteed backstop).
 
-    `business_id` is not used in the query bodies (rows were already brand-scoped by the
-    claim) but kept in the signature so the worker's provenance is explicit at the call
-    site."""
+    A non-terminal outcome (e.g. 'extracting' from a poll-budget timeout) is persisted as
+    'failed' via _row_status, so a retried row never rests in a spinner-forever state.
+    `business_id` scopes only the batch-completion summary log (rows were already
+    brand-scoped by the claim)."""
     sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
     budget = _RetryBudget(MAX_RUN_RETRIES)
 
@@ -649,7 +661,7 @@ async def retry_brand_sources(
             if res is None:
                 # Nothing re-scraped — move 'retrying' → 'failed' (keeps old linkage).
                 await _best_effort_reset_failed(db, row_id)
-                return
+                return False
             new_sid = res["source_id"]
             t = res["teardown"]
             # `returning id`: if the row vanished mid-retry (its run was deleted), the
@@ -659,16 +671,17 @@ async def retry_brand_sources(
                 "update public.research_sources "
                 "set source_id = %s, word_count = %s, status = %s where id = %s "
                 "returning id",
-                (new_sid, t.word_count, res["status"], row_id),
+                (new_sid, t.word_count, _row_status(res["status"]), row_id),
             )
             adopted = updated is not None
             if not adopted:
                 if new_sid:
                     await _best_effort_delete_source(client, db, new_sid)
-                return
+                return False
             # Adopt succeeded — retire the stale Source if nothing else references it.
             if old_sid and new_sid != old_sid:
                 await _best_effort_delete_source(client, db, old_sid)
+            return res["status"] == "extracted"
         except asyncio.CancelledError:
             # Shutdown drain / explicit cancel interrupted this row mid-flight. Reset it
             # (best-effort; the reconciler guarantees it) and drop any un-adopted fresh
@@ -684,8 +697,14 @@ async def retry_brand_sources(
                 if new_sid:
                     # adopt-UPDATE failed after a fresh Source was created — don't leak it.
                     await _best_effort_delete_source(client, db, new_sid)
+        return False
 
-    await asyncio.gather(*[_one(r) for r in rows])
+    results = await asyncio.gather(*[_one(r) for r in rows])
+    extracted = sum(1 for r in results if r)
+    log.info(
+        "source retry for business %s: %s/%s row(s) re-extracted",
+        business_id, extracted, len(rows),
+    )
 
 
 def list_sources(db: Database, run_id: UUID) -> list[dict[str, Any]]:
@@ -975,7 +994,8 @@ async def evaluate_and_prune(
                 "insert into public.research_sources "
                 "(research_run_id, source_id, url, title, word_count, status) "
                 "values (%s, %s, %s, %s, %s, %s)",
-                (run_id, res["source_id"], u, t.title, t.word_count, res["status"]),
+                (run_id, res["source_id"], u, t.title, t.word_count,
+                 _row_status(res["status"])),
             )
             fresh.append(
                 {"url": u, "teardown": t, "source_id": res["source_id"],
@@ -1105,7 +1125,8 @@ async def run_research_task(
                 "insert into public.research_sources "
                 "(research_run_id, source_id, url, title, word_count, status) "
                 "values (%s, %s, %s, %s, %s, %s)",
-                (run_id, r["source_id"], r["url"], t.title, t.word_count, r["status"]),
+                (run_id, r["source_id"], r["url"], t.title, t.word_count,
+                 _row_status(r["status"])),
             )
             by_url[r["url"]] = {
                 "teardown": t, "source_id": r["source_id"], "status": r["status"],

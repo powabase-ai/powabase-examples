@@ -20,11 +20,23 @@ failed source is visible.
 
 ## Scope boundary
 
-Retry only fixes a source's **scraped content**. If a source is retried and
-succeeds *before* article generation, it is naturally picked up at generation
-time (grounding reads the run's usable sources then). Retry does **not**
-retroactively re-ground or regenerate an already-written article — that remains a
-separate, explicit action. Out of scope.
+Retry only fixes a source's **scraped content** (the `research_sources` row). If a
+source is retried and succeeds *before* article generation, it is naturally picked
+up at generation time — grounding (`index_run_sources`) reads the run's live usable
+sources then. Retry does **not**:
+
+- retroactively re-ground or regenerate an already-written article (a separate,
+  explicit action); or
+- rewrite the run's `research_runs.competitors` teardown snapshot, which the brief
+  strategist (`services/brief.py`) reads for competitive *structure* analysis. That
+  snapshot is a point-in-time picture of the SERP; a retried source becomes
+  citable via grounding, but the strategist's structural read isn't re-run.
+
+Both are out of scope.
+
+Non-terminal statuses (`extracting` from a poll-budget timeout) are persisted as
+`failed` (`_row_status`), so a row is never left in a state the UI shows as an
+endless spinner with no way to retry.
 
 ## Approach (chosen: A — one bulk, row-id endpoint)
 
