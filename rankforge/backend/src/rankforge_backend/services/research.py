@@ -561,6 +561,70 @@ def mark_sources_retrying(
     )
 
 
+async def retry_brand_sources(
+    client: PowabaseClient,
+    db: Database,
+    business_id: UUID,
+    rows: list[dict[str, Any]],
+) -> None:
+    """Re-scrape each claimed source row (already marked 'retrying' by
+    mark_sources_retrying) and update it in place. Bounded concurrency + a shared retry
+    budget, mirroring the main run scrape. Per row: re-run _scrape_one on its URL, then
+    ADOPT the fresh Source (new source_id/word_count/status) and delete the OLD Source
+    when nothing else references it — so a retry never orphans a Source or leaves two per
+    row. If the re-import yields no Source at all (or the row has no URL), restore the row
+    to 'failed' with its original linkage. One row's failure never sinks the batch.
+    `business_id` is unused in the query bodies (rows were already brand-scoped by the
+    claim) but kept in the signature so the worker's provenance is explicit at the call
+    site."""
+    sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+    budget = _RetryBudget(MAX_RUN_RETRIES)
+
+    async def _one(row: dict[str, Any]) -> None:
+        row_id = row["id"]
+        old_sid = row.get("source_id")
+        url = row.get("url")
+        title_by_url = {url: row.get("title") or ""} if url else {}
+        async with sem:
+            try:
+                res = (
+                    await _scrape_one(client, db, url, title_by_url, budget)
+                    if url else None
+                )
+            except Exception:  # noqa: BLE001 — one row must not sink the batch
+                log.exception("source retry failed for row %s", row_id)
+                res = None
+        if res is None:
+            # Nothing scraped — leave 'retrying' for 'failed' so the row stays retryable;
+            # keep its original linkage.
+            await db.aexecute(
+                "update public.research_sources set status = 'failed' where id = %s",
+                (row_id,),
+            )
+            return
+        new_sid = res["source_id"]
+        t = res["teardown"]
+        await db.aexecute(
+            "update public.research_sources "
+            "set source_id = %s, word_count = %s, status = %s where id = %s",
+            (new_sid, t.word_count, res["status"], row_id),
+        )
+        # Adopt the fresh Source; delete the stale one if nothing else references it
+        # (same ref-count contract as every other delete in this service). The count is a
+        # sync DB call — offload it so it doesn't block the gather loop.
+        if old_sid and new_sid != old_sid:
+            try:
+                refs = await asyncio.to_thread(
+                    source_refs.source_reference_count, db, old_sid
+                )
+                if refs == 0:
+                    await client.delete_source(old_sid)
+            except Exception:  # noqa: BLE001 — remote cleanup is best-effort
+                log.exception("retry: could not delete old source %s", old_sid)
+
+    await asyncio.gather(*[_one(r) for r in rows])
+
+
 def list_sources(db: Database, run_id: UUID) -> list[dict[str, Any]]:
     return db.fetch_all(
         f"select {_SOURCE_COLUMNS} from public.research_sources "

@@ -699,3 +699,91 @@ def test_retry_backoff_index_is_clamped():
     bo = svc.RETRY_BACKOFF
     assert [bo[min(i, len(bo) - 1)] for i in range(svc.MAX_SCRAPE_RETRIES)] == [5.0, 15.0]
     assert bo[min(5, len(bo) - 1)] == 15.0  # a future MAX_SCRAPE_RETRIES bump won't IndexError
+
+
+FAILED_ROW = {"id": RID, "source_id": "old", "url": "https://x.com/a", "title": "A"}
+
+
+def _scrape_result(source_id, status, word_count):
+    td = svc.CompetitorTeardown(
+        url="https://x.com/a", title="A", word_count=word_count, source_id=source_id
+    )
+    return {
+        "teardown": td, "status": status, "source_id": source_id,
+        "url": "https://x.com/a", "attempts": 1, "excerpt": "",
+    }
+
+
+async def test_retry_brand_sources_success_adopts_and_deletes_old(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("new", "extracted", 321)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    upd = db.aexecute.await_args_list[0].args
+    assert "set source_id = %s" in upd[0]
+    assert upd[1] == ("new", 321, "extracted", RID)   # row now points at the fresh Source
+    client.delete_source.assert_awaited_once_with("old")  # stale orphan removed
+
+
+async def test_retry_brand_sources_keeps_shared_old_source(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 1)
+    monkeypatch.setattr(
+        svc, "_scrape_one",
+        AsyncMock(return_value=_scrape_result("new", "extracted", 200)),
+    )
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    client.delete_source.assert_not_awaited()  # old Source still referenced → kept
+
+
+async def test_retry_brand_sources_none_restores_failed(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    monkeypatch.setattr(svc, "_scrape_one", AsyncMock(return_value=None))
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [dict(FAILED_ROW)])
+
+    upd = db.aexecute.await_args_list[0].args
+    assert "set status = 'failed'" in upd[0]
+    assert upd[1] == (RID,)                       # linkage unchanged, back to failed
+    client.delete_source.assert_not_awaited()
+
+
+async def test_retry_brand_sources_one_failure_does_not_sink_batch(monkeypatch):
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    monkeypatch.setattr(svc.source_refs, "source_reference_count", lambda d, sid, **k: 0)
+
+    async def scrape(client, d, url, tbu, budget=None):
+        if url.endswith("boom"):
+            raise RuntimeError("kaboom")
+        return _scrape_result("new2", "extracted", 250)
+
+    monkeypatch.setattr(svc, "_scrape_one", scrape)
+    client = MagicMock()
+    client.delete_source = AsyncMock()
+    boom = {"id": "44444444-4444-4444-4444-444444444444",
+            "source_id": "o1", "url": "https://x.com/boom", "title": "b"}
+    ok = {"id": RID, "source_id": "o2", "url": "https://x.com/ok", "title": "ok"}
+
+    await svc.retry_brand_sources(client, db, UUID(BID), [boom, ok])
+
+    calls = [c.args for c in db.aexecute.await_args_list]
+    # the good row was updated to extracted, the boom row restored to failed
+    assert any(a[1] == ("new2", 250, "extracted", RID) for a in calls)
+    assert any("set status = 'failed'" in a[0] and a[1] == (boom["id"],) for a in calls)
