@@ -353,6 +353,26 @@ async def test_delete_run_dedupes_same_source(monkeypatch):
     client.delete_source.assert_awaited_once_with("dup")
 
 
+def test_mark_sources_retrying_empty_returns_early():
+    db = MagicMock()
+    assert svc.mark_sources_retrying(db, UUID(BID), []) == []
+    db.fetch_all.assert_not_called()
+
+
+def test_mark_sources_retrying_claims_and_returns_rows():
+    db = MagicMock()
+    claimed = [{"id": RID, "source_id": "old", "url": "https://x.com/a", "title": "A"}]
+    db.fetch_all.return_value = claimed
+    out = svc.mark_sources_retrying(db, UUID(BID), [UUID(RID)])
+    assert out == claimed
+    sql, params = db.fetch_all.call_args[0]
+    assert "set status = 'retrying'" in sql
+    assert "rr.business_id = %s" in sql            # brand-scoped
+    assert "is distinct from 'extracted'" in sql   # never re-scrape a good source
+    assert "is distinct from 'retrying'" in sql    # double-submit guard
+    assert params == (UUID(BID), [UUID(RID)])
+
+
 def test_delete_research_route(monkeypatch):
     monkeypatch.setattr(svc, "get_run", lambda db, rid: {"id": RID, "business_id": BID})
     monkeypatch.setattr(svc, "delete_run", AsyncMock(return_value=True))

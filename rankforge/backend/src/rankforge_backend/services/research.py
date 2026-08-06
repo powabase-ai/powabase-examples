@@ -539,6 +539,28 @@ async def bulk_delete_brand_sources(
     return len(deleted)
 
 
+def mark_sources_retrying(
+    db: Database, business_id: UUID, row_ids: list[UUID]
+) -> list[dict[str, Any]]:
+    """Atomically CLAIM the retryable rows for a brand: set status='retrying' for rows
+    that belong to `business_id` and are neither already 'extracted' nor already
+    'retrying'. The UPDATE ... RETURNING is the claim — a duplicate/concurrent request
+    finds the rows already 'retrying' and gets nothing back (double-submit guard).
+    Returns the claimed rows (id, source_id, url, title) for the worker to re-scrape."""
+    if not row_ids:
+        return []
+    return db.fetch_all(
+        "update public.research_sources rs set status = 'retrying' "
+        "from public.research_runs rr "
+        "where rr.id = rs.research_run_id and rr.business_id = %s "
+        "and rs.id = any(%s) "
+        "and rs.status is distinct from 'extracted' "
+        "and rs.status is distinct from 'retrying' "
+        "returning rs.id, rs.source_id, rs.url, rs.title",
+        (business_id, list(row_ids)),
+    )
+
+
 def list_sources(db: Database, run_id: UUID) -> list[dict[str, Any]]:
     return db.fetch_all(
         f"select {_SOURCE_COLUMNS} from public.research_sources "
