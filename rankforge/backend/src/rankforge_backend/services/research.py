@@ -22,6 +22,7 @@ from psycopg.types.json import Json
 from ..db import Database
 from ..models.research import CompetitorTeardown, SearchResult
 from ..powabase import EXTRACTION_TERMINAL, PowabaseClient, PowabaseError
+from ..tasks import spawn
 from ..util import extract_json
 from . import business_profiles as brands
 from . import source_refs
@@ -47,11 +48,27 @@ MAX_BACKFILL = 12
 DEPTH_PRESETS = {"quick": (10, 6), "standard": (20, 12), "deep": (40, 22)}
 
 # How many competitor pages to import/poll/extract concurrently. Concurrency exists at
-# all because each page polls up to ~80s, so sequential scraping ≈ the sum; bounded
-# concurrency ≈ the slowest single page. Kept moderate (not the original 8) so the
-# simultaneous Firecrawl dispatch doesn't trip its rate limit; the pacer below further
-# spreads scrape starts.
+# all because each page polls for a while (see SOURCE_POLL_*), so sequential scraping ≈
+# the sum; bounded concurrency ≈ the slowest single page. Kept moderate (not the original
+# 8) so the simultaneous Firecrawl dispatch doesn't trip its rate limit; the pacer below
+# further spreads scrape starts.
 SCRAPE_CONCURRENCY = 5
+
+# Per-source extraction poll. A page is imported, then polled until Powabase reports a
+# terminal extraction status. Most pages finish in seconds, but large PDFs / heavy or
+# bot-guarded pages can take minutes. This is the SYNCHRONOUS budget the run waits on;
+# a page still extracting past it is left NON-terminal (not failed) and handed to
+# reconcile_pending_sources. (~150s; the old fixed ~80s dropped real content whose
+# extraction merely ran long — Powabase had extracted it cleanly seconds later.)
+SOURCE_POLL_INTERVAL = 2.0
+SOURCE_POLL_ATTEMPTS = 75
+
+# Reconcile window for sources still extracting when the synchronous budget elapsed. It
+# RE-POLLS the existing Source (no re-import → no extra scrape credits), adopting the
+# content once extraction lands. ~5 min beyond the sync budget comfortably covers the
+# observed slow tail (worst seen ≈215s); anything past it is genuinely stuck → failed.
+SOURCE_RECONCILE_INTERVAL = 5.0
+SOURCE_RECONCILE_ATTEMPTS = 60
 
 # --- scrape resilience (Firecrawl rate limits) -------------------------------------
 # Powabase runs each scrape through Firecrawl in a background job, so a burst of
@@ -756,7 +773,7 @@ async def _scrape_attempt(
 
     status = None
     error_message = None
-    for _ in range(40):  # poll up to ~80s
+    for _ in range(SOURCE_POLL_ATTEMPTS):
         try:
             src = await client.get_source(source_id)
         except (PowabaseError, httpx.HTTPError) as e:
@@ -779,7 +796,7 @@ async def _scrape_attempt(
         error_message = src.get("error_message")
         if status in EXTRACTION_TERMINAL:
             break
-        await asyncio.sleep(2)
+        await asyncio.sleep(SOURCE_POLL_INTERVAL)
     else:
         # Never reached a terminal status within the poll budget. The extraction is still
         # running remotely and would likely finish — so do NOT mark it a transient
@@ -899,6 +916,64 @@ def _scrape_summary(
     return ok, recovered, len(results) - ok
 
 
+async def reconcile_pending_sources(
+    client: PowabaseClient,
+    db: Database,
+    run_id: UUID,
+    source_ids: list[str],
+) -> None:
+    """Adopt sources whose extraction was still running when the run's synchronous scrape
+    budget elapsed. They were left NON-terminal (not failed); here we re-poll each EXISTING
+    Source — no re-import, so no extra scrape credits — for a longer window and, once
+    Powabase reports 'extracted', write its real content (status + word_count) onto the
+    research_sources row so it becomes usable for grounding. A source that never finishes
+    within the window is finally marked 'failed' (terminal, retryable). One source's failure
+    never sinks the batch. Runs on the LIGHT background pool (see tasks.spawn) so this
+    mostly-sleeping poll never holds a scarce heavy slot."""
+    # Bounds only the concurrent HTTP polls, NOT the (mostly-sleeping) per-source windows —
+    # so all sources poll in parallel and the batch finishes in ≈ one window, not N.
+    sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+
+    async def _one(sid: str) -> None:
+        try:
+            status = None
+            for _ in range(SOURCE_RECONCILE_ATTEMPTS):
+                async with sem:
+                    src = await client.get_source(sid)
+                status = src.get("extraction_status")
+                if status in EXTRACTION_TERMINAL:
+                    break
+                await asyncio.sleep(SOURCE_RECONCILE_INTERVAL)
+            if status == "extracted":
+                md = ""
+                try:
+                    async with sem:
+                        md = await client.get_source_markdown(sid)
+                except (PowabaseError, httpx.HTTPError):
+                    md = ""
+                # `<> 'extracted'` guards against clobbering a row already adopted elsewhere
+                # (e.g. a manual retry) while this was polling.
+                await db.aexecute(
+                    "update public.research_sources set status = 'extracted', "
+                    "word_count = %s where research_run_id = %s and source_id = %s "
+                    "and status <> 'extracted'",
+                    (len(md.split()) if md else None, run_id, sid),
+                )
+            else:
+                # extraction failed, or never finished within the window → an honest
+                # terminal failure the user can retry, not a permanent 'extracting' spinner.
+                await db.aexecute(
+                    "update public.research_sources set status = 'failed' "
+                    "where research_run_id = %s and source_id = %s and status <> 'extracted'",
+                    (run_id, sid),
+                )
+        except Exception:  # noqa: BLE001 — one source must never sink the batch
+            log.exception("reconcile: source %s for run %s failed", sid, run_id)
+
+    await asyncio.gather(*[_one(sid) for sid in source_ids])
+    log.info("research %s: reconciled %d pending source(s)", run_id, len(source_ids))
+
+
 async def _drop_source(
     client: PowabaseClient, db: Database, run_id: UUID, source_id: str
 ) -> None:
@@ -990,12 +1065,13 @@ async def evaluate_and_prune(
             if res is None:
                 continue
             t = res["teardown"]
+            # Raw status (see the main scrape insert): a still-extracting backfill stays
+            # non-terminal for reconcile, not a premature failure.
             await db.aexecute(
                 "insert into public.research_sources "
                 "(research_run_id, source_id, url, title, word_count, status) "
                 "values (%s, %s, %s, %s, %s, %s)",
-                (run_id, res["source_id"], u, t.title, t.word_count,
-                 _row_status(res["status"])),
+                (run_id, res["source_id"], u, t.title, t.word_count, res["status"]),
             )
             fresh.append(
                 {"url": u, "teardown": t, "source_id": res["source_id"],
@@ -1051,6 +1127,7 @@ async def run_research_task(
     evaluate_sources: bool = True,
 ) -> None:
     serp_n, scrape_n = DEPTH_PRESETS.get(depth, DEPTH_PRESETS["deep"])
+    pending: list[str] = []
     try:
         # 1) SERP via agent (search only)
         agent_id = await ensure_serp_agent(client)
@@ -1121,12 +1198,16 @@ async def run_research_task(
             if r is None:
                 continue
             t = r["teardown"]
+            # Persist the RAW status: a page still extracting past the sync budget stays
+            # non-terminal ('extracting') so the UI shows a neutral in-progress chip (not a
+            # red "failed" with a Retry that would re-scrape for nothing) — reconcile below
+            # adopts it once extraction lands. reconcile + the startup sweep are the
+            # backstops against a non-terminal row ever resting forever.
             await db.aexecute(
                 "insert into public.research_sources "
                 "(research_run_id, source_id, url, title, word_count, status) "
                 "values (%s, %s, %s, %s, %s, %s)",
-                (run_id, r["source_id"], r["url"], t.title, t.word_count,
-                 _row_status(r["status"])),
+                (run_id, r["source_id"], r["url"], t.title, t.word_count, r["status"]),
             )
             by_url[r["url"]] = {
                 "teardown": t, "source_id": r["source_id"], "status": r["status"],
@@ -1159,6 +1240,16 @@ async def run_research_task(
         else:
             competitors = [v["teardown"].model_dump() for v in by_url.values()]
 
+        # Any source still extracting when the budget elapsed is NOT a failure — Powabase
+        # usually finishes it shortly after. Capture those to recover below instead of
+        # dropping paid-for, still-valid content. The run completes now on whatever
+        # extracted in time.
+        pending = [
+            v["source_id"]
+            for v in by_url.values()
+            if v["status"] not in EXTRACTION_TERMINAL
+        ]
+
         _update(
             db,
             run_id,
@@ -1169,6 +1260,20 @@ async def run_research_task(
     except Exception:  # noqa: BLE001 — surface a safe failure to the row
         log.exception("research run %s failed", run_id)
         _update(db, run_id, status="failed", error="research failed — see server logs")
+        return
+
+    # The run is 'done' and usable now. Adopt any sources whose extraction outran the
+    # synchronous budget — re-poll the existing Sources and write their content once it
+    # lands. Runs on the LIGHT pool so this mostly-sleeping poll frees the run's heavy slot
+    # immediately instead of pinning it (and starving fresh runs) for the reconcile window.
+    if pending:
+        log.info(
+            "research %s: %d source(s) still extracting — reconciling", run_id, len(pending)
+        )
+        try:
+            spawn(reconcile_pending_sources(client, db, run_id, pending), light=True)
+        except Exception:  # noqa: BLE001 — a scheduling miss must not fail a done run
+            log.exception("research %s: could not start source reconcile", run_id)
 
 
 def get_brand(db: Database, business_id: UUID) -> dict[str, Any] | None:

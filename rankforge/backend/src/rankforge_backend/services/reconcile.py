@@ -63,16 +63,16 @@ def reconcile_interrupted(db: Database) -> None:
         "where materials_progress is not null "
         "and coalesce(materials_progress->>'phase', '') not in ('done', 'failed')",
     )
-    # A scraped source stuck in a non-terminal status is a dead end the UI can't clear:
-    # 'retrying' (a worker a restart killed mid-scrape — the claim query refuses it and the
-    # Retry button is hidden) or a legacy 'extracting' (a poll-budget timeout nothing
-    # re-polls; new rows persist as 'failed', but older rows may linger). Reset both to
-    # 'failed' so the user can retry. Safe under the single-instance deployment (nothing in
-    # flight at boot), exactly like the resets above.
+    # A scraped source stuck in ANY non-terminal status is a dead end the UI can't clear:
+    # 'retrying' (a retry worker a restart killed mid-scrape — the claim query refuses it and
+    # the Retry button is hidden) or 'extracting'/other (a run whose background extraction
+    # reconcile was killed by a restart; nothing re-polls it, so it's silently excluded from
+    # grounding). Reset any non-terminal status to 'failed' so it's honest and retryable.
+    # Safe under the single-instance deployment (nothing in flight at boot).
     src = _count_update(
         db,
         "update public.research_sources set status = 'failed' "
-        "where status in ('retrying', 'extracting')",
+        "where status not in ('extracted', 'failed', 'attention_required', 'cancelled')",
     )
     if opp or run or art or mat or scout or src:
         log.info(
