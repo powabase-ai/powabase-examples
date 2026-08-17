@@ -341,6 +341,13 @@ function RunDetail({
   const retry = useRetrySources(brandId);
   const retryable = (runSources ?? []).filter((s) => isRetryable(s.status));
   const anyRetrying = (runSources ?? []).some((s) => s.status === "retrying");
+  // A retry updates the live research_sources rows (runSources), NOT the frozen
+  // run.competitors snapshot the "Scraped sources" list renders from — so a successful
+  // retry would otherwise never show up there. Overlay live source state by URL so a
+  // re-scraped source reflects its new content (word count + view link) in that list.
+  const liveSourceByUrl = new Map(
+    (runSources ?? []).map((s) => [s.url, s] as const)
+  );
 
   function onRetry(ids: string[]) {
     if (!ids.length) return;
@@ -425,35 +432,44 @@ function RunDetail({
               Scraped sources (Powabase)
             </p>
             <div className="grid gap-2">
-              {run.competitors.map((c: CompetitorTeardown, i) => (
-                <div key={i} className="rounded-md border border-border p-2.5">
-                  <div className="line-clamp-1 text-sm font-medium">{c.title}</div>
-                  <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-                    <span>{c.word_count ?? "—"} words</span>
-                    <span>{c.headings.length} headings</span>
-                    {c.url && (
-                      <a href={c.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:underline">
-                        <ExternalLink className="size-3" /> page
-                      </a>
-                    )}
-                    {c.source_id && (c.word_count ?? 0) > 0 ? (
-                      <button
-                        onClick={() => onViewSource(c.source_id as string)}
-                        className="ml-auto inline-flex items-center gap-1 text-[rgb(var(--accent-gold-hover))] hover:underline"
-                      >
-                        <FileText className="size-3" /> view scraped text
-                      </button>
-                    ) : (
-                      // No text extracted (the scrape failed or is still running), so
-                      // there's nothing to view — say so instead of offering a link
-                      // that would 404 upstream.
-                      <span className="ml-auto text-muted-foreground/70">
-                        not scraped
-                      </span>
-                    )}
+              {run.competitors.map((c: CompetitorTeardown, i) => {
+                // Prefer the live source row (reflects retries) over the frozen snapshot.
+                const live = c.url ? liveSourceByUrl.get(c.url) : undefined;
+                const wordCount = live?.word_count ?? c.word_count;
+                const sourceId = live?.source_id ?? c.source_id;
+                const scraped = live
+                  ? live.status === "extracted" && (live.word_count ?? 0) > 0
+                  : (c.word_count ?? 0) > 0;
+                return (
+                  <div key={i} className="rounded-md border border-border p-2.5">
+                    <div className="line-clamp-1 text-sm font-medium">{c.title}</div>
+                    <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+                      <span>{wordCount ?? "—"} words</span>
+                      <span>{c.headings.length} headings</span>
+                      {c.url && (
+                        <a href={c.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:underline">
+                          <ExternalLink className="size-3" /> page
+                        </a>
+                      )}
+                      {scraped && sourceId ? (
+                        <button
+                          onClick={() => onViewSource(sourceId)}
+                          className="ml-auto inline-flex items-center gap-1 text-[rgb(var(--accent-gold-hover))] hover:underline"
+                        >
+                          <FileText className="size-3" /> view scraped text
+                        </button>
+                      ) : (
+                        // No text extracted (the scrape failed or is still running), so
+                        // there's nothing to view — say so instead of offering a link
+                        // that would 404 upstream.
+                        <span className="ml-auto text-muted-foreground/70">
+                          not scraped
+                        </span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
