@@ -134,7 +134,7 @@ export default function SourcesLibrary({
         meta={sources?.length ? `${sources.length} scraped pages` : undefined}
       />
 
-      <div className="grid min-h-0 flex-1 grid-cols-[360px_1fr]">
+      <div className="grid min-h-0 flex-1 grid-cols-[360px_minmax(0,1fr)]">
         {/* List */}
         <div className="flex min-h-0 flex-col border-r border-border">
           {canEdit && !!sources?.length && (
@@ -257,7 +257,7 @@ export default function SourcesLibrary({
         </div>
 
         {/* Detail */}
-        <div className="min-h-0 overflow-y-auto">
+        <div className="min-h-0 min-w-0 overflow-y-auto">
           {!selected ? (
             <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
               Select a source to read its scraped content.

@@ -146,7 +146,7 @@ export default function BrandWorkspace({
     <Page>
       <PageHeader icon={Search} title="Research" meta={brand?.niche ?? undefined} />
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto grid w-full max-w-6xl gap-6 px-6 py-8 lg:grid-cols-[380px_1fr]">
+        <div className="mx-auto grid w-full max-w-6xl gap-6 px-6 py-8 lg:grid-cols-[380px_minmax(0,1fr)]">
           <section className="flex flex-col gap-4">
             <Card>
             <CardHeader>
@@ -238,7 +238,7 @@ export default function BrandWorkspace({
           </div>
         </section>
 
-        <section className="flex flex-col gap-4">
+        <section className="flex min-w-0 flex-col gap-4">
           {!selected && (
             <Card className="border-dashed">
               <CardContent className="py-16 text-center text-sm text-muted-foreground">

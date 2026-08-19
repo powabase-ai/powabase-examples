@@ -85,7 +85,7 @@ export default function SocialPage({
         }
       />
 
-      <div className="grid min-h-0 flex-1 grid-cols-[320px_1fr]">
+      <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
         {/* Article rail */}
         <div className="flex min-h-0 flex-col border-r border-border">
           <div className="border-b border-border p-2">
@@ -161,7 +161,7 @@ export default function SocialPage({
         </div>
 
         {/* Selected article's posts */}
-        <div className="min-h-0 overflow-y-auto">
+        <div className="min-h-0 min-w-0 overflow-y-auto">
           {!active ? (
             <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
               Select an article on the left to see and generate its LinkedIn
