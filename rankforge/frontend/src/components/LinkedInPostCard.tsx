@@ -2,7 +2,7 @@
 
 import * as React from "react";
 // Share2 (not a brand "Linkedin" icon — lucide has been deprecating brand icons).
-import { Copy, Loader2, Share2, Trash2 } from "lucide-react";
+import { Copy, Loader2, Share2, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ANGLES, type LinkedInPost } from "@/lib/api";
 import {
   useDeleteLinkedInPost,
+  useHumanizeLinkedInPost,
   useUpdateLinkedInPost,
 } from "@/lib/hooks/useLinkedIn";
 
@@ -30,6 +31,7 @@ export function LinkedInPostCard({
   post: LinkedInPost;
 }) {
   const update = useUpdateLinkedInPost(articleId);
+  const humanize = useHumanizeLinkedInPost(articleId);
   const del = useDeleteLinkedInPost(articleId);
   const [body, setBody] = React.useState(post.body);
   // Re-sync the textarea when the server copy changes (e.g. a refetch after another
@@ -57,6 +59,16 @@ export function LinkedInPostCard({
           toast.error(e instanceof Error ? e.message : "Save failed"),
       }
     );
+  }
+
+  function onHumanize() {
+    // Humanize operates on the SAVED post (the server copy); the button is disabled while
+    // there are unsaved edits so a re-humanize refetch can't silently discard them.
+    humanize.mutate(post.id, {
+      onSuccess: () => toast.success("Humanized — AI tells cleaned up"),
+      onError: (e) =>
+        toast.error(e instanceof Error ? e.message : "Humanize failed"),
+    });
   }
 
   function onDelete() {
@@ -109,6 +121,24 @@ export function LinkedInPostCard({
         <div className="ml-auto flex items-center gap-1">
           <Button variant="outline" size="sm" onClick={onCopy}>
             <Copy /> Copy
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onHumanize}
+            disabled={dirty || humanize.isPending || update.isPending}
+            title={
+              dirty
+                ? "Save your edits first"
+                : "Rewrite out AI tells (reads more human)"
+            }
+          >
+            {humanize.isPending ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Sparkles />
+            )}
+            Humanize
           </Button>
           <Button
             variant="gold"

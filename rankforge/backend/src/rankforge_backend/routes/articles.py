@@ -28,6 +28,7 @@ from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
 from ..services import linkcheck as linkcheck_svc
 from ..services import linkedin_gen as li_gen
+from ..services import linkedin_humanize as li_humanize
 from ..services import linkedin_posts as li_svc
 from ..services import linking as linking_svc
 from ..services import publishing as pub_svc
@@ -724,6 +725,30 @@ def update_linkedin_post(
     if updated is None:
         # The post was deleted between the guard check and the update — treat as gone
         # (a bare None would 500 as a ResponseValidationError against LinkedInPost).
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    return updated
+
+
+@router.post(
+    "/{article_id}/linkedin-posts/{post_id}/humanize",
+    response_model=LinkedInPost,
+    dependencies=[Depends(rate_limit("linkedin:humanize"))],
+)
+async def humanize_linkedin_post(
+    article_id: UUID,
+    post_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Run the humanization (de-AI) editorial pass over an existing post and save the
+    result. Synchronous LLM loop; any workspace member (rate-limited). humanize_post never
+    raises or blanks the post, so this only fails on a post that's since been deleted."""
+    _guard_article(db, article_id, user)
+    post = _guard_li_post(db, article_id, post_id)
+    new_body = li_gen.cap_post(await li_humanize.humanize_post(pb, post["body"]))
+    updated = li_svc.update_post(db, post_id, new_body)
+    if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
     return updated
 

@@ -12,7 +12,7 @@ from ..db import Database
 from ..powabase import PowabaseClient, PowabaseError
 from . import business_profiles as brands
 from . import generation as gen
-from . import linking, prose_style
+from . import linkedin_humanize, linking, prose_style
 from .agents import ensure_agent
 
 log = logging.getLogger("rankforge.linkedin")
@@ -102,6 +102,16 @@ OUTPUT: only the post text itself, ready to paste — no preamble, no quotes, no
 the last body line, then (only if a link is provided in the instructions) a blank line \
 and a soft "Full write-up → {url}" line, then a blank line and 3-5 specific, relevant \
 hashtags (never generic spam)."""
+
+
+def cap_post(text: str) -> str:
+    """Trim a post to the last complete line under LinkedIn's 3000-char cap. Defensive —
+    the prompts already target <=3000; used after generation and after a humanize rewrite
+    (an edit past the cap can't be saved). The fixed trailing order means a cut lands on the
+    load-bearing question/link/hashtags, so callers should log when this fires."""
+    if len(text) <= _MAX_POST_CHARS:
+        return text
+    return text[:_MAX_POST_CHARS].rsplit("\n", 1)[0].rstrip()
 
 
 def _brand_voice_block(brand: dict[str, Any]) -> str:
@@ -213,14 +223,17 @@ async def generate_post(
             "line may be cut off",
             article_id, stop,
         )
+    # De-AI the draft before it's saved — the same editorial pass articles get, tuned for
+    # posts. Never raises and never blanks the post, so a humanize hiccup can't fail a
+    # generation that otherwise succeeded.
+    text = await linkedin_humanize.humanize_post(client, text)
     if len(text) > _MAX_POST_CHARS:
-        # Trim to the last complete line under the LinkedIn cap — a rare, defensive path
-        # (the prompt already targets <=3000); an edit past the cap can't be saved. Log
-        # it: the fixed trailing order means the cut lands on the load-bearing ending.
+        # Rare, defensive path (prompts target <=3000). The fixed trailing order means the
+        # cut lands on the load-bearing question/link/hashtags — log it.
         log.warning(
             "linkedin post for %s exceeded %d chars (%d) — trimmed to the last full "
             "line; the closing question/link/hashtags may be lost",
             article_id, _MAX_POST_CHARS, len(text),
         )
-        text = text[:_MAX_POST_CHARS].rsplit("\n", 1)[0].rstrip()
+        text = cap_post(text)
     return text

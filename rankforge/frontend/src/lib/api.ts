@@ -1228,6 +1228,11 @@ export const linkedInApi = {
       `/api/articles/${articleId}/linkedin-posts/${postId}`,
       { method: "PATCH", body: JSON.stringify({ body }) }
     ),
+  humanize: (articleId: string, postId: string) =>
+    request<LinkedInPost>(
+      `/api/articles/${articleId}/linkedin-posts/${postId}/humanize`,
+      { method: "POST" }
+    ),
   remove: (articleId: string, postId: string) =>
     request<void>(`/api/articles/${articleId}/linkedin-posts/${postId}`, {
       method: "DELETE",
