@@ -490,6 +490,21 @@ MINIMUM_EDIT_RULE = (
     "phrasing — losing a specific is worse than the tell you removed."
 )
 
+# The em-dash is the single most recognizable AI tell, and the one an LLM will not reliably
+# remove from its own output even when told to — it reaches for it again on the next
+# sentence. So it gets a DETERMINISTIC backstop rather than trusting the model.
+EM_DASH_RE = re.compile(r"—")
+
+
+def thin_em_dashes(text: str) -> str:
+    """Deterministic backstop: replace every em-dash with a comma (guarantees the tell
+    drops regardless of the model's cooperation), then tidy the punctuation so the result
+    reads clean."""
+    out = EM_DASH_RE.sub(", ", text)
+    out = re.sub(r"\s*,\s*,", ",", out)          # collapse a doubled comma
+    out = re.sub(r"\s+([.,;:!?])", r"\1", out)   # no space before punctuation
+    return re.sub(r"[ \t]{2,}", " ", out)
+
 
 def fix_instruction(signal_key: str) -> str:
     """The surgical rewrite instruction for a readability signal this module owns.

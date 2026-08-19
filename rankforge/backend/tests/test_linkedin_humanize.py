@@ -134,6 +134,38 @@ async def test_empty_body_is_noop():
     assert await hz.humanize_post(AsyncMock(), "   ") == ""
 
 
+async def test_strips_em_dashes_even_on_ship(monkeypatch):
+    # The em-dash backstop is DETERMINISTIC — it fires even when the judge ships the post
+    # (the LLM won't reliably remove its own em-dashes). This is the user-reported bug.
+    _agents(monkeypatch)
+    monkeypatch.setattr(
+        hz, "_judge_post",
+        AsyncMock(return_value={"verdict": "ship", "reads_human": 95, "notes": []}),
+    )
+
+    out = await hz.humanize_post(AsyncMock(), "We shipped it — fast — and it worked.")
+
+    assert "—" not in out
+    assert out == "We shipped it, fast, and it worked."
+
+
+async def test_strips_em_dashes_the_reviser_reintroduces(monkeypatch):
+    _agents(monkeypatch)
+    monkeypatch.setattr(hz, "_judge_post", AsyncMock(side_effect=[
+        {"verdict": "revise", "reads_human": 50, "notes": _NOTE},
+        {"verdict": "ship", "reads_human": 90, "notes": []},
+    ]))
+    monkeypatch.setattr(
+        hz, "_revise_post",
+        AsyncMock(return_value="A revised post — with an em-dash the model re-added "
+                              "— sadly, but long enough to pass the guard."),
+    )
+
+    out = await hz.humanize_post(AsyncMock(), "delve into the robust tapestry of things here")
+
+    assert "—" not in out  # end-of-loop backstop drops what the reviser re-added
+
+
 async def test_judge_post_swallows_client_error():
     client = AsyncMock()
     client.run_agent = AsyncMock(side_effect=RuntimeError("boom"))

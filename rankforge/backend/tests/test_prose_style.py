@@ -325,3 +325,14 @@ def test_register_sample_lemmas_are_in_ai_words():
     lemmas = sample.split("/")
     for lemma in lemmas:
         assert lemma in ps.AI_WORDS, f"{lemma} from register_sample() not in AI_WORDS"
+
+
+def test_thin_em_dashes_removes_all_and_tidies():
+    # Deterministic backstop: every em-dash gone, no doubled commas, no space before punct.
+    out = ps.thin_em_dashes("A hook — bold — and it works.")
+    assert "—" not in out
+    assert out == "A hook, bold, and it works."
+    # collapses a comma that lands next to existing punctuation
+    assert ps.thin_em_dashes("Wait —, really") == "Wait, really"
+    # a clean string is returned unchanged
+    assert ps.thin_em_dashes("no dashes here") == "no dashes here"

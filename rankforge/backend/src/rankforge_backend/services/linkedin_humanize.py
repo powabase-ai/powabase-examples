@@ -184,7 +184,11 @@ async def humanize_post(client: PowabaseClient, body: str) -> str:
     at MAX_PASSES. Returns the humanized body — or the best body so far on any failure or an
     already-clean post. NEVER raises and NEVER blanks the post; safe in the sync generate
     path."""
-    current = (body or "").strip()
+    # Deterministic em-dash backstop up front: the #1 AI tell, and one an LLM will not
+    # reliably remove from its own output (it reaches for it again next sentence). Thinning
+    # here gives the loop clean input; we thin again at the end because the reviser re-adds
+    # them.
+    current = prose_style.thin_em_dashes((body or "").strip())
     if not current:
         return current
 
@@ -226,4 +230,6 @@ async def humanize_post(client: PowabaseClient, body: str) -> str:
             break
         current = revised
 
-    return current
+    # Final guarantee: the reviser (and a "ship" verdict on an em-dash-heavy draft) will
+    # have left em-dashes; drop them deterministically so the post never ships with the tell.
+    return prose_style.thin_em_dashes(current)
