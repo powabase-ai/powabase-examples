@@ -81,7 +81,7 @@ export function LinkedInPostCard({
       </div>
 
       {/* Above-the-fold preview: what shows before "…see more". */}
-      <div className="rounded border border-dashed border-border bg-muted/40 p-2 text-xs">
+      <div className="break-words rounded border border-dashed border-border bg-muted/40 p-2 text-xs">
         <span className="text-foreground">{body.slice(0, FOLD_CHARS)}</span>
         {overFold && <span className="text-muted-foreground">… see more</span>}
         <div className="mt-1 text-[10px] uppercase tracking-wide text-muted-foreground">
