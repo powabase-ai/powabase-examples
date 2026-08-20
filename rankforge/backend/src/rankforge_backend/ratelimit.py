@@ -5,8 +5,9 @@ for the single-instance deployment RankForge targets; a horizontally-scaled
 deployment would move this to Redis (the cap would otherwise be per-replica).
 
 Used as a FastAPI dependency on the expensive POST routes (generate / refine /
-research / optimize / score / scout-run / opportunity-draft) so one user can't
-exhaust shared LLM/scrape budget or the background-task pool for everyone else.
+research / optimize / score / scout-run / opportunity-draft / linkedin-generate /
+linkedin-humanize) so one user can't exhaust shared LLM/scrape budget or the
+background-task pool for everyone else.
 """
 
 import threading

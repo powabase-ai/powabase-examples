@@ -96,11 +96,11 @@ AI_WORDS: tuple[str, ...] = tuple(f for r in AI_REGISTER for f in r.forms)
 # scoring.py compiles its `_EMPTY_TRANSITION_RE` detector from this tuple (mirroring
 # how `_AI_WORD_RE` is built from AI_WORDS), so the DETECTOR genuinely can't drift from
 # this list. It does NOT reach the prompts, though: `fix_instruction("transitions")`
-# below renders from it, but the six other prompt/explanation sites that mention these
-# same four words (the readability judge prompt, the writer/reviser/LinkedIn prompts,
-# and the `transitions` score explanation in scoring.py) still hardcode their own
-# copies — changing a word here updates the detector immediately but NOT those six
-# call sites; they'd need to be edited by hand to match.
+# below renders from it, but the other prompt/explanation sites that mention these same
+# four words (the readability judge prompt, the writer / reviser / LinkedIn-generator /
+# LinkedIn-editor / LinkedIn-reviser prompts, and the `transitions` score explanation in
+# scoring.py) still hardcode their own copies — changing a word here updates the detector
+# immediately but NOT those call sites; they'd need to be edited by hand to match.
 EMPTY_TRANSITIONS: tuple[str, ...] = (
     "moreover", "furthermore", "additionally", "that said",
 )
@@ -489,6 +489,28 @@ MINIMUM_EDIT_RULE = (
     "concrete detail (a number, name, date, version, or mechanism) for smoother "
     "phrasing — losing a specific is worse than the tell you removed."
 )
+
+# The em-dash is the single most recognizable AI tell, and the one an LLM will not reliably
+# remove from its own output even when told to — it reaches for it again on the next
+# sentence. So it gets a DETERMINISTIC backstop rather than trusting the model.
+EM_DASH_RE = re.compile(r"—")
+
+
+def thin_em_dashes(text: str) -> str:
+    """Deterministic backstop: drop the em-dash tell without collapsing structure.
+
+    A line-leading em-dash is a bullet (standard LinkedIn list style), not a clause break,
+    so it becomes a hyphen bullet; every other em-dash becomes a comma. Crucially, all
+    tidy-up is anchored to spaces/tabs, NEVER `\\s` (which matches newlines) — so blank
+    lines and the one-idea-per-line rhythm survive intact."""
+    # Line-leading "—" is a bullet → "- ", not a comma that would weld onto nothing.
+    out = re.sub(r"(?m)^([ \t]*)—[ \t]*", r"\1- ", text)
+    # Every remaining em-dash is a clause break → comma.
+    out = EM_DASH_RE.sub(", ", out)
+    out = re.sub(r",[ \t]*,", ",", out)            # collapse a doubled comma
+    out = re.sub(r"([.!?])[ \t]*,", r"\1", out)    # comma after terminal punctuation → drop
+    out = re.sub(r"[ \t]+([,.;:!?])", r"\1", out)  # space before punctuation → drop (not \n)
+    return re.sub(r"[ \t]{2,}", " ", out)
 
 
 def fix_instruction(signal_key: str) -> str:
