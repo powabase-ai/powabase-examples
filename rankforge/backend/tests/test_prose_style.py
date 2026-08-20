@@ -336,3 +336,24 @@ def test_thin_em_dashes_removes_all_and_tidies():
     assert ps.thin_em_dashes("Wait —, really") == "Wait, really"
     # a clean string is returned unchanged
     assert ps.thin_em_dashes("no dashes here") == "no dashes here"
+
+
+def test_thin_em_dashes_preserves_line_structure():
+    # Regression: the tidy rules must be anchored to spaces/tabs, never \s (which eats
+    # newlines and would weld a —-bulleted list / a line-leading "." onto the line above).
+    inp = (
+        "Three things we learned:\n\n"
+        "— Chunk size matters\n"
+        "— Reranking won\n\n"
+        "Which would you try?"
+    )
+    out = ps.thin_em_dashes(inp)
+    assert "—" not in out
+    assert out.count("\n\n") == inp.count("\n\n")   # blank lines survive
+    assert out.count("\n") == inp.count("\n")        # no lines merged
+    assert "- Chunk size matters" in out             # line-leading dash → hyphen bullet
+    assert "- Reranking won" in out
+    # a line-leading "." is not welded onto the previous line
+    assert ps.thin_em_dashes("Line.\n\n...next?").count("\n\n") == 1
+    # an em-dash between sentences doesn't leave a stray comma after terminal punctuation
+    assert ps.thin_em_dashes("Question?—Answer.") == "Question? Answer."

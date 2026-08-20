@@ -746,7 +746,12 @@ async def humanize_linkedin_post(
     raises or blanks the post, so this only fails on a post that's since been deleted."""
     _guard_article(db, article_id, user)
     post = _guard_li_post(db, article_id, post_id)
-    new_body = li_gen.cap_post(await li_humanize.humanize_post(pb, post["body"]))
+    humanized = await li_humanize.humanize_post(pb, post["body"], label=str(post_id))
+    new_body = li_gen.cap_post(humanized)
+    if len(new_body) < len(humanized):
+        # thin_em_dashes can grow the text (each "—" → ", "), so a near-cap post can trim on
+        # humanize — and the fixed trailing order means the cut lands on the hashtags/link.
+        log.warning("humanize trimmed post %s to the 3000-char cap", post_id)
     updated = li_svc.update_post(db, post_id, new_body)
     if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")

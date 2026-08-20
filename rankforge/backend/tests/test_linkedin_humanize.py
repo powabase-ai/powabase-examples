@@ -180,3 +180,71 @@ async def test_judge_post_parses_fenced_json():
     })
     out = await hz._judge_post(client, "ed", "body")
     assert out["verdict"] == "revise" and out["reads_human"] == 40
+
+
+def test_score_coercion():
+    # reads_human comes straight from model JSON; coerce robustly, reject junk and bool.
+    assert hz._score(88) == 88
+    assert hz._score(88.0) == 88
+    assert hz._score("88") == 88
+    assert hz._score(True) is None      # bool is an int subclass — must not read as 1
+    assert hz._score(150) is None       # out of range
+    assert hz._score("high") is None
+    assert hz._score(None) is None
+
+
+async def test_never_raises_on_malformed_verdict(monkeypatch):
+    # A non-string verdict (straight from json.loads) must not crash the loop (blocker 2).
+    _agents(monkeypatch)
+    monkeypatch.setattr(hz, "_judge_post", AsyncMock(side_effect=[
+        {"verdict": ["revise"], "reads_human": 40, "notes": _NOTE},
+        {"verdict": "ship", "reads_human": 90, "notes": []},
+    ]))
+    revise = AsyncMock(return_value="a fine revised post that is plenty long enough here")
+    monkeypatch.setattr(hz, "_revise_post", revise)
+
+    out = await hz.humanize_post(AsyncMock(), "delve into the robust tapestry of things")
+
+    assert isinstance(out, str)          # did not raise
+    assert revise.await_count == 1       # low score → still revised, not wrongly shipped
+
+
+async def test_keeps_previous_when_revision_drops_url(monkeypatch):
+    # The 50% length guard can't catch a dropped ~25-char link; the structure check must.
+    _agents(monkeypatch)
+    monkeypatch.setattr(hz, "_judge_post", AsyncMock(side_effect=[
+        {"verdict": "revise", "reads_human": 50, "notes": _NOTE},
+        {"verdict": "ship", "reads_human": 90, "notes": []},
+    ]))
+    monkeypatch.setattr(
+        hz, "_revise_post",
+        AsyncMock(return_value="A slick rewrite that quietly dropped the link entirely, sadly."),
+    )
+    original = (
+        "Great hook here.\n\nWhy it matters, in detail.\n\n"
+        "Full write-up → https://blog.acme.com/p\n\n#AI #Dev"
+    )
+
+    out = await hz.humanize_post(AsyncMock(), original)
+
+    assert "https://blog.acme.com/p" in out   # URL survived → the revision was rejected
+    assert out == original
+
+
+async def test_revise_post_rejects_truncated_output():
+    client = AsyncMock()
+    client.run_agent = AsyncMock(
+        return_value={"content": "half a post", "stop_reason": "max_tokens"}
+    )
+    import pytest
+    with pytest.raises(RuntimeError):
+        await hz._revise_post(client, "rv", "body", [{"quote": "x", "problem": "y", "fix": "z"}])
+
+
+async def test_revise_post_strips_preamble():
+    client = AsyncMock()
+    client.run_agent = AsyncMock(
+        return_value={"content": "Here's your revised post:\n\nThe real first line."}
+    )
+    out = await hz._revise_post(client, "rv", "body", [])
+    assert out == "The real first line."   # the load-bearing hook, not the chatter

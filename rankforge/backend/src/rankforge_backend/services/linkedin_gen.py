@@ -1,7 +1,8 @@
-"""Generate a LinkedIn post from a blog article — one synchronous LLM call (opus-4-7,
-the writer model, for voice fidelity). Reuses the article writer's anti-AI-tell,
-brand-champion guidance, adapted for LinkedIn: an above-the-fold hook is the top
-priority, the post may run long, and it closes with a soft discussion question."""
+"""Generate a LinkedIn post from a blog article — synchronous: one writer call (opus-4-7,
+for voice fidelity) followed by the humanize (de-AI) editorial pass (see linkedin_humanize).
+Reuses the article writer's anti-AI-tell, brand-champion guidance, adapted for LinkedIn: an
+above-the-fold hook is the top priority, the post may run long, and it closes with a soft
+discussion question."""
 
 import logging
 from typing import Any
@@ -224,9 +225,9 @@ async def generate_post(
             article_id, stop,
         )
     # De-AI the draft before it's saved — the same editorial pass articles get, tuned for
-    # posts. Never raises and never blanks the post, so a humanize hiccup can't fail a
-    # generation that otherwise succeeded.
-    text = await linkedin_humanize.humanize_post(client, text)
+    # posts. humanize_post never raises and never blanks the post, so a humanize hiccup can't
+    # fail a generation that otherwise succeeded.
+    text = await linkedin_humanize.humanize_post(client, text, label=str(article_id))
     if len(text) > _MAX_POST_CHARS:
         # Rare, defensive path (prompts target <=3000). The fixed trailing order means the
         # cut lands on the load-bearing question/link/hashtags — log it.

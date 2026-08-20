@@ -22,7 +22,7 @@ export const angleLabel = (slug: string) =>
 
 /** One editable LinkedIn post variant: angle badge + created date, an above-the-fold
  *  preview (what shows before "…see more"), the editable body with a char counter,
- *  and Copy / Save / Delete. Used by the Social page. */
+ *  and Copy / Humanize / Save / Delete. Used by the Social page. */
 export function LinkedInPostCard({
   articleId,
   post,
@@ -65,7 +65,12 @@ export function LinkedInPostCard({
     // Humanize operates on the SAVED post (the server copy); the button is disabled while
     // there are unsaved edits so a re-humanize refetch can't silently discard them.
     humanize.mutate(post.id, {
-      onSuccess: () => toast.success("Humanized — AI tells cleaned up"),
+      // Be honest: a green "Humanized" toast over unchanged text is a lie. The pass leaves
+      // a clean post untouched (and returns it unchanged on a model hiccup), so say so.
+      onSuccess: (updated) =>
+        updated.body === post.body
+          ? toast("No changes — it already reads clean")
+          : toast.success("Humanized — AI tells cleaned up"),
       onError: (e) =>
         toast.error(e instanceof Error ? e.message : "Humanize failed"),
     });

@@ -27,7 +27,7 @@ def _humanize_passthrough(monkeypatch):
     """Stub the humanize pass to return the draft unchanged — the generator's own logic
     (draft, char-cap, truncation warning) is what these tests exercise."""
     monkeypatch.setattr(
-        li_humanize, "humanize_post", AsyncMock(side_effect=lambda client, text: text)
+        li_humanize, "humanize_post", AsyncMock(side_effect=lambda client, text, **kw: text)
     )
 
 
@@ -191,6 +191,27 @@ async def test_generate_post_warns_on_token_ceiling(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         await li_gen.generate_post(client, MagicMock(), AID, "key_insight")
     assert any("token ceiling" in r.getMessage() for r in caplog.records)
+
+
+async def test_generate_post_runs_humanize_on_the_draft(monkeypatch):
+    # Pin the headline wiring: the draft goes THROUGH humanize (not around it). With an
+    # identity stub the two are indistinguishable, so stub a distinct return + assert both
+    # the value returned and that it was handed the drafted text.
+    monkeypatch.setattr(
+        li_gen.gen, "get_article",
+        lambda db, aid: {"id": AID, "business_id": BID, "content_md": "real", "status": "draft"},
+    )
+    monkeypatch.setattr(li_gen.brands, "get_profile", lambda db, bid: {})
+    monkeypatch.setattr(li_gen, "ensure_linkedin_agent", AsyncMock(return_value="a"))
+    humanize = AsyncMock(return_value="HUMANIZED")
+    monkeypatch.setattr(li_humanize, "humanize_post", humanize)
+    client = MagicMock()
+    client.run_agent = AsyncMock(return_value={"content": "raw draft"})
+
+    out = await li_gen.generate_post(client, MagicMock(), AID, "key_insight")
+
+    assert out == "HUMANIZED"                          # humanized text is what's saved
+    assert humanize.await_args.args[1] == "raw draft"  # ...and it was given the draft
 
 
 # --- _resolve_article_url (published-only link rule) ---
@@ -368,10 +389,13 @@ def test_humanize_404_when_post_not_on_article(monkeypatch):
 
 def test_humanize_cross_org_404(monkeypatch):
     monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    humanize = AsyncMock()
+    monkeypatch.setattr(li_humanize, "humanize_post", humanize)
     db = MagicMock()
     db.fetch_one.return_value = {"org_id": __import__("uuid").UUID("77777777-7777-7777-7777-777777777777")}
     resp = _client(db).post(f"/api/articles/{AID}/linkedin-posts/{PID}/humanize")
     assert resp.status_code == 404
+    humanize.assert_not_awaited()  # org guard runs before any LLM work
 
 
 def test_delete_linkedin_post_route(monkeypatch):

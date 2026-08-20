@@ -16,13 +16,51 @@ humanize_post never raises and never blanks a post: on any judge/revise failure 
 the best body it has, so it can be dropped into the synchronous generate path safely."""
 
 import logging
+import re
 
-from ..powabase import PowabaseClient
+from ..powabase import PowabaseClient, PowabaseError
 from ..util import extract_json
 from . import prose_style
 from .agents import ensure_agent
 
 log = logging.getLogger("rankforge.linkedin_humanize")
+
+_URL_RE = re.compile(r"https?://\S+")
+_HASHTAG_RE = re.compile(r"#\w+")
+# Strip a chatty preamble the reviser sometimes prepends ("Here's your revised post:") —
+# it would otherwise become the post's first line, the single most load-bearing one.
+_PREAMBLE_RE = re.compile(
+    r"^\s*(?:here(?:'s| is)[^\n:]*:|sure[,!]?|revised post:?)\s*\n+", re.IGNORECASE
+)
+# Agent stop reasons meaning the output was cut off by the token ceiling (name varies).
+_TRUNCATED_STOP_REASONS = {"max_tokens", "length", "max_output_tokens"}
+
+
+def _score(v: object) -> int | None:
+    """Coerce a model-emitted reads_human to an int in 0–100, or None if unusable. Rejects
+    bool (an int subclass — `true` must not read as 1) and out-of-range/float-ish values so
+    a vague verdict can never ship a genuinely low score unrevised."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        s = v
+    elif isinstance(v, float) and v.is_integer():
+        s = int(v)
+    elif isinstance(v, str) and v.strip().lstrip("-").isdigit():
+        s = int(v)
+    else:
+        return None
+    return s if 0 <= s <= 100 else None
+
+
+def _preserves_structure(before: str, after: str) -> bool:
+    """A humanize rewrite must not silently drop the post's load-bearing bits: the article
+    URL (the reviser is told to copy it character-for-character) or the hashtags. The 50%
+    length guard can't catch a ~60-char loss in a ~1500-char post, so check explicitly."""
+    before_urls = set(_URL_RE.findall(before))
+    if before_urls and not before_urls <= set(_URL_RE.findall(after)):
+        return False  # a dropped or altered URL is a regression
+    return not (_HASHTAG_RE.search(before) and not _HASHTAG_RE.search(after))
 
 EDITOR_AGENT_NAME = "rankforge-linkedin-editor"
 EDITOR_MODEL = "claude-opus-4-8"
@@ -48,7 +86,8 @@ Judge the PROSE, not the format. These are correct and must be preserved:
 "choppy").
 - A scroll-stopping hook as the first line.
 - A genuine discussion question as the last body line.
-- A "Full write-up → {url}" link line and 3–5 relevant hashtags at the end.
+- When the article is published, a "Full write-up → {url}" link line, plus 3–5 relevant \
+hashtags at the end. An unpublished article has NO link line — that's correct; never demand one.
 Never ask to remove the hook, the question, the link, the hashtags, brand mentions, or facts.
 
 ## What "reads like AI" is (what to hunt for)
@@ -59,10 +98,10 @@ In a short post, vagueness is the strongest tell.
 - Empty transitions (Moreover, Furthermore, Additionally, That said), stating the obvious as \
 insight, over-hedging, and LinkedIn-guru filler ("Here's the thing:", "Let that sink in", \
 "The result?", "Read that again", "Unpopular opinion:").
-- Em-dashes as a crutch (several in a short post, or the default break between clauses): tell \
-the writer to cut most, keeping only the few that truly earn their place.
 - Marketing voice: hype adjectives and salesy calls, or praising the brand instead of being \
 genuinely useful.
+(Note: every em-dash is stripped deterministically AFTER you review, so don't spend a note \
+slot on them — judge the words, not the dashes.)
 
 ## How to judge
 - `reads_human` 0–100: 85+ means a sharp reader would believe a knowledgeable human wrote it. \
@@ -101,7 +140,8 @@ A post that reads AI-written is not "improved". Actively rewrite out:
 
 """ + prose_style.writer_block() + """
 - Rule-of-three triads; "from X to Y" framing.
-- Thin out em-dashes (prefer commas, periods, parentheses); vary line and sentence length.
+- Vary line and sentence length. (Every em-dash you write is stripped afterward, so do NOT \
+build a sentence around one — it will read broken. Use commas, periods, or parentheses.)
 - Cut empty transitions (Moreover, Furthermore, Additionally, That said) and LinkedIn-guru \
 filler ("Here's the thing", "Let that sink in", "The result?").
 - Push in real specifics (numbers, names, examples) wherever the post is vague.
@@ -124,13 +164,19 @@ async def ensure_editor_agent(client: PowabaseClient) -> str:
     )
 
 
+# Output ceiling for the rewrite — same headroom the generator uses (a <=3000-char post
+# is ~750-1000 tokens). Without it a rewrite can be silently truncated, come back short,
+# clear the length guard, and replace a good post with a beheaded one.
+_REVISER_MAX_TOKENS = 1600
+
+
 async def ensure_reviser_agent(client: PowabaseClient) -> str:
     return await ensure_agent(
         client,
         name=REVISER_AGENT_NAME,
         model=REVISER_MODEL,
         system_prompt=_REVISER_SYSTEM,
-        settings={"temperature": 0.2},
+        settings={"temperature": 0.2, "max_tokens": _REVISER_MAX_TOKENS},
     )
 
 
@@ -145,6 +191,9 @@ async def _judge_post(client: PowabaseClient, editor_id: str, body: str) -> dict
     try:
         res = await client.run_agent(editor_id, msg)
         data = extract_json(res.get("content") or "")
+    except PowabaseError as e:  # routine upstream (429/503/402) — not a stack-trace event
+        log.warning("linkedin humanize: editor review upstream error (%s)", e)
+        return {"verdict": "ship", "reads_human": None, "notes": []}
     except Exception:  # noqa: BLE001 — judge failure must not block shipping the post
         log.exception("linkedin humanize: editor review failed")
         return {"verdict": "ship", "reads_human": None, "notes": []}
@@ -176,14 +225,21 @@ async def _revise_post(
         f"---POST---\n{body}"
     )
     res = await client.run_agent(reviser_id, msg)
-    return (res.get("content") or "").strip()
+    stop = res.get("stop_reason") or res.get("finish_reason")
+    if isinstance(stop, str) and stop.lower() in _TRUNCATED_STOP_REASONS:
+        # A truncated rewrite lost its tail (question / link / hashtags). Fail so the caller
+        # keeps the previous body rather than saving a beheaded post.
+        raise RuntimeError("reviser output truncated at the token ceiling")
+    out = (res.get("content") or "").strip()
+    return _PREAMBLE_RE.sub("", out).strip()
 
 
-async def humanize_post(client: PowabaseClient, body: str) -> str:
+async def humanize_post(client: PowabaseClient, body: str, *, label: str = "") -> str:
     """De-AI a LinkedIn post: editor judges → reviser rewrites the tells → re-judge, capped
-    at MAX_PASSES. Returns the humanized body — or the best body so far on any failure or an
-    already-clean post. NEVER raises and NEVER blanks the post; safe in the sync generate
-    path."""
+    at MAX_PASSES (the last revision ships unjudged — the cap trades a final check for a
+    bounded call count). Returns the humanized body — or the best body so far on any failure
+    or an already-clean post. NEVER raises and NEVER blanks the post; safe in the sync
+    generate path. `label` (an article/post id) is only for attributable log lines."""
     # Deterministic em-dash backstop up front: the #1 AI tell, and one an LLM will not
     # reliably remove from its own output (it reaches for it again next sentence). Thinning
     # here gives the loop clean input; we thin again at the end because the reviser re-adds
@@ -192,44 +248,64 @@ async def humanize_post(client: PowabaseClient, body: str) -> str:
     if not current:
         return current
 
+    tag = f" [{label}]" if label else ""
+    original = current
     editor_id: str | None = None
     reviser_id: str | None = None
-    for _ in range(MAX_PASSES):
+    for i in range(MAX_PASSES):
+        # One try wraps the WHOLE pass (agent provisioning, judge, and revise): three call
+        # sites depend on this never raising, and the values come straight from model JSON.
         try:
             if editor_id is None:
                 editor_id = await ensure_editor_agent(client)
-        except Exception:  # noqa: BLE001 — no editor → ship what we have
-            log.exception("linkedin humanize: editor agent unavailable")
-            break
+            review = await _judge_post(client, editor_id, current)
 
-        review = await _judge_post(client, editor_id, current)
-        verdict = (review.get("verdict") or "").lower()
-        human = review.get("reads_human")
-        if verdict == "ship":
-            break
-        # Respect an explicit "revise"; only fall back to the score as a backstop when the
-        # verdict is missing/ambiguous (a high score must not override a clear "revise").
-        if verdict != "revise" and (not isinstance(human, int) or human >= _HUMAN_BAR):
-            break
-        notes = [n for n in (review.get("notes") or []) if isinstance(n, dict)]
-        if not notes:
-            break
+            verdict = review.get("verdict")
+            verdict = verdict.lower() if isinstance(verdict, str) else ""
+            human = _score(review.get("reads_human"))
+            if verdict == "ship":
+                break
+            # Respect an explicit "revise"; only fall back to the score as a backstop when
+            # the verdict is missing/ambiguous (a high score must not override "revise").
+            if verdict != "revise" and (human is None or human >= _HUMAN_BAR):
+                break
+            notes = [n for n in (review.get("notes") or []) if isinstance(n, dict)]
+            if not notes:
+                break
 
-        try:
             if reviser_id is None:
                 reviser_id = await ensure_reviser_agent(client)
             revised = await _revise_post(client, reviser_id, current, notes)
-        except Exception:  # noqa: BLE001 — revise failure → keep the previous body
-            log.exception("linkedin humanize: revision failed")
+
+            # A revision that lost more than half its length, or dropped the URL/hashtags,
+            # is a failed rewrite, not an edit — keep the previous body.
+            if not revised or len(revised) < 0.5 * len(current):
+                log.warning(
+                    "linkedin humanize%s: revision too short (pass %d, reads_human=%s) — "
+                    "keeping previous", tag, i + 1, human,
+                )
+                break
+            if not _preserves_structure(current, revised):
+                log.warning(
+                    "linkedin humanize%s: revision dropped the URL or hashtags (pass %d) — "
+                    "keeping previous", tag, i + 1,
+                )
+                break
+            current = revised
+        except PowabaseError as e:  # noqa: BLE001 — routine upstream error, not a bug
+            log.warning(
+                "linkedin humanize%s: pass %d upstream error (%s) — shipping best body",
+                tag, i + 1, e,
+            )
+            break
+        except Exception:  # noqa: BLE001 — humanize must never raise or blank a post
+            log.exception(
+                "linkedin humanize%s: pass %d failed — shipping best body so far", tag, i + 1
+            )
             break
 
-        # Never blank or gut the post: a revision that lost more than half its length is a
-        # failed rewrite, not an edit — keep the previous body.
-        if not revised or len(revised) < 0.5 * len(current):
-            log.warning("linkedin humanize: revision too short — keeping previous body")
-            break
-        current = revised
-
-    # Final guarantee: the reviser (and a "ship" verdict on an em-dash-heavy draft) will
-    # have left em-dashes; drop them deterministically so the post never ships with the tell.
-    return prose_style.thin_em_dashes(current)
+    # Final guarantee: the reviser (and a "ship" verdict on an em-dash-heavy draft) leaves
+    # em-dashes; drop them deterministically so the post never ships with the tell.
+    final = prose_style.thin_em_dashes(current)
+    log.info("linkedin humanize%s: done (changed=%s)", tag, final != original)
+    return final
