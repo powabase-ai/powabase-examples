@@ -3,6 +3,10 @@ CREATE TABLE brands (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   deleted_at timestamptz,
+  created_by_source text NOT NULL DEFAULT 'MANUAL'
+    CHECK (created_by_source IN ('MANUAL','API','WORKFLOW','AGENT','IMPORT','WEBHOOK','SYSTEM')),
+  created_by_name text NOT NULL DEFAULT 'System',
+  created_by_context jsonb,
   name text NOT NULL,
   product_description text,
   voice_notes text,

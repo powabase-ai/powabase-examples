@@ -14,6 +14,15 @@ DECLARE b uuid;
 BEGIN
   INSERT INTO brands (name) VALUES ('_test_brand') RETURNING id INTO b;
   INSERT INTO _t2_fixture (b, ts1) SELECT b, updated_at FROM brands WHERE id = b;
+
+  -- actor default
+  IF (SELECT created_by_source FROM brands WHERE id = b) <> 'MANUAL' THEN
+    RAISE EXCEPTION 'created_by_source default wrong'; END IF;
+  -- invalid actor source rejected
+  BEGIN
+    UPDATE brands SET created_by_source = 'bogus' WHERE id = b;
+    RAISE EXCEPTION 'expected check_violation on created_by_source';
+  EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 
 SELECT pg_sleep(0.05);
