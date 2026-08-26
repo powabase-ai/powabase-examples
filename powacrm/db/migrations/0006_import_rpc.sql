@@ -6,6 +6,15 @@
 -- REVOKE below where PUBLIC holds EXECUTE (same gap noted in
 -- 0005_soft_delete.sql's review). Wrapping the whole migration in
 -- BEGIN/COMMIT closes that window.
+--
+-- Trust boundary: `_brand_id` is taken from the caller as-is and is NOT
+-- scoped against the caller's identity. This is acceptable only because
+-- phase 1 is single-tenant (one authenticated login, full access to every
+-- brand) -- and it is not a regression introduced here: 0004_rls.sql's
+-- `people`/`companies` INSERT policies are already `WITH CHECK (true)`, so a
+-- plain `POST /rest/v1/people` can already write any brand_id. A future
+-- multi-user phase MUST scope `_brand_id` against a membership table before
+-- this function (and those INSERT policies) can be trusted across tenants.
 BEGIN;
 
 CREATE OR REPLACE FUNCTION public.import_people(_brand_id uuid, _import_id uuid, _rows jsonb)
@@ -18,6 +27,10 @@ DECLARE
 BEGIN
   FOR row_j IN SELECT * FROM jsonb_array_elements(_rows) LOOP
     i := i + 1;
+    IF jsonb_typeof(row_j) <> 'object' THEN
+      errs := errs || jsonb_build_object('row', i, 'message', 'row is not a JSON object');
+      CONTINUE;
+    END IF;
     BEGIN
       v_email := nullif(trim(row_j->>'email'), '');
       v_domain := nullif(lower(trim(row_j->>'company_domain')), '');
@@ -66,7 +79,11 @@ BEGIN
     END;
   END LOOP;
 
-  UPDATE import_batches SET status = 'completed',
+  UPDATE import_batches SET
+    status = CASE
+      WHEN jsonb_array_length(errs) > 0 AND n_ins = 0 AND n_res = 0 AND n_skip = 0 THEN 'failed'
+      ELSE 'completed'
+    END,
     inserted_count = n_ins, restored_count = n_res, skipped_count = n_skip, errors = errs
   WHERE id = _import_id;
   RETURN jsonb_build_object('inserted', n_ins, 'restored', n_res, 'skipped', n_skip, 'errors', errs);

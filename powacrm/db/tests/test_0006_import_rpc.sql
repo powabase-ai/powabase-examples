@@ -14,9 +14,10 @@ BEGIN
 
   -- domain normalized to lowercase; company linked
   SELECT company_id INTO pid FROM people WHERE brand_id = b AND lower(email) = 'ana@acme.com';
-  IF (SELECT domain FROM companies WHERE id = pid) <> 'acme.com' THEN RAISE EXCEPTION 'domain not normalized'; END IF;
+  IF pid IS NULL THEN RAISE EXCEPTION 'company not linked'; END IF;
+  IF (SELECT domain FROM companies WHERE id = pid) IS DISTINCT FROM 'acme.com' THEN RAISE EXCEPTION 'domain not normalized'; END IF;
   -- provenance stamped
-  IF (SELECT created_by_source FROM people WHERE brand_id = b AND lower(email)='ana@acme.com') <> 'IMPORT'
+  IF (SELECT created_by_source FROM people WHERE brand_id = b AND lower(email)='ana@acme.com') IS DISTINCT FROM 'IMPORT'
     THEN RAISE EXCEPTION 'created_by_source not IMPORT'; END IF;
 
   -- soft-delete then re-import restores [Twenty dedupe-then-restore]
