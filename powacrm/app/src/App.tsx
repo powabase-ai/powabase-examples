@@ -1,10 +1,34 @@
-function App() {
-  return (
-    <div style={{ padding: 'var(--space-6)' }}>
-      <h1>PowaCRM</h1>
-      <p>Scaffold ready.</p>
-    </div>
-  )
-}
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useSession } from '@/auth/useSession';
+import { LoginPage } from '@/auth/LoginPage';
+import { Shell } from '@/shell/Shell';
+import { BrandProvider } from '@/shell/BrandContext';
+import { BoardPage } from '@/board/BoardPage';
+import { LeadPage } from '@/lead/LeadPage';
+import { ImportPage } from '@/import/ImportPage';
 
-export default App
+const qc = new QueryClient();
+
+export default function App() {
+  const { session, loading } = useSession();
+  if (loading) return null;
+  return (
+    <QueryClientProvider client={qc}>
+      <BrowserRouter>
+        {!session ? <LoginPage /> : (
+          <BrandProvider>
+            <Routes>
+              <Route element={<Shell />}>
+                <Route path="/" element={<BoardPage />} />
+                <Route path="/leads/:id" element={<LeadPage />} />
+                <Route path="/import" element={<ImportPage />} />
+              </Route>
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          </BrandProvider>
+        )}
+      </BrowserRouter>
+    </QueryClientProvider>
+  );
+}
