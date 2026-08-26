@@ -51,11 +51,20 @@ export function useMoveLead(brandId: string) {
     mutationFn: async ({ lead, toStage, position }: { lead: Lead; toStage: string; position: number }) => {
       const { error } = await supabase.from('people').update({ stage: toStage, position }).eq('id', lead.id);
       if (error) throw error;
-      await supabase.from('events').insert({
+      // The stage write above is authoritative; this timeline event is a secondary,
+      // advisory record. If it fails, the persisted stage change must NOT be rolled
+      // back (onError would revert the optimistic cache to the old stage while the
+      // DB holds the new one — the UI would then be lying about a move that actually
+      // succeeded). So its error is logged, not thrown. A transactional write across
+      // both tables would need a database RPC, which phase 1 does not warrant.
+      const { error: eventError } = await supabase.from('events').insert({
         brand_id: brandId, person_id: lead.id, event_type: 'stage_changed',
         actor_source: 'MANUAL', actor_name: 'Hunter',
         properties: { diff: { stage: { before: lead.stage, after: toStage } } },
       });
+      if (eventError) {
+        console.error(`useMoveLead: stage_changed event failed for lead ${lead.id} (${lead.stage} -> ${toStage})`, eventError);
+      }
     },
     onMutate: async ({ lead, toStage, position }) => {
       await qc.cancelQueries({ queryKey: ['leads', brandId] });
