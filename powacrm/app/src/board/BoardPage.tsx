@@ -52,7 +52,7 @@ function ResearchBatchButton({ leads, brandId }: { leads: Lead[]; brandId: strin
   return (
     <div style={{ marginBottom: 'var(--space-3)' }}>
       <button onClick={run} disabled={requestResearch.isPending}>
-        {requestResearch.isPending ? 'Requesting…' : `Research ${batch.length} unresearched lead${batch.length === 1 ? '' : 's'}`}
+        {requestResearch.isPending ? 'Requesting…' : `Research ${batch.length} unresearched compan${batch.length === 1 ? 'y' : 'ies'}`}
       </button>
       {requestResearch.error && (
         <div style={{ background: 'var(--tag-red-bg)', color: 'var(--tag-red-fg)', padding: 'var(--space-3)',
