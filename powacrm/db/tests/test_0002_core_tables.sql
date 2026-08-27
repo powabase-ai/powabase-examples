@@ -71,7 +71,7 @@ BEGIN
     RAISE EXCEPTION 'created_by_source default wrong'; END IF;
 
   SELECT count(*) INTO n FROM stage_options WHERE object = 'people';
-  IF n < 7 THEN RAISE EXCEPTION 'expected 7 seeded people stages, got %', n; END IF;
+  IF n <> 7 THEN RAISE EXCEPTION 'expected exactly 7 seeded people stages, got %', n; END IF;
 
   DELETE FROM people WHERE brand_id = b; DELETE FROM companies WHERE brand_id = b; DELETE FROM brands WHERE id = b;
 END $$;

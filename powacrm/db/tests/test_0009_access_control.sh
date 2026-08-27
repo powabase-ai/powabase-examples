@@ -39,6 +39,13 @@ status() { printf '%s' "${1##*$'\n'}"; }
 body() { printf '%s' "${1%$'\n'*}"; }
 fail() { echo "FAIL: $*"; exit 1; }
 
+# If the project has signups turned off -- which README's own security section
+# recommends -- this test cannot run: it needs to create a second account. Skip
+# rather than fail, so a correctly-hardened project still gets a green suite.
+signup_disabled() { # signup_disabled <response-body>
+  printf '%s' "$1" | grep -qiE 'signup(s)? (are |is )?(not allowed|disabled)|signup_disabled'
+}
+
 # Assert a write was refused FOR AUTHORIZATION REASONS. A bare "not 2xx" check
 # would also pass on a typo'd payload (400, missing column) and would then be
 # proving nothing at all, so the refusal has to name RLS, a missing privilege,
@@ -114,7 +121,14 @@ done
 # ---------------------------------------------------------------------------
 R=$(req -X POST "$BASE/auth/v1/signup" -H "apikey: $ANON" -H "Content-Type: application/json" \
   -d "{\"email\":\"$B_EMAIL\",\"password\":\"$B_PASSWORD\"}")
-case "$(status "$R")" in 2*) ;; *) fail "public signup is broken (HTTP $(status "$R")): $(body "$R")" ;; esac
+case "$(status "$R")" in
+  2*) ;;
+  *) if signup_disabled "$(body "$R")"; then
+       echo "test_0009 SKIPPED (signups are disabled on this project, so a second account cannot be created)"
+       exit 0
+     fi
+     fail "public signup is broken (HTTP $(status "$R")): $(body "$R")" ;;
+esac
 
 B_ID=$(run_sql "SELECT id FROM auth.users WHERE lower(email)=lower('$B_EMAIL')")
 [ -n "$B_ID" ] || fail "signup returned success but created no auth user"
@@ -214,7 +228,7 @@ N=$(run_sql "SELECT count(*) FROM people WHERE id='$A_PER_ID' AND deleted_at IS 
 
 # The same two calls against B's OWN brand must work -- otherwise the guards are
 # just breaking the feature rather than scoping it.
-B_IB_ID=$(post_b() { :; }; curl -s -X POST "$BASE/rest/v1/import_batches" "${B[@]}" -H "Content-Type: application/json" \
+B_IB_ID=$(curl -s -X POST "$BASE/rest/v1/import_batches" "${B[@]}" -H "Content-Type: application/json" \
   -H "Prefer: return=representation" -d "{\"brand_id\":\"$B_BRAND_ID\",\"filename\":\"_b_own.csv\"}" \
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["id"] if isinstance(d,list) and d else "")')
 [ -n "$B_IB_ID" ] || fail "B cannot create an import batch in its OWN brand"
@@ -275,5 +289,49 @@ N=$(curl -s "$BASE/rest/v1/brands?select=id&id=eq.$B_BRAND_ID" "${A[@]}" | jlen)
 # A's sanctioned soft delete still works end to end.
 R=$(req -X POST "$BASE/rest/v1/rpc/soft_delete_person" "${A[@]}" -H "Content-Type: application/json" -d "{\"_id\":\"$A_PER_ID\"}")
 [ "$(body "$R")" = "true" ] || fail "A cannot soft-delete its own person: $(body "$R")"
+
+# ---------------------------------------------------------------------------
+# 10. Policy invariants that three migration headers assert but nothing tested.
+#     These are about what the OWNER may do to their own rows -- the isolation
+#     above is only half the model.
+# ---------------------------------------------------------------------------
+# 10a. A client cannot tombstone a row directly. The SELECT policy's
+# `deleted_at IS NULL` is re-checked against the NEW row on UPDATE, which is why
+# soft delete has to go through the RPC. Worth pinning: PostgreSQL only re-checks
+# the SELECT policy when read access is required, and supabase-js `.update()`
+# with no `.select()` sends `Prefer: return=minimal` -- so this could plausibly
+# have differed between the raw REST call and the client the app actually uses.
+# It does not; both are refused.
+A_LIVE_ID=$(post_a people "{\"brand_id\":\"$A_BRAND_ID\",\"first_name\":\"IsoTombstone\",\"email\":\"iso-tombstone@example.com\"}")
+[ -n "$A_LIVE_ID" ] || fail "could not create the tombstone fixture"
+for pref in "return=minimal" "return=representation"; do
+  R=$(req -X PATCH "$BASE/rest/v1/people?id=eq.$A_LIVE_ID" "${A[@]}" \
+    -H "Content-Type: application/json" -H "Prefer: $pref" -d '{"deleted_at":"2026-01-01T00:00:00Z"}')
+  case "$(status "$R")" in 2*) fail "A tombstoned its own row directly with $pref -- soft delete is meant to go through the RPC" ;; esac
+done
+STILL=$(run_sql "SELECT coalesce(deleted_at::text,'live') FROM people WHERE id='$A_LIVE_ID'")
+[ "$STILL" = "live" ] || fail "the row was tombstoned despite the refusals (deleted_at=$STILL)"
+
+# 10b. A cannot move its own row into another brand. The WITH CHECK on the _upd
+# policies is the only thing preventing it, and nothing exercised it.
+R=$(req -X PATCH "$BASE/rest/v1/people?id=eq.$A_LIVE_ID" "${A[@]}" \
+  -H "Content-Type: application/json" -d "{\"brand_id\":\"$B_BRAND_ID\"}")
+refused "moving A's person into B's brand" "$R"
+run_sql "DELETE FROM people WHERE id='$A_LIVE_ID'" >/dev/null
+
+# 10c. The shared lookups are readable by everyone but writable by no one.
+# Note the assertion is on the DATA, not the status: with RLS on and no UPDATE
+# policy, PostgREST returns 204 having matched zero rows. A test that expected a
+# non-2xx here would fail while the schema was behaving perfectly.
+BEFORE_LABEL=$(run_sql "SELECT label FROM stage_options WHERE value='sourced'")
+req -X PATCH "$BASE/rest/v1/stage_options?value=eq.sourced" "${B[@]}" \
+  -H "Content-Type: application/json" -d '{"label":"Hijacked"}' >/dev/null
+req -X POST "$BASE/rest/v1/event_types" "${B[@]}" \
+  -H "Content-Type: application/json" -d '{"name":"hijacked","verb":"x","label":"x","icon":"x"}' >/dev/null
+AFTER_LABEL=$(run_sql "SELECT label FROM stage_options WHERE value='sourced'")
+[ "$BEFORE_LABEL" = "$AFTER_LABEL" ] \
+  || fail "a client rewrote a shared lookup: stage_options.sourced went from '$BEFORE_LABEL' to '$AFTER_LABEL'"
+N=$(run_sql "SELECT count(*) FROM event_types WHERE name='hijacked'")
+[ "$N" = "0" ] || fail "a client inserted into event_types, which every tenant reads"
 
 echo "test_0009 OK"

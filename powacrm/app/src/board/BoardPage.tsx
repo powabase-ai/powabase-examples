@@ -5,7 +5,7 @@ import { useBrand } from '@/shell/BrandContext';
 import { positionBetween } from '@/lib/position';
 import { StageTag } from './StageTag';
 import { createDragGuard, type DragGuard } from './dragGuard';
-import { groupByStage, leadName, useLeads, useMoveLead, useStages, type Lead, type Stage } from './useLeads';
+import { groupByStage, leadName, useLeads, useMoveLead, useStages, LEAD_CAP, type Lead, type Stage } from './useLeads';
 
 function Card({ lead, dragGuard }: { lead: Lead; dragGuard: DragGuard }) {
   const nav = useNavigate();
@@ -80,6 +80,23 @@ export function BoardPage() {
   return (
     <DndContext sensors={sensors} onDragStart={() => dragGuard.onDragStart()} onDragEnd={onDragEnd}>
       <h1 style={{ fontSize: 'var(--font-lg)', marginTop: 0 }}>Pipeline</h1>
+      {leads.length >= LEAD_CAP && (
+        <div style={{ background: 'var(--tag-orange-bg)', color: 'var(--tag-orange-fg)', padding: 'var(--space-3)',
+          borderRadius: 'var(--radius-md)', fontSize: 'var(--font-sm)', marginBottom: 'var(--space-3)' }}>
+          Showing the first {LEAD_CAP} leads by position. This brand has more, so the per-column
+          counts below count what is on screen, not what the brand holds.
+        </div>
+      )}
+      {move.error && (
+        <div style={{ background: 'var(--tag-red-bg)', color: 'var(--tag-red-fg)', padding: 'var(--space-3)',
+          borderRadius: 'var(--radius-md)', fontSize: 'var(--font-sm)', marginBottom: 'var(--space-3)' }}>
+          {/* A refused move animates into the new column and snaps back. With no
+              reason on screen that reads as the app losing the drag, and invites
+              the user to retry against a refusal that will not change. LeadPage's
+              two write paths say so; the board's third should too. */}
+          Couldn't move that lead: {move.error.message}
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 'var(--space-4)', overflowX: 'auto' }}>
         {stages.map(s => <Column key={s.value} stage={s} leads={grouped[s.value]} dragGuard={dragGuard} />)}
       </div>

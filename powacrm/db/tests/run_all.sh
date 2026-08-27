@@ -7,4 +7,5 @@ for f in tests/test_0001_helpers.sql tests/test_0002_core_tables.sql tests/test_
 done
 ./tests/test_0004_rls.sh
 ./tests/test_0009_access_control.sh
+./tests/test_0010_import_batch_scope.sh
 echo "ALL DB TESTS OK"

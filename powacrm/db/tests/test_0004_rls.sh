@@ -11,7 +11,9 @@ run_sql() {
   if command -v psql >/dev/null 2>&1; then
     psql "$PB_DB_URL" -v ON_ERROR_STOP=1 -t -A -c "$1"
   else
-    docker run --rm -i postgres:16-alpine psql "$PB_DB_URL" -v ON_ERROR_STOP=1 -t -A -c "$1"
+    # -e, not argv: the URL carries the password. Same as test_0009/test_0010.
+    docker run --rm -i -e PGURL="$PB_DB_URL" postgres:16-alpine \
+      sh -c 'exec psql "$PGURL" -v ON_ERROR_STOP=1 -t -A -c "$0"' "$1"
   fi
 }
 

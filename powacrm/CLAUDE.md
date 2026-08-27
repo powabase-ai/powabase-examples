@@ -39,8 +39,12 @@ server-side only, never in `app/`.
 
 - Every table: uuid PK, `created_at`/`updated_at` (+`set_updated_at` trigger),
   `deleted_at` soft delete, actor provenance columns, `text + CHECK` enums —
-  spec §3.1. New migrations are numbered `db/migrations/NNNN_*.sql` and get a
-  matching `db/tests/test_NNNN_*.sql`.
+  spec §3.1. New migrations are numbered `db/migrations/NNNN_*.sql` and every
+  one gets coverage — usually a matching `db/tests/test_NNNN_*`, or an existing
+  test that names it (0005's RPC is exercised by `test_0004_rls.sh`). Anything
+  touching RLS or a `SECURITY DEFINER` function needs an HTTP test with a real
+  token: `db/apply.sh` connects as a superuser, so a SQL test of a policy passes
+  vacuously.
 - **RLS is per-owner, not per-role.** `brands.owner_id` names the one account
   that owns a brand; every other table is gated on `owns_brand(brand_id)`
   (`db/migrations/0009_access_control.sql`). A new table holding user data joins

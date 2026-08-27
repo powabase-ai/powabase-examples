@@ -33,6 +33,12 @@ export function useStages() {
   });
 }
 
+// The board renders every lead it fetches, so it has to stop somewhere. The cap
+// is surfaced in the UI rather than silently truncating: with an ORDER BY the
+// same 1000 come back every time, but a per-stage count computed from a
+// truncated set is still not the brand's real count.
+export const LEAD_CAP = 1000;
+
 export function useLeads(brandId: string) {
   return useQuery({
     queryKey: ['leads', brandId],
@@ -44,7 +50,7 @@ export function useLeads(brandId: string) {
         // a single drag made unrelated cards appear and vanish.
         .eq('brand_id', brandId).is('deleted_at', null)
         .order('position', { ascending: true }).order('id', { ascending: true })
-        .limit(1000);
+        .limit(LEAD_CAP);
       if (error) throw error;
       return data as unknown as Lead[];
     },
