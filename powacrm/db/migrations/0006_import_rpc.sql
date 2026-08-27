@@ -1,3 +1,9 @@
+-- SUPERSEDED by 0007_import_company_by_name.sql, which fixes a silent data-loss
+-- bug in this version (a CSV with a Company column but no Website column
+-- imported everyone with `company_id = NULL` and reported success) and hardens
+-- `search_path`. This file is kept byte-identical to what was applied; apply
+-- both, in order.
+--
 -- SECURITY DEFINER: must see soft-deleted rows (RLS SELECT policy hides them)
 -- to implement dedupe-then-restore. Grant to authenticated only.
 --
