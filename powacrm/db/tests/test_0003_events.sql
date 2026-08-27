@@ -5,11 +5,11 @@ BEGIN
   INSERT INTO people (brand_id, first_name) VALUES (b, 'Eve') RETURNING id INTO p;
 
   INSERT INTO events (brand_id, person_id, event_type, actor_source, actor_name, properties)
-  VALUES (b, p, 'note', 'MANUAL', 'Hunter', '{"body": "hello"}');
+  VALUES (b, p, 'note', 'MANUAL', 'Test User', '{"body": "hello"}');
   -- unknown event type rejected (FK to event_types)
   BEGIN
     INSERT INTO events (brand_id, person_id, event_type, actor_source, actor_name)
-    VALUES (b, p, 'nonsense', 'MANUAL', 'Hunter');
+    VALUES (b, p, 'nonsense', 'MANUAL', 'Test User');
     RAISE EXCEPTION 'expected fk violation on event_type';
   EXCEPTION WHEN foreign_key_violation THEN NULL; END;
   -- happens_at defaulted

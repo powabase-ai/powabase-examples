@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/powabase';
+import { currentActorName } from '@/lib/actor';
 import { useBrand } from '@/shell/BrandContext';
 import { StageTag } from '@/board/StageTag';
 import { leadName, useStages, type Lead } from '@/board/useLeads';
@@ -17,13 +18,17 @@ type FullLead = Lead & {
 export function LeadPage() {
   const { id } = useParams<{ id: string }>();
   const { brand } = useBrand();
-  const { data: stages } = useStages();
+  const stagesQuery = useStages();
+  const { data: stages } = stagesQuery;
   const qc = useQueryClient();
   const [tab, setTab] = useState<'activity' | 'research'>('activity');
   const [note, setNote] = useState('');
 
-  const { data: lead } = useQuery({
+  const leadQuery = useQuery({
     queryKey: ['lead', id],
+    // PGRST116 (no rows from `.single()`) is a permanent answer for this id --
+    // retrying it just delays the "not found" message.
+    retry: false,
     queryFn: async () => {
       const { data, error } = await supabase.from('people')
         .select('id,first_name,last_name,title,email,stage,position,fit_score,linkedin_url,created_at,company_id,company:companies(id,name,domain,research)')
@@ -32,7 +37,8 @@ export function LeadPage() {
       return data as unknown as FullLead;
     },
   });
-  const { data: events } = useQuery({
+  const { data: lead } = leadQuery;
+  const eventsQuery = useQuery({
     queryKey: ['events', id],
     queryFn: async () => {
       const { data, error } = await supabase.from('events')
@@ -42,6 +48,7 @@ export function LeadPage() {
       return data as TimelineEvent[];
     },
   });
+  const { data: events } = eventsQuery;
 
   const patch = useMutation({
     mutationFn: async (fields: Partial<FullLead>) => {
@@ -54,13 +61,30 @@ export function LeadPage() {
     mutationFn: async (body: string) => {
       const { error } = await supabase.from('events').insert({
         brand_id: brand.id, person_id: id, company_id: lead?.company_id ?? null,
-        event_type: 'note', actor_source: 'MANUAL', actor_name: 'Hunter', properties: { body },
+        event_type: 'note', actor_source: 'MANUAL', actor_name: await currentActorName(), properties: { body },
       });
       if (error) throw error;
     },
     onSettled: () => qc.invalidateQueries({ queryKey: ['events', id] }),
   });
 
+  // `/leads/:id` is bookmarkable and hand-typeable, and `.single()` answers a
+  // missing (or soft-deleted, since the SELECT policy hides tombstones) id with
+  // HTTP 406 / PGRST116. Without this branch a stale bookmark showed "Loading…"
+  // forever, with no message and no way back.
+  const loadError = leadQuery.error ?? stagesQuery.error ?? eventsQuery.error;
+  if (loadError) {
+    const notFound = (loadError as { code?: string }).code === 'PGRST116';
+    return (
+      <div>
+        <h1 style={{ fontSize: 'var(--font-lg)', marginTop: 0 }}>{notFound ? 'Lead not found' : "Couldn't load this lead"}</h1>
+        <p style={{ color: 'var(--fg-tertiary)', fontSize: 'var(--font-sm)' }}>
+          {notFound ? 'It may have been deleted, or the link may be wrong.' : loadError.message}
+        </p>
+        <Link to="/">← Back to the pipeline</Link>
+      </div>
+    );
+  }
   if (!lead || !stages || !events) return <p>Loading…</p>;
   const stage = stages.find(s => s.value === lead.stage);
   const days = Math.round((Date.now() - new Date(lead.created_at).getTime()) / 86400000);

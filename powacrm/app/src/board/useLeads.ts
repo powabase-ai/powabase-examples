@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/powabase';
+import { currentActorName } from '@/lib/actor';
 
 export type Lead = {
   id: string; first_name: string | null; last_name: string | null; title: string | null;
@@ -59,7 +60,7 @@ export function useMoveLead(brandId: string) {
       // both tables would need a database RPC, which phase 1 does not warrant.
       const { error: eventError } = await supabase.from('events').insert({
         brand_id: brandId, person_id: lead.id, event_type: 'stage_changed',
-        actor_source: 'MANUAL', actor_name: 'Hunter',
+        actor_source: 'MANUAL', actor_name: await currentActorName(),
         properties: { diff: { stage: { before: lead.stage, after: toStage } } },
       });
       if (eventError) {
