@@ -23,13 +23,16 @@ server-side only, never in `app/`.
 |---|---|---|
 | `app/` | React 19 · Vite · TS · TanStack Query · supabase-js | Dashboard / lite CRM |
 | `db/` | SQL migrations + psql test scripts | Schema, RLS, RPCs |
+| `platform/` | JSON definitions + `provision.sh` | The researcher agent and the `wf-research-tick` worker |
 | `docs/` | — | Design spec + phase plans |
 
 ## Running
 
 - Migrations/tests: `export PB_DB_URL=<Database URL>` then
   `./db/apply.sh db/migrations/<file>.sql`; run all checks with
-  `./db/tests/run_all.sh`.
+  `./db/tests/run_all.sh` (which also needs `PB_SERVICE_KEY` — the injection
+  probe makes a real agent run and spends platform credits).
+- Platform resources: `PB_SERVICE_KEY=... ./platform/provision.sh`.
 - Frontend: `cd app && npm run dev`; unit tests `npm test` (vitest).
 - Env: `app/.env.local` (gitignored) holds `VITE_POWABASE_URL` +
   `VITE_POWABASE_ANON_KEY` only. `PB_SERVICE_KEY`/`PB_DB_URL` are shell env for
@@ -60,6 +63,13 @@ server-side only, never in `app/`.
   fixes it. Grant these to `authenticated` and revoke from `PUBLIC, anon`.
 - Soft delete: SELECT policies filter `deleted_at IS NULL`, so anything that must
   see tombstones (dedupe-then-restore) goes through a `SECURITY DEFINER` RPC.
+- **Platform resources are files, not clicks.** The researcher agent and the
+  `wf-research-tick` workflow are defined in `platform/*.json` and applied by
+  `platform/provision.sh`. Do not create or edit them by hand in Studio: the
+  script reconciles the live objects to the files (it *removes* attached tools
+  the JSON does not list), so a hand-made change is silently reverted on the
+  next provision and is invisible in review. Changing the agent's prompt, its
+  model, or the worker's graph means editing the JSON and re-running the script.
 - Kanban ordering is fractional-float `position` (midpoint on drop, one PATCH).
 - Data layer is TanStack Query + supabase-js: optimistic writes via
   `onMutate`/`onError` snapshot-rollback, `onSettled` invalidate. No extra
@@ -76,4 +86,22 @@ server-side only, never in `app/`.
   skipped).
 - Agent `database_query`/`database_write` tools run as **DB superuser (RLS
   bypassed)** — agents are driven only from workflows, never exposed to
-  end-user tokens.
+  end-user tokens. It follows that **an agent that reads untrusted content must
+  hold no write-capable tool at all**: `powacrm-researcher` scrapes prospect
+  websites, which anyone with access to them can edit, so it gets exactly
+  `web_scrape` + `web_search` and nothing else, and the *workflow* does the
+  writing via `complete_research_job` under a normal role. Give it
+  `database_write`, `http_request` or `code_execute` and one poisoned page can
+  write anywhere in the schema, with no policy in the way. If a change seems to
+  need a write tool on the researcher, the write belongs in the calling
+  workflow. `db/tests/test_0012_injection.sh` asserts the tool list, not a
+  comment about it.
+- **`PB_DB_URL` is a connection pooler, and a pooler does not reset session
+  GUCs.** A bare `SET` (`session_replication_role`, `role`, `search_path`,
+  `statement_timeout`, …) leaks onto the pooled backend and changes behaviour
+  for every later connection that lands on it — for every user of the project,
+  not just you. Always `BEGIN; SET LOCAL ...; ...; COMMIT;`. This is not
+  theoretical: a bare `SET session_replication_role = replica` in a test
+  silently disabled foreign-key enforcement project-wide earlier in phase 2 and
+  produced orphaned rows before anyone noticed. See the comment above the
+  `SET LOCAL` in `db/tests/test_0012_request_research.sh`.

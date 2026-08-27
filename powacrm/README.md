@@ -107,13 +107,14 @@ scripts and must never reach `app/` or the browser.
 ### 2. Build the schema
 
 Migrations are plain SQL and **must be applied in numeric order, `0001` →
-`0009`** — later ones depend on tables, policies and functions the earlier ones
-create, `0007`/`0008` supersede functions first defined in `0006`/`0005`, and `0009`
-replaces every policy from `0004` with per-owner ones.
+`0012`** — later ones depend on tables, policies and functions the earlier ones
+create, `0007`/`0008` supersede functions first defined in `0006`/`0005`, `0009`
+replaces every policy from `0004` with per-owner ones, and `0011`/`0012` add the
+research queue and its RPCs on top of all of it.
 One command does all of them:
 
 ```bash
-./db/migrate.sh          # applies db/migrations/0001…0009 in order
+./db/migrate.sh          # applies db/migrations/0001…0012 in order
 ```
 
 Or apply them one at a time if you prefer to read as you go:
@@ -151,7 +152,26 @@ Signing up already gives every account its own empty starter brand, so the app
 works without the seed. The seed only adds the populated `gpt-trainer` demo
 brand — skip it if you would rather start clean.
 
-### 4. Run it
+### 4. Provision the research agent and worker
+
+The researcher agent and the `wf-research-tick` scheduled worker are **platform**
+resources, not database ones, so the migrations do not create them. One script
+does, and it needs the Service Role key:
+
+```bash
+export VITE_POWABASE_URL='https://<ref>.p.powabase.ai'
+export PB_SERVICE_KEY='...'                 # server-side only
+./platform/provision.sh
+```
+
+It creates or updates the agent from `platform/researcher-agent.json`,
+reconciles its attached tools to exactly the two that file lists, writes and
+deploys the workflow graph from `platform/wf-research-tick.json`, and verifies
+the schedule survived the save. It is idempotent — re-run it after editing
+either JSON file. Skip this and everything else still works; you just get no
+research. See [`platform/README.md`](platform/README.md).
+
+### 5. Run it
 
 ```bash
 cd app && npm install && npm run dev     # http://localhost:5173
@@ -161,7 +181,7 @@ Sign in with the email and password from step 3. You should land on the
 pipeline board; **Import CSV** takes any people export (Company and Website
 columns are both optional), and clicking a card opens the lead record.
 
-### 5. Verify
+### 6. Verify
 
 ```bash
 ./db/tests/run_all.sh    # schema, RLS, per-owner isolation, and RPC assertions
@@ -169,6 +189,52 @@ columns are both optional), and clicking a card opens the lead record.
 cd app && npm test       # vitest unit + jsdom component tests
 cd app && npm run build   # type-check + production build
 ```
+
+`run_all.sh` needs `PB_DB_URL`, `VITE_POWABASE_URL`, `VITE_POWABASE_ANON_KEY`,
+`PB_TEST_EMAIL`/`PB_TEST_PASSWORD` **and** `PB_SERVICE_KEY` — the last one for
+`test_0012_injection.sh`, which makes one real agent run (about 30 seconds, and
+it spends platform credits) against a page carrying a prompt-injection payload
+and asserts the researcher holds no write-capable tool, still returns a valid
+report, and flags the attempt.
+
+## Research
+
+Clicking **Research** on a lead — or **Research all** on the board — profiles
+that lead's *company* and scores every known contact at it. Research belongs to
+the company, so ten leads at one employer cost one pass; the fit score lands on
+each person, because fit depends on their title.
+
+A pass produces a short summary a seller can read before a call, an observed
+tech stack, a why-now angle, up to three personalization hooks each carrying the
+evidence and the **source URL it came from**, and a 0–100 fit score per person
+with the rationale that produced it. The score is judged against the brand's
+**ICP notes** — plain English you write in **Settings** — not against the
+model's own taste, so two brands selling different things score the same company
+differently. Every hook is shown with its source so a seller can check the claim
+before repeating it.
+
+It runs entirely on **Powabase platform credits**: `web_scrape` is Firecrawl and
+`web_search` is Exa, both built in. There are **no external API keys** to obtain
+or configure for research.
+
+**On demand, and capped.** Nothing is researched until someone asks. Each brand
+has a `research_daily_cap` (25/day by default, editable in Settings) enforced
+inside the `request_research` RPC, and a company researched in the last 30 days
+is skipped rather than re-run. Requests become rows in a `research_jobs` queue
+that only the RPCs may write, so the cap cannot be sidestepped from the browser.
+
+**Throughput is deliberately modest.** `wf-research-tick` fires once a minute
+and does **one job per tick**. Workflow executions serialize, and a tick that
+comes due while the previous execution is still running is **skipped, not
+queued** — so the real rate is one job per `max(60 s, execution duration)`, and
+a research run takes 35–50 s. In practice: roughly one company a minute, so
+selecting ten companies on the board and hitting **Research all** takes about
+ten minutes to drain. The daily cap binds long before throughput does. The
+reasoning, and the measurements behind it, are in
+[`platform/README.md`](platform/README.md).
+
+The researcher agent holds **exactly two tools, `web_scrape` and `web_search`**,
+and that is a security boundary rather than a minimalism preference — see below.
 
 ## Security and the trust boundary
 
@@ -206,7 +272,15 @@ Still worth doing, whatever your setup:
    is a Studio-only setting.
 3. **Remember Powabase agents bypass RLS.** Agent database tools run on the
    superuser connection, so anything agent-driven must be driven from a trusted
-   backend, never from an end-user's token.
+   backend, never from an end-user's token. That is why the researcher — whose
+   whole job is reading pages an outsider can edit — is given **only**
+   `web_scrape` and `web_search`, and why the *workflow*, not the agent, writes
+   the result back through `complete_research_job`. Adding `database_write`,
+   `http_request` or `code_execute` to that agent would put the entire schema
+   one prompt injection away, and no policy would stop it.
+   `db/tests/test_0012_injection.sh` feeds the agent a real injection payload
+   and asserts both halves: the tool list is exactly those two, and the agent
+   reports the attempt instead of obeying it.
 
 Verify any of the above yourself with `./db/tests/test_0009_access_control.sh`,
 which signs up a second account over the public endpoint and asserts it can
@@ -214,9 +288,14 @@ neither read, write, import into, nor delete from the first account's data.
 
 ## Status
 
-Under active development. Phase 1 (schema + RLS + auth + lite CRM: kanban
-board, lead view, CSV import) is **implemented** — see `db/migrations/` and
-`app/src/`, with the plan behind it in
-[`docs/2026-08-26-phase1-foundation-plan.md`](docs/2026-08-26-phase1-foundation-plan.md).
-Later phases add the research agents, Apollo sourcing, the sequence engine, and
-the LinkedIn/email execution legs.
+Under active development.
+
+- **Phase 1 — implemented.** Schema + RLS + auth + the lite CRM: kanban board,
+  lead view, CSV import. See `db/migrations/0001`–`0010`, `app/src/`, and
+  [`docs/2026-08-26-phase1-foundation-plan.md`](docs/2026-08-26-phase1-foundation-plan.md).
+- **Phase 2 — implemented.** AI research: the queue and RPCs
+  (`db/migrations/0011`–`0012`), the researcher agent and the scheduled worker
+  (`platform/`), and the trigger, job status and rendering in the app. Plan:
+  [`docs/2026-08-27-phase2-research-plan.md`](docs/2026-08-27-phase2-research-plan.md).
+- **Later phases** add Apollo sourcing, the copywriter and drafting queue, the
+  sequence engine, and the LinkedIn/email execution legs.

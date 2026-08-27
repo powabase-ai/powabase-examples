@@ -10,4 +10,8 @@ done
 ./tests/test_0009_access_control.sh
 ./tests/test_0010_import_batch_scope.sh
 ./tests/test_0012_request_research.sh
+# Needs PB_SERVICE_KEY on top of the variables above, makes a real agent run
+# (~30 s) and spends platform credits -- it is the only check that the
+# researcher's tool allowlist and its injection resistance actually hold.
+./tests/test_0012_injection.sh
 echo "ALL DB TESTS OK"
