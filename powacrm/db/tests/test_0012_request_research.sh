@@ -21,6 +21,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 signup_disabled() { printf '%s' "$1" | grep -qiE 'signup(s)? (are |is )?(not allowed|disabled)|signup_disabled'; }
 verdict() { printf '%s' "$1" | python3 -c "import json,sys; print(json.load(sys.stdin)['results'][0]['verdict'])"; }
 jobid() { printf '%s' "$1" | python3 -c "import json,sys; v=json.load(sys.stdin)['results'][0]['job_id']; print(v if v is not None else '')"; }
+detail() { printf '%s' "$1" | python3 -c "import json,sys; print(json.load(sys.stdin)['results'][0]['detail'])"; }
 
 # Escaped -- '_' is a single-char LIKE wildcard, so an unescaped '_t12_%' also
 # matches unrelated real rows such as 'at12x@...'. This runs against the real
@@ -76,10 +77,16 @@ NODOM_PER=$(post_a people "{\"brand_id\":\"$A_BRAND\",\"company_id\":\"$NODOM_CO
 V=$(verdict "$(rpc_a "$NODOM_PER")")
 [ "$V" = "skipped" ] || fail "expected skipped for a domainless company, got $V"
 
-# 3b. a lead with no company at all is skipped the same way
+# 3b. a lead with no company at all is skipped the same way -- and specifically
+# for that reason, not merely because it also has no domain: deleting this
+# branch entirely would still yield 'skipped' via the no-domain check, so the
+# detail is what actually pins down which branch fired.
 NOCO_PER=$(post_a people "{\"brand_id\":\"$A_BRAND\",\"first_name\":\"NoCo\",\"email\":\"_t12_noco@example.com\"}")
-V=$(verdict "$(rpc_a "$NOCO_PER")")
+OUT=$(rpc_a "$NOCO_PER")
+V=$(verdict "$OUT")
 [ "$V" = "skipped" ] || fail "expected skipped for a lead with no company, got $V"
+D=$(detail "$OUT")
+[ "$D" = "lead has no company" ] || fail "expected detail 'lead has no company', got '$D'"
 
 # 3c. a company researched recently is skipped on freshness grounds
 FRESH_CO=$(post_a companies "{\"brand_id\":\"$A_BRAND\",\"name\":\"_t12_fresh\",\"domain\":\"t12fresh.example\"}")
@@ -140,7 +147,15 @@ case "$(status "$R")" in 2*) fail "B inserted a person with a cross-brand compan
 # run_sql prints the multi-statement's tags too (psql -t suppresses SELECT
 # footers, not command-completion tags like SET/INSERT 0 1), so pull the uuid
 # out rather than trust the whole output is the id.
-XBRAND_PER=$(run_sql "SET session_replication_role = replica; INSERT INTO people (brand_id, company_id, first_name, email) VALUES ('$B_BRAND','$A_CO2','XBrand','_t12_xbrand@example.com') RETURNING id;" \
+#
+# PB_DB_URL is a pooler connection, and a pooler does NOT reset session GUCs
+# when a backend is returned to the pool -- a bare `SET session_replication_role
+# = replica` here would leak onto that pooled backend and silently disable FK
+# enforcement and triggers for every later connection that lands on it, for
+# every user of the project. `SET LOCAL` inside an explicit transaction is
+# scoped to that transaction and is discarded at COMMIT regardless of how the
+# pooler recycles the connection afterward.
+XBRAND_PER=$(run_sql "BEGIN; SET LOCAL session_replication_role = replica; INSERT INTO people (brand_id, company_id, first_name, email) VALUES ('$B_BRAND','$A_CO2','XBrand','_t12_xbrand@example.com') RETURNING id; COMMIT;" \
   | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 [ -n "$XBRAND_PER" ] || fail "could not fabricate the cross-brand-linked row needed to test the query-level guard"
 OUT=$(curl -s -X POST "$BASE/rest/v1/rpc/request_research" "${B[@]}" -H "Content-Type: application/json" \
