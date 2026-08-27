@@ -128,22 +128,28 @@ There is no migration version table: `db/migrate.sh` is a
 has the tables and policies. To apply a single later migration to an existing
 database, use `./db/apply.sh db/migrations/<file>.sql`.
 
-### 3. Seed and create the login
+### 3. Create the login, then seed
+
+**Order matters.** Since `0009`, `brands.owner_id` is NOT NULL and the demo brand
+is handed to the project's first account — so the account has to exist before the
+seed runs. The seed fails with a clear message if you do it the other way round.
 
 ```bash
-./db/apply.sh db/seed/seed_gpt_trainer.sql   # the one demo brand (stage/event
-                                             # lookups come from 0002/0003)
-
 # create_user.sh talks to GoTrue over HTTP, so it needs the project URL and both
 # keys in the shell — not just in app/.env.local.
 export VITE_POWABASE_URL='https://<ref>.p.powabase.ai'
 export VITE_POWABASE_ANON_KEY='...'
 export PB_TEST_EMAIL='you@example.com' PB_TEST_PASSWORD='<a strong password>'
 ./db/setup/create_user.sh                    # creates the GoTrue login (idempotent)
+
+./db/apply.sh db/seed/seed_gpt_trainer.sql   # the demo brand, owned by that
+                                             # account (stage/event lookups come
+                                             # from 0002/0003)
 ```
 
-The seed is what puts the first row in `brands`. Skip it and the app stops at
-"No brands found".
+Signing up already gives every account its own empty starter brand, so the app
+works without the seed. The seed only adds the populated `gpt-trainer` demo
+brand — skip it if you would rather start clean.
 
 ### 4. Run it
 

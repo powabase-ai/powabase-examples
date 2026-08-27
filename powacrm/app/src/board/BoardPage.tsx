@@ -55,7 +55,7 @@ export function BoardPage() {
   const { data: stages, error: stagesError } = stagesQuery;
   const { data: leads, error: leadsError } = leadsQuery;
   const error = stagesError ?? leadsError;
-  if (error) {
+  if (error && !leads) {
     return (
       <div>
         <h1 style={{ fontSize: 'var(--font-lg)', marginTop: 0 }}>Pipeline</h1>

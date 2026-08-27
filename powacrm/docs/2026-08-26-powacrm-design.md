@@ -59,9 +59,14 @@ React SPA (dashboard)
 - All third-party secrets (Apollo key, Dux userid/auth, SendGrid key) live
   only in workflow block configs / agent tool configs server-side. The SPA
   ships only the anon key; RLS is enabled on every `public` table.
-- Auth: single GoTrue user (the founder). RLS policies: `authenticated` role
-  only, always filtered `deleted_at IS NULL`. Dashboard-triggered pipeline
-  actions call deployed workflow webhooks (Bearer webhook secret).
+- Auth: public GoTrue signup, with data isolated **per owner** — `brands.owner_id`
+  names the account that owns a brand and every other table is gated on
+  `owns_brand(brand_id)`; SELECT policies also filter `deleted_at IS NULL`. A
+  signup gets its own starter brand. (Superseded the original single-user design
+  during implementation — see `db/migrations/0009_access_control.sql`; the two
+  `SECURITY DEFINER` RPCs enforce the same rule themselves, since RLS does not
+  apply to them.) Dashboard-triggered pipeline actions call deployed workflow
+  webhooks (Bearer webhook secret).
 - Dux Soup webhooks and SendGrid event/inbound-parse webhooks POST to
   deployed workflow webhook URLs (`/api/webhooks/{id}`) — public URLs for
   free, no tunneling. Webhook runs are synchronous with a 5-minute cap;

@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { useSession } from '@/auth/useSession';
 import { LoginPage } from '@/auth/LoginPage';
 import { Shell } from '@/shell/Shell';
@@ -7,14 +7,13 @@ import { BrandProvider } from '@/shell/BrandContext';
 import { BoardPage } from '@/board/BoardPage';
 import { LeadPage } from '@/lead/LeadPage';
 import { ImportPage } from '@/import/ImportPage';
-
-const qc = new QueryClient();
+import { queryClient } from '@/lib/queryClient';
 
 export default function App() {
   const { session, loading } = useSession();
   if (loading) return null;
   return (
-    <QueryClientProvider client={qc}>
+    <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         {!session ? <LoginPage /> : (
           <BrandProvider>

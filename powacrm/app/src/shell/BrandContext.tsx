@@ -23,7 +23,10 @@ export function BrandProvider({ children }: { children: ReactNode }) {
   // a real query failure, a working project whose seed was never run (zero
   // brands), and the genuine in-flight case. The first two never resolve on
   // their own, so each needs to say so.
-  if (error) {
+  // Gate on `&& !brands`: in TanStack Query v5 a failed background refetch sets
+  // `error` while RETAINING the last good `data`, so gating on `error` alone
+  // would tear the whole app down over a momentary wifi drop.
+  if (error && !brands) {
     return (
       <div style={{ padding: 'var(--space-6)' }}>
         <p style={{ color: 'var(--tag-red-fg)' }}>Couldn't load brands: {error.message}</p>

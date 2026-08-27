@@ -1,3 +1,10 @@
+-- NOTE (added later): this file's header describes the SINGLE-TENANT model that
+-- 0009_access_control.sql replaced. Data is now isolated per owner via
+-- brands.owner_id / owns_brand(), and 0009 re-creates the function(s) defined
+-- below with an ownership guard; 0010 then fixes a cross-tenant write in the
+-- import batch UPDATE. Read 0009 and 0010 before trusting anything below about
+-- who can see or write what.
+--
 -- SUPERSEDED by 0007_import_company_by_name.sql, which fixes a silent data-loss
 -- bug in this version (a CSV with a Company column but no Website column
 -- imported everyone with `company_id = NULL` and reported success) and hardens

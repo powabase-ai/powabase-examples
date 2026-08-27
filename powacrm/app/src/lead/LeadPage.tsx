@@ -65,6 +65,10 @@ export function LeadPage() {
       });
       if (error) throw error;
     },
+    // Clear the box only once the insert has landed. Clearing it at fire time
+    // destroyed whatever the user typed if the insert then failed, with nothing
+    // shown to explain where it went.
+    onSuccess: () => setNote(''),
     onSettled: () => qc.invalidateQueries({ queryKey: ['events', id] }),
   });
 
@@ -73,7 +77,10 @@ export function LeadPage() {
   // HTTP 406 / PGRST116. Without this branch a stale bookmark showed "Loading…"
   // forever, with no message and no way back.
   const loadError = leadQuery.error ?? stagesQuery.error ?? eventsQuery.error;
-  if (loadError) {
+  // Same reasoning as BrandContext: a failed refetch keeps the cached data, and
+  // replacing a perfectly good record page with an error screen (losing whatever
+  // the user was mid-edit) is worse than showing slightly stale data.
+  if (loadError && !lead) {
     const notFound = (loadError as { code?: string }).code === 'PGRST116';
     return (
       <div>
@@ -120,12 +127,21 @@ export function LeadPage() {
             </button>
           ))}
         </div>
+        {(patch.error || addNote.error) && (
+          <div style={{ background: 'var(--tag-red-bg)', color: 'var(--tag-red-fg)', padding: 'var(--space-3)',
+            borderRadius: 'var(--radius-md)', fontSize: 'var(--font-sm)', marginBottom: 'var(--space-3)' }}>
+            {/* Without this a rejected write just snapped the field back, which reads
+                as "I mistyped it" rather than "the server refused". */}
+            Couldn't save: {(patch.error ?? addNote.error)!.message}
+          </div>
+        )}
         {tab === 'activity' ? (
           <>
-            <form onSubmit={e => { e.preventDefault(); if (note.trim()) { addNote.mutate(note.trim()); setNote(''); } }}
+            <form onSubmit={e => { e.preventDefault(); if (note.trim()) addNote.mutate(note.trim()); }}
               style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}>
-              <input value={note} onChange={e => setNote(e.target.value)} placeholder="Add a note…" style={{ flex: 1 }} />
-              <button type="submit">Add</button>
+              <input value={note} onChange={e => setNote(e.target.value)} placeholder="Add a note…" style={{ flex: 1 }}
+                disabled={addNote.isPending} />
+              <button type="submit" disabled={addNote.isPending}>{addNote.isPending ? 'Adding…' : 'Add'}</button>
             </form>
             <Timeline events={events} />
           </>

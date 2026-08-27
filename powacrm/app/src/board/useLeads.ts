@@ -39,7 +39,12 @@ export function useLeads(brandId: string) {
     queryFn: async () => {
       const { data, error } = await supabase.from('people')
         .select('id,first_name,last_name,title,email,stage,position,fit_score,company:companies(id,name,domain)')
-        .eq('brand_id', brandId).is('deleted_at', null).limit(1000);
+        // Order before limiting. Without an ORDER BY, *which* 1000 rows Postgres
+        // returns is arbitrary and changes after any write, so on a larger brand
+        // a single drag made unrelated cards appear and vanish.
+        .eq('brand_id', brandId).is('deleted_at', null)
+        .order('position', { ascending: true }).order('id', { ascending: true })
+        .limit(1000);
       if (error) throw error;
       return data as unknown as Lead[];
     },

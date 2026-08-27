@@ -26,4 +26,7 @@ for f in "${files[@]}"; do
 done
 
 echo "ALL MIGRATIONS APPLIED (${#files[@]} files)"
-echo "Next: ./db/apply.sh db/seed/seed_gpt_trainer.sql, then ./db/setup/create_user.sh"
+# Order matters: 0009 made brands.owner_id NOT NULL and the seed hands the demo
+# brand to the first account, so the login has to exist first. Paths are shown
+# relative to powacrm/, matching the README.
+echo "Next, from powacrm/: ./db/setup/create_user.sh, then ./db/apply.sh db/seed/seed_gpt_trainer.sql"

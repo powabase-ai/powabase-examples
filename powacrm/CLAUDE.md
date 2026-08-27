@@ -41,9 +41,21 @@ server-side only, never in `app/`.
   `deleted_at` soft delete, actor provenance columns, `text + CHECK` enums —
   spec §3.1. New migrations are numbered `db/migrations/NNNN_*.sql` and get a
   matching `db/tests/test_NNNN_*.sql`.
-- RLS: `authenticated` only; SELECT filters `deleted_at IS NULL`; anything that
-  must see tombstones (dedupe-then-restore) is a `SECURITY DEFINER` RPC granted
-  to `authenticated`, revoked from `anon`.
+- **RLS is per-owner, not per-role.** `brands.owner_id` names the one account
+  that owns a brand; every other table is gated on `owns_brand(brand_id)`
+  (`db/migrations/0009_access_control.sql`). A new table holding user data joins
+  that scheme — a policy of `TO authenticated USING (true)` reintroduces exactly
+  the cross-tenant read 0009 exists to close. Only the shared lookups
+  (`stage_options`, `event_types`) are readable by everyone, because they hold
+  labels and icons rather than anyone's data.
+- **A `SECURITY DEFINER` function needs its own authorization check.** It runs as
+  the superuser and bypasses RLS entirely, so the policies do nothing for it —
+  see `import_people` / `soft_delete_person`, which call `owns_brand` themselves.
+  Getting this wrong is not theoretical: 0009 shipped with a batch UPDATE keyed
+  on `_import_id` alone, which let one tenant overwrite another's row, and 0010
+  fixes it. Grant these to `authenticated` and revoke from `PUBLIC, anon`.
+- Soft delete: SELECT policies filter `deleted_at IS NULL`, so anything that must
+  see tombstones (dedupe-then-restore) goes through a `SECURITY DEFINER` RPC.
 - Kanban ordering is fractional-float `position` (midpoint on drop, one PATCH).
 - Data layer is TanStack Query + supabase-js: optimistic writes via
   `onMutate`/`onError` snapshot-rollback, `onSettled` invalidate. No extra

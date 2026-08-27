@@ -70,9 +70,10 @@ trap cleanup EXIT
 #    assertions below run against tables that actually hold A's data. Checking
 #    "B sees nothing" against an empty table would pass with RLS switched off.
 # ---------------------------------------------------------------------------
-A_TOKEN=$(curl -s "$BASE/auth/v1/token?grant_type=password" -H "apikey: $ANON" -H "Content-Type: application/json" \
-  -d "{\"email\":\"$PB_TEST_EMAIL\",\"password\":\"$PB_TEST_PASSWORD\"}" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+A_LOGIN=$(curl -s "$BASE/auth/v1/token?grant_type=password" -H "apikey: $ANON" -H "Content-Type: application/json" \
+  -d "$(python3 -c 'import json,os; print(json.dumps({"email": os.environ["PB_TEST_EMAIL"], "password": os.environ["PB_TEST_PASSWORD"]}))')")
+A_TOKEN=$(printf '%s' "$A_LOGIN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+A_UID=$(printf '%s' "$A_LOGIN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["user"]["id"])')
 A=(-H "apikey: $ANON" -H "Authorization: Bearer $A_TOKEN")
 
 A_BRAND_ID=$(curl -s "$BASE/rest/v1/brands?select=id&name=eq.gpt-trainer" "${A[@]}" \
@@ -261,8 +262,15 @@ N=$(curl -s "$BASE/rest/v1/brands?select=id&id=eq.$A_BRAND_ID" "${A[@]}" | jlen)
 [ "$N" = "1" ] || fail "A can no longer read its own brand"
 N=$(curl -s "$BASE/rest/v1/companies?select=id&id=eq.$A_COMP_ID" "${A[@]}" | jlen)
 [ "$N" = "1" ] || fail "A can no longer read its own company"
-N=$(curl -s "$BASE/rest/v1/brands?select=id" "${A[@]}" | jlen)
-[ "$N" = "1" ] || fail "A sees $N brands, expected only its own (B's starter must not be visible)"
+# Assert the property, not a count. A fresh install gives A both a starter brand
+# (the signup trigger) and gpt-trainer (the seed), so pinning this to 1 passed
+# only on a project whose first account predates 0009 -- i.e. the author's.
+# What actually matters is that nothing A can see belongs to anyone else.
+FOREIGN=$(curl -s "$BASE/rest/v1/brands?select=id,owner_id" "${A[@]}" \
+  | python3 -c "import json,sys; print(','.join(b['id'] for b in json.load(sys.stdin) if b['owner_id'] != '$A_UID'))")
+[ -z "$FOREIGN" ] || fail "A can see brand(s) owned by another account: $FOREIGN"
+N=$(curl -s "$BASE/rest/v1/brands?select=id&id=eq.$B_BRAND_ID" "${A[@]}" | jlen)
+[ "$N" = "0" ] || fail "A can see B's starter brand"
 
 # A's sanctioned soft delete still works end to end.
 R=$(req -X POST "$BASE/rest/v1/rpc/soft_delete_person" "${A[@]}" -H "Content-Type: application/json" -d "{\"_id\":\"$A_PER_ID\"}")

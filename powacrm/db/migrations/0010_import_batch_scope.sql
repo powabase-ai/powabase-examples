@@ -1,54 +1,43 @@
--- NOTE (added later): this file's header describes the SINGLE-TENANT model that
--- 0009_access_control.sql replaced. Data is now isolated per owner via
--- brands.owner_id / owns_brand(), and 0009 re-creates the function(s) defined
--- below with an ownership guard; 0010 then fixes a cross-tenant write in the
--- import batch UPDATE. Read 0009 and 0010 before trusting anything below about
--- who can see or write what.
+-- ============================================================================
+-- CROSS-TENANT WRITE IN import_people, AND AN OVER-BROAD ERROR HANDLER.
 --
--- Supersedes the import RPC created in 0006_import_rpc.sql.
+-- 0009 scoped the RPC's reads and writes to `_brand_id`, but the closing
 --
--- Bug being fixed: 0006 gated ALL company handling on `IF v_domain IS NOT NULL`.
--- A CSV that has a Company column but no Website column -- a very common export
--- shape -- therefore imported every person with `company_id = NULL`, created
--- zero companies, reported zero errors, and showed a green success banner. The
--- data loss was completely silent.
+--     UPDATE import_batches SET ... WHERE id = _import_id;
 --
--- Fix: when the row carries no usable domain but does carry a company name,
--- dedupe on `(brand_id, lower(name))` among the brand's domain-less companies,
--- restoring a soft-deleted match instead of duplicating it -- the same
--- dedupe-then-restore rule 0006 already applied to the domain key. Rows that DO
--- carry a domain keep the exact behaviour they had before: the domain remains
--- the stronger identity, and a name-only company is never merged into a
--- domain-bearing one.
+-- had no brand predicate, and `_import_id` was never validated against
+-- `_brand_id`. So a signed-up user could pass their OWN brand (clearing the
+-- guard at the top) together with SOMEONE ELSE'S batch id, and overwrite that
+-- row: status flipped to 'completed', counters zeroed, `errors` emptied.
+-- Confirmed against a live project before writing this migration -- a batch
+-- that genuinely read {status: failed, errors: [...]} came back
+-- {status: completed, errors: []} after another tenant's call.
 --
--- Also hardens `search_path` to `public, pg_temp`. The function is SECURITY
--- DEFINER and owned by a superuser, and with `SET search_path = public` alone
--- PostgreSQL still searches the caller's `pg_temp` FIRST for relations -- the
--- CVE-2018-1058 shape, where a caller pre-creates `pg_temp.companies` and the
--- definer writes there instead. Not exploitable on this schema (neither `anon`
--- nor `authenticated` holds CREATE on `public`, and phase 1 has no
--- non-superuser able to shadow these tables in a way that matters), but naming
--- `pg_temp` explicitly at the END of the path is the pattern this repo should
--- be teaching. 0008 does the same for `soft_delete_person`.
+-- Nothing is read back, so this leaked nothing. It was an integrity write, in
+-- the one migration whose entire purpose was to remove them. A batch id is an
+-- identifier, not a capability; it authorizes nothing on its own.
 --
--- Trust boundary (unchanged from 0006): `_brand_id` is taken from the caller
--- as-is and is NOT scoped against the caller's identity. Phase 1 is
--- single-tenant by design -- see the header of 0004_rls.sql. A multi-user phase
--- MUST scope `_brand_id` against a membership table before this function (and
--- 0004's `WITH CHECK (true)` INSERT policies) can be trusted across tenants.
+-- The fix is the missing predicate. A batch belonging to another brand now
+-- matches no row, which is the same outcome an unknown id already had -- and
+-- deliberately not an error, so the RPC still cannot be used to test whether
+-- some other tenant's batch id exists.
 --
--- apply.sh runs statements in autocommit, so the whole migration is wrapped in
--- BEGIN/COMMIT to close the window between CREATE OR REPLACE FUNCTION and the
--- REVOKE below, during which PUBLIC would otherwise hold EXECUTE.
-BEGIN;
+-- While recreating the function, the per-row `WHEN OTHERS` is narrowed too. It
+-- recorded EVERY failure as if it were bad data in that row, so a
+-- statement_timeout or a deadlock (both reachable now that concurrent imports
+-- contend on companies_brand_lower_name_uq) would be reported as a CSV problem
+-- and the batch would still end 'completed'. Only SQLSTATE classes 22 and 23 --
+-- data exceptions and integrity violations, i.e. what a bad row actually
+-- produces -- are recorded per row now. Anything else aborts the import.
+--
+-- Third: a row carrying no email, linkedin_url or name is rejected instead of
+-- inserted. Papa's non-greedy skipEmptyLines kept lines that were only commas,
+-- those mapped to {}, and the ELSE branch wrote an all-NULL lead and counted it
+-- as inserted. The client now skips them too, but this function is callable
+-- directly, so the guard belongs on this side of the wire.
+-- ============================================================================
 
--- Makes the name-only dedupe above an actual guarantee rather than a
--- read-then-write race between two concurrent imports. Mirrors
--- companies_brand_domain_uq: full unique, spanning soft-deleted rows, so a
--- re-import restores instead of duplicating. [Twenty dedupe-then-restore]
-CREATE UNIQUE INDEX IF NOT EXISTS companies_brand_lower_name_uq
-  ON companies (brand_id, lower(name))
-  WHERE domain IS NULL AND name IS NOT NULL;
+BEGIN;
 
 CREATE OR REPLACE FUNCTION public.import_people(_brand_id uuid, _import_id uuid, _rows jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
@@ -56,12 +45,32 @@ DECLARE
   row_j jsonb; i int := 0;
   n_ins int := 0; n_res int := 0; n_skip int := 0; errs jsonb := '[]';
   v_email text; v_domain text; v_name text; v_company uuid; v_person uuid; v_deleted timestamptz;
-  ctx jsonb;
+  ctx jsonb; v_state text;
 BEGIN
+  IF auth.uid() IS NOT NULL AND NOT public.owns_brand(_brand_id) THEN
+    RAISE EXCEPTION 'not your brand'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
   FOR row_j IN SELECT * FROM jsonb_array_elements(_rows) LOOP
     i := i + 1;
     IF jsonb_typeof(row_j) <> 'object' THEN
       errs := errs || jsonb_build_object('row', i, 'message', 'row is not a JSON object');
+      CONTINUE;
+    END IF;
+
+    -- A row with nothing to identify a person by is not a person. A blank CSV
+    -- line (",,,") maps to {} and used to fall through to the INSERT below,
+    -- creating an all-NULL lead that counted as a success -- a board full of
+    -- "Unknown" cards with no email, so they can never be deduped or matched.
+    -- The client drops these too, but the guard belongs here: this function is
+    -- callable directly, and the client is not the only caller.
+    IF coalesce(nullif(trim(row_j->>'email'), ''),
+                nullif(trim(row_j->>'linkedin_url'), ''),
+                nullif(trim(row_j->>'first_name'), ''),
+                nullif(trim(row_j->>'last_name'), '')) IS NULL THEN
+      errs := errs || jsonb_build_object('row', i,
+        'message', 'row has no email, linkedin_url or name, so there is nothing to identify a person by');
       CONTINUE;
     END IF;
     BEGIN
@@ -121,7 +130,20 @@ BEGIN
         VALUES (_brand_id, v_person, v_company, 'import', 'IMPORT', 'CSV import', ctx);
       END IF;
     EXCEPTION WHEN OTHERS THEN
-      errs := errs || jsonb_build_object('row', i, 'message', SQLERRM);
+      GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE;
+      -- Class 22 (data exception) and class 23 (integrity violation) are what
+      -- bad CSV data looks like: an unparseable value, a duplicate key. Those
+      -- belong to the row, so record them and keep going.
+      --
+      -- Everything else does NOT belong to the row. A statement_timeout, a
+      -- deadlock, or an undefined_column after schema drift would otherwise be
+      -- filed as if the operator's CSV were malformed, and the batch would
+      -- still finish 'completed'. Re-raise those so the import fails loudly.
+      IF left(v_state, 2) IN ('22', '23') THEN
+        errs := errs || jsonb_build_object('row', i, 'message', SQLERRM, 'sqlstate', v_state);
+      ELSE
+        RAISE;
+      END IF;
     END;
   END LOOP;
 
@@ -131,7 +153,8 @@ BEGIN
       ELSE 'completed'
     END,
     inserted_count = n_ins, restored_count = n_res, skipped_count = n_skip, errors = errs
-  WHERE id = _import_id;
+  WHERE id = _import_id
+    AND brand_id = _brand_id;
   RETURN jsonb_build_object('inserted', n_ins, 'restored', n_res, 'skipped', n_skip, 'errors', errs);
 END $$;
 
