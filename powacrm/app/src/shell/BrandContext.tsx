@@ -3,7 +3,11 @@ import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/powabase';
 
-export type Brand = { id: string; name: string; confidence_threshold: number; dry_run: boolean; paused: boolean };
+export type Brand = {
+  id: string; name: string; confidence_threshold: number; dry_run: boolean; paused: boolean;
+  product_description: string | null; voice_notes: string | null; icp_notes: string | null;
+  research_daily_cap: number;
+};
 const Ctx = createContext<{ brand: Brand; brands: Brand[]; setBrandId: (id: string) => void } | null>(null);
 
 export function BrandProvider({ children }: { children: ReactNode }) {
@@ -11,7 +15,8 @@ export function BrandProvider({ children }: { children: ReactNode }) {
     queryKey: ['brands'],
     queryFn: async () => {
       const { data, error } = await supabase.from('brands')
-        .select('id,name,confidence_threshold,dry_run,paused').order('created_at');
+        .select('id,name,confidence_threshold,dry_run,paused,product_description,voice_notes,icp_notes,research_daily_cap')
+        .order('created_at');
       if (error) throw error;
       return data as Brand[];
     },

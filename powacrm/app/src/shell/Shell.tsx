@@ -21,6 +21,7 @@ export function Shell() {
         </select>
         <NavLink to="/" style={linkStyle} end>Pipeline</NavLink>
         <NavLink to="/import" style={linkStyle}>Import</NavLink>
+        <NavLink to="/settings" style={linkStyle}>Settings</NavLink>
         <button onClick={() => supabase.auth.signOut()}
           style={{ marginTop: 'var(--space-6)', justifySelf: 'start' }}>Sign out</button>
       </nav>
