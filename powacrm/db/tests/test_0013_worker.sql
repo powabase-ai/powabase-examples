@@ -53,7 +53,7 @@ SET LOCAL enable_hashagg = off;
 SET LOCAL enable_sort = off;
 
 DO $$
-DECLARE b uuid; c uuid; i int; n int; claimed int;
+DECLARE b uuid; c uuid; i int; n int; claimed int; v_line text; v_plan text := '';
 BEGIN
   SELECT id INTO b FROM brands WHERE name = 'gpt-trainer';
   IF b IS NULL THEN RAISE EXCEPTION 'no gpt-trainer brand -- apply db/seed/seed_gpt_trainer.sql first'; END IF;
@@ -76,6 +76,29 @@ BEGIN
     INSERT INTO research_jobs (brand_id, company_id, created_at)
       VALUES (b, c, timestamptz '2000-01-01 00:00:00+00');
   END LOOP;
+
+  -- Pin the plan before relying on it. Without this the guard is a hope: if a
+  -- future planner finds some other one-shot shape under these GUCs, the
+  -- subquery is evaluated once anyway, the claim is correct for the wrong
+  -- reason, and this test goes green having proved nothing about the fix. Two
+  -- tests in this project have already shipped in that state. EXPLAIN without
+  -- ANALYZE plans but does not execute, so this changes nothing.
+  FOR v_line IN EXECUTE
+    'EXPLAIN (COSTS OFF) UPDATE research_jobs SET status = ''running''
+      WHERE id IN (SELECT id FROM research_jobs WHERE status = ''queued''
+                    ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)'
+  LOOP
+    v_plan := v_plan || v_line || E'\n';
+  END LOOP;
+
+  IF v_plan NOT LIKE '%Nested Loop Semi Join%' THEN
+    RAISE EXCEPTION 'the adverse plan is no longer reachable under these GUCs, so the claim assertion below proves nothing. Plan was:%', E'\n' || v_plan;
+  END IF;
+  -- Any of these above the subquery means it is evaluated once regardless of
+  -- the join, which is exactly the situation that hides the bug.
+  IF v_plan LIKE '%Materialize%' OR v_plan LIKE '%HashAggregate%' OR v_plan LIKE '%->  Unique%' THEN
+    RAISE EXCEPTION 'the subquery is being evaluated once anyway (Materialize/HashAggregate/Unique in the plan), so this test cannot see the bug. Plan was:%', E'\n' || v_plan;
+  END IF;
 
   SELECT count(*) INTO claimed FROM claim_research_jobs(1);
   IF claimed <> 1 THEN
@@ -152,6 +175,30 @@ BEGIN
   END IF;
   UPDATE research_jobs SET status = 'skipped' WHERE id = j;
 
+  -- (a2) the company was soft-deleted after the job was queued. Companies are
+  --      soft-deleted (0005), so without a `deleted_at IS NULL` filter the
+  --      worker happily scrapes it, spends the credits, and writes research
+  --      onto a row the owner believes they removed.
+  INSERT INTO companies (brand_id, name, domain)
+    VALUES (b, '_t13_deleted', '_t13-deleted.invalid') RETURNING id INTO c;
+  INSERT INTO research_jobs (brand_id, company_id, created_at)
+    VALUES (b, c, timestamptz '2000-01-01 00:00:00+00') RETURNING id INTO j;
+  UPDATE companies SET deleted_at = now() WHERE id = c;
+
+  r := run_research_tick();
+  IF (r->>'job_id') IS DISTINCT FROM j::text THEN
+    RAISE EXCEPTION 'the tick claimed a different job than the one queued: %', r;
+  END IF;
+  SELECT status, error INTO st, e FROM research_jobs WHERE id = j;
+  IF st <> 'queued' THEN RAISE EXCEPTION 'a first failure must hand the job back to queued, got %', st; END IF;
+  IF coalesce(e, '') NOT LIKE '%deleted%' THEN
+    RAISE EXCEPTION 'a soft-deleted company was not reported as such: %', coalesce(e, '(null)');
+  END IF;
+  IF (SELECT researched_at FROM companies WHERE id = c) IS NOT NULL THEN
+    RAISE EXCEPTION 'a soft-deleted company was researched and written back';
+  END IF;
+  UPDATE research_jobs SET status = 'skipped' WHERE id = j;
+
   -- (b) a company with a domain but nobody to score. Scoring is per person, so
   --     there is nothing for the agent to return -- fail before spending a run.
   INSERT INTO companies (brand_id, name, domain)
@@ -179,7 +226,52 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- 3. Posture. The worker holds the Service Role key and bypasses RLS, so the
+-- 3. A cancelled tick must fail its job, not silently retry it forever.
+--
+-- PL/pgSQL's `WHEN OTHERS` does not match ERRCODE_QUERY_CANCELED. That is not
+-- folklore, it is asserted here against this server, because the worker's
+-- three-strike guarantee depends on it: if a statement_timeout cancel escaped
+-- run_research_tick()'s handler, the transaction would abort, the claim and the
+-- attempts increment would roll back together, and the job would be retried
+-- every minute forever -- one agent run per minute, never reaching `failed`.
+--
+-- The tick's own cancel path cannot be driven from here without making a real
+-- agent call and then cutting it off, so this asserts the two halves that
+-- compose it: that the platform behaves as the design assumes, and that the
+-- worker actually carries the named handler.
+-- ---------------------------------------------------------------------------
+SET LOCAL statement_timeout = '1s';
+
+DO $$
+DECLARE caught_by_others boolean := false; caught_by_name boolean := false; src text;
+BEGIN
+  BEGIN
+    PERFORM pg_sleep(3);
+  EXCEPTION
+    WHEN query_canceled THEN caught_by_name := true;
+    WHEN OTHERS THEN caught_by_others := true;
+  END;
+
+  IF caught_by_others THEN
+    RAISE EXCEPTION 'WHEN OTHERS caught a statement_timeout cancel on this server -- the named handler in run_research_tick() may now be redundant, but check before removing it';
+  END IF;
+  IF NOT caught_by_name THEN
+    RAISE EXCEPTION 'a statement_timeout cancel was matched by neither handler -- run_research_tick() cannot report a cancelled tick at all';
+  END IF;
+
+  -- And the worker carries it. This is a source assertion on purpose: the
+  -- handler is one line that looks removable during a tidy-up, and losing it
+  -- turns a slow tick into an unbounded credit leak with no other symptom.
+  src := pg_get_functiondef('public.run_research_tick()'::regprocedure);
+  IF src NOT LIKE '%WHEN query_canceled%' THEN
+    RAISE EXCEPTION 'run_research_tick() has no `WHEN query_canceled` handler -- a tick that outruns statement_timeout would roll back its own claim and be retried every minute forever';
+  END IF;
+END $$;
+
+RESET statement_timeout;
+
+-- ---------------------------------------------------------------------------
+-- 4. Posture. The worker holds the Service Role key and bypasses RLS, so the
 --    only thing standing between a signed-in user and it is these grants.
 --    db/apply.sh connects as a superuser, so this asserts the catalogue rather
 --    than trying the calls -- test_0012_request_research.sh is where the real

@@ -158,6 +158,30 @@ REVOKE ALL ON FUNCTION public.set_research_worker_config(text, text, text) FROM 
 -- the paths nobody thought of: without it an unexpected error would roll the
 -- whole transaction back, including the attempts increment, and a job that
 -- reliably breaks the worker would retry forever instead of failing at three.
+--
+-- THAT PROMISE NEEDS TWO HANDLERS, NOT ONE. PL/pgSQL's `WHEN OTHERS` does not
+-- match ERRCODE_QUERY_CANCELED -- verified on this project (PG 15.8): a
+-- statement_timeout cancel inside a block with `EXCEPTION WHEN OTHERS` still
+-- escapes as an ERROR. So a tick that outran its statement_timeout would abort
+-- the whole transaction, rolling back the claim AND the attempts increment,
+-- and the job would come back queued and be retried every single minute
+-- forever -- spending an agent run each time and never reaching `failed`. An
+-- unbounded credit leak dressed up as a retry. A cancel is therefore caught by
+-- name, and a handler for it can still write and commit (also verified: an
+-- INSERT made inside a `WHEN query_canceled` handler survives COMMIT).
+--
+-- Catching a cancel does mean an operator's pg_cancel_backend() is absorbed
+-- rather than propagated. That is a deliberate trade for a cron-invoked,
+-- self-contained statement with no interactive user behind it: the handler
+-- records the failure and returns immediately, so the cancel still ends the
+-- tick, it just ends it having told the truth about the job.
+--
+-- The numbers are set so the cancel path stays theoretical. The HTTP call is
+-- hard-bounded at 180 s by http.timeout_msec, against a 300 s statement
+-- timeout in the cron command: 120 s of slack for everything else in the tick,
+-- which is the SSE split, at most 50 JSON parse attempts, and three small
+-- writes -- all measured in milliseconds, never seconds. Observed real runs
+-- are 28-45 s, so 180 s is already 4x the worst one seen.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.run_research_tick()
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
@@ -193,8 +217,17 @@ BEGIN
   SET LOCAL statement_timeout = '300s';
   -- pgsql-http's own timeout. It is read when the request is built, so this one
   -- does bite. Without it the extension's default cuts the agent off long
-  -- before a 35-50 s research run finishes.
-  SET LOCAL http.timeout_msec = 240000;
+  -- before a 35-50 s research run finishes -- verified: with the GUC unset, an
+  -- http_get against an 8-second endpoint fails with "Operation timed out
+  -- after 5002 milliseconds".
+  --
+  -- 180 s, deliberately well under the 300 s statement timeout rather than
+  -- close to it. This is the only unbounded step in the tick, so it is what
+  -- decides whether a slow run ends as a clean `fail_research_job` (curl gives
+  -- up, we report it, three strikes apply) or as a statement cancel. 120 s of
+  -- slack is absurd headroom for the millisecond-scale work that follows it,
+  -- and that is the point: the cancel path should never be the one that fires.
+  SET LOCAL http.timeout_msec = 180000;
 
   v_requeued := requeue_stalled_research_jobs();
 
@@ -216,9 +249,15 @@ BEGIN
     END IF;
 
     -- --- context -----------------------------------------------------------
-    SELECT c.name, c.domain INTO v_name, v_domain FROM companies c WHERE c.id = v_job.company_id;
+    -- `deleted_at IS NULL` matters: companies are soft-deleted (0005), so
+    -- without it a company deleted between enqueue and claim is still scraped,
+    -- still charged for, and still written back -- research appearing on a row
+    -- the owner believes they removed. 0012 filters people this way but not
+    -- companies; fixed here.
+    SELECT c.name, c.domain INTO v_name, v_domain
+      FROM companies c WHERE c.id = v_job.company_id AND c.deleted_at IS NULL;
     IF NOT FOUND THEN
-      PERFORM fail_research_job(v_job.id, 'company row not found');
+      PERFORM fail_research_job(v_job.id, 'company row not found, or deleted since this job was queued');
       RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
         'job_id', v_job.id, 'note', 'company missing');
     END IF;
@@ -394,13 +433,27 @@ BEGIN
       'people_total', v_people_total, 'tools_used', v_tools,
       'note', coalesce(nullif(v_res->>'reason', ''), v_note));
 
-  EXCEPTION WHEN OTHERS THEN
-    -- The backstop. The claim above happened before this subtransaction opened,
-    -- so it survives the rollback and fail_research_job can still record why.
-    v_err := left(SQLERRM, 400);
-    PERFORM fail_research_job(v_job.id, 'worker error: ' || v_err);
-    RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-      'job_id', v_job.id, 'note', 'worker error', 'error', v_err);
+  EXCEPTION
+    -- Listed by name because `OTHERS` does not match it -- see the header. This
+    -- is the handler that keeps the three-strike promise honest when a tick
+    -- outruns its statement_timeout: without it the abort would roll back the
+    -- claim and the attempts increment together, and the job would be retried
+    -- every minute forever at the price of an agent run each time.
+    WHEN query_canceled THEN
+      v_err := left(SQLERRM, 400);
+      PERFORM fail_research_job(v_job.id,
+        'worker was cancelled mid-tick (statement timeout or pg_cancel_backend): ' || v_err);
+      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'worker cancelled', 'error', v_err);
+
+    WHEN OTHERS THEN
+      -- The backstop. The claim above happened before this subtransaction
+      -- opened, so it survives the rollback and fail_research_job can still
+      -- record why.
+      v_err := left(SQLERRM, 400);
+      PERFORM fail_research_job(v_job.id, 'worker error: ' || v_err);
+      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'worker error', 'error', v_err);
   END;
 END $$;
 REVOKE ALL ON FUNCTION public.run_research_tick() FROM PUBLIC, anon, authenticated;
@@ -419,6 +472,12 @@ COMMENT ON FUNCTION public.run_research_tick() IS
 -- run_research_tick() cannot extend it. SET LOCAL, not SET: pg_cron runs each
 -- job in its own transaction, and a bare SET is a habit worth not having on a
 -- project reached through a connection pooler.
+--
+-- 300 s against the tick's own 180 s HTTP ceiling. The gap is the budget for
+-- everything that is not the agent call, and it is deliberately enormous
+-- relative to that work (milliseconds) so the statement timeout is a backstop
+-- rather than a mechanism the worker relies on. Shrinking it below the HTTP
+-- ceiling would invert the two and make the cancel path routine.
 --
 -- cron.database_name on a Powabase project is `postgres`, which is what
 -- current_database() returns over the pooler too, so the job runs against the
