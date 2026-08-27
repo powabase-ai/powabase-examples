@@ -9,4 +9,5 @@ done
 ./tests/test_0004_rls.sh
 ./tests/test_0009_access_control.sh
 ./tests/test_0010_import_batch_scope.sh
+./tests/test_0012_request_research.sh
 echo "ALL DB TESTS OK"
