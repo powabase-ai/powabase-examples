@@ -158,8 +158,13 @@ echo "AGENT_ID=$AGENT_ID"
 #      live in the JSON.
 #   2. PUT .../graph answers 200 with {"blocks":0,"edges":0} for an empty
 #      graph, so a 200 alone proves nothing. The counts are checked below.
-#   3. The schedule lives on the starter block's config. The workflow record's
-#      top-level schedule_config stays null and setting it there does nothing.
+#   3. The schedule is authored on the starter block's config. The workflow
+#      record's top-level schedule_config is DERIVED from it at deploy time
+#      (normalised -- "1 minutes" comes back as interval_seconds: 60) and is
+#      not something you set yourself, so the starter config is what this
+#      script writes and what it verifies afterwards.
+#   4. The Research block deliberately is not an `agent` block: that path runs
+#      the agent with no tools and no system prompt. See README.md.
 # ---------------------------------------------------------------------------
 
 WF_NAME=$(python3 -c 'import json;print(json.load(open("wf-research-tick.json"))["name"])')

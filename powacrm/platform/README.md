@@ -32,7 +32,7 @@ Tick (starter, schedule)
     HasJob (condition: <Claim.output.has_job> == True)
      | if
      v
-    Research (agent block -> powacrm-researcher)
+    Research (code block -> POST /api/agents/{id}/run/stream)
      v
     Record   extract the JSON object out of the agent's reply, then
              complete_research_job() -- or fail_research_job() with a
@@ -40,13 +40,32 @@ Tick (starter, schedule)
 ```
 
 **One job per tick, not three.** An earlier draft fanned out three parallel
-claim chains. Blocks in a Powabase workflow execute **sequentially** in
-topological order -- measured on the live API, three sibling branches ran
-strictly one after another, never overlapping -- so a fan-out would only make
-each tick three times longer for the same throughput. Concurrency comes from
-the 60-second schedule instead, and `claim_research_jobs` uses
-`FOR UPDATE SKIP LOCKED` precisely so overlapping ticks cannot claim the same
-row.
+claim chains. Two measurements killed that idea:
+
+1. **Blocks execute sequentially**, in topological order. Three sibling
+   branches ran strictly one after another (each starting within a microsecond
+   of the previous one finishing), never overlapping. "Parallel branches" are
+   parallel in topology only.
+2. **Executions of one workflow serialize, and a tick due while one is running
+   is skipped rather than queued.** A probe workflow on a 1-minute schedule
+   whose block took 100 s started runs at 19:24:26 and 19:26:36 -- 130 s
+   apart. The ticks due at 19:25:26 and 19:26:26 simply did not happen; the
+   next run started at the first 30-second scheduler check after the previous
+   one finished.
+
+Together those mean throughput is `1 job per max(60 s, execution duration)`,
+and a long execution *blocks* later ticks entirely. A research run is 35-50 s,
+so the worker turns over roughly one company a minute. Three branches would
+make each execution ~3x longer for 3 jobs -- very close to the same rate, but
+with three jobs riding on one execution, a 3x longer window in which the
+workflow is blocked, and 3x the work lost if the run is abandoned. Not worth
+it, especially since `brands.research_daily_cap` (25/day) binds long before
+throughput does.
+
+`claim_research_jobs` still uses `FOR UPDATE SKIP LOCKED`, which is what makes
+the design safe if executions ever do overlap -- but note that on this engine
+they currently do not, so the safety is insurance rather than something the
+schedule exercises.
 
 **Why `Record` parses instead of trusting the agent.** The researcher's system
 prompt asks for a bare JSON object, and the model still narrates first --
@@ -74,7 +93,47 @@ machine (your workstation or CI secrets, not a client-side build). Both
 variables are read from the environment only; nothing in this directory
 hardcodes a URL or a key.
 
-## Two API gotchas this script works around
+## The trap: a workflow `agent` block runs the agent with **no tools**
+
+This is the single most expensive thing to rediscover here, so it is written
+down in full.
+
+`POST /api/agents/{id}/run/stream` executes the agent's ReAct tool loop.
+**`POST /api/agents/{id}/run` -- the non-streaming path, which the workflow
+`agent` block uses internally -- does not.** An agent invoked that way arrives
+with no tools *and* no system prompt, and simply answers from model recall.
+Nothing about this is reported: the block returns `status: success`, a
+plausible answer, and no warning.
+
+How it was established on a live project:
+
+| probe | result |
+| --- | --- |
+| One `agent` block pointed at `powacrm-researcher`, asked *"use web_scrape on example.com; if you have no web_scrape tool reply exactly NO_TOOLS_AVAILABLE"* | **`NO_TOOLS_AVAILABLE`**, 615 prompt tokens |
+| The same message via `/run/stream` | *"I do have a web_scrape tool available."*, 2046 prompt tokens |
+| A real research job through the `agent` block | 13.4 s, one LLM turn, `tech_stack: []`, and a `sources` array listing a URL it never fetched |
+| The same prompt via `/run/stream` | 44 s, four tool calls, grounded output |
+| `POST /run` directly, no workflow involved | also `NO_TOOLS_AVAILABLE` -- the seam is streaming vs non-streaming, not workflows |
+| Block configs meant to re-attach tools: `"tools"` as strings, as `{tool_type,tool_name}` objects, and `"use_agent_tools": true` | all three still 615 prompt tokens and `NO_TOOLS_AVAILABLE` -- **no block config fixes this** |
+
+For a research agent this is not a degraded result, it is a dangerous one. The
+model keeps emitting a confident `sources` array whether or not it fetched
+anything, so the ungrounded version writes **fabricated citations** into
+`companies.research_data`, which the app then shows a seller as observed fact.
+In outbound that is worse than having no research at all.
+
+So `wf-research-tick` does **not** use an `agent` block. Its `Research` block
+is a `code` block that POSTs to `{{BASE}}/api/agents/{{AGENT_ID}}/run/stream`
+with the service key in both headers, reads the SSE stream, and takes the
+final `complete` event's `content`. That event also carries `tool_calls`,
+which the worker echoes into its own output so an ungrounded run is visible in
+the block log without opening the agent run record.
+
+**If you copy one thing from this example, copy that.** Any workflow whose
+`agent` block depends on tools -- `web_search`, `knowledge_search`, a custom
+tool, an MCP tool -- is silently not using them.
+
+## API gotchas this script works around
 
 1. **A `tools` array passed to `POST /api/agents` (or `PATCH`) is silently
    dropped.** The call still returns 201/200 with an agent that has no
