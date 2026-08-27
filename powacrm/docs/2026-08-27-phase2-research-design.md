@@ -1,7 +1,7 @@
 # PowaCRM Phase 2 — Research — Design Spec
 
-**Date:** 2026-08-27
-**Status:** Approved design, pending implementation plan
+**Date:** 2026-08-27 (rev 2 — the worker moved into the database; Powabase workflows removed)
+**Status:** Approved design; phase 2 implemented, worker being re-hosted per rev 2
 **Repo:** `powabase-ai/powabase-examples` → `powacrm/`
 **Builds on:** phase 1 (`docs/2026-08-26-phase1-foundation-plan.md`), migrations `0001`–`0010`
 
@@ -29,8 +29,13 @@ placeholder saying this phase would arrive.
   `POST /api/agents/{id}/tools` with `{"tool_type":"builtin","tool_name":"..."}`.
 - Available builtins: `database_write`, `database_query`, `http_request`,
   `code_execute`, `storage_read`, `storage_write`, `web_search`, `web_scrape`.
-- Powabase cron floor is 60 s. Workflows are DAGs with **no loops**, so
-  per-tick throughput is set by the number of parallel branches in the graph.
+- `pg_cron`, `pg_net` and `http` are preloaded/available on a Powabase project,
+  Postgres has outbound network egress, and `cron.database_name` is `postgres` —
+  which is also what `current_database()` returns over the pooler, so a cron job
+  runs in the same database as the app's tables. All verified live (rev 2).
+- Only `POST /api/agents/{id}/run/stream` executes the ReAct tool loop. The
+  non-streaming `/run`, and a workflow `agent` block, run the agent with no tools
+  and no system prompt while still returning success.
 
 ### Decisions locked during brainstorming
 
@@ -40,7 +45,7 @@ placeholder saying this phase would arrive.
 | What fit is scored against | Per-brand plain-English `icp_notes`, editable by each owner |
 | Low score behaviour | Score only — never auto-move a lead's stage |
 | Trigger architecture | Queue table + `SECURITY DEFINER` enqueue RPC + scheduled worker |
-| Throughput | 3 parallel branches (~3 leads/minute) |
+| Throughput | One job per minute (`pg_cron` tick; a run takes 35-50 s) |
 
 ## 2. The architectural problem, and why the queue exists
 
@@ -60,17 +65,53 @@ browser (anon key + user JWT)
     ▼
 research_jobs  (owner may READ; nobody may INSERT/UPDATE directly)
     ▲
-    │  claim_research_jobs(n)                  ← service-role only
-wf-research-tick (scheduled, 60s)
-    ├── agent: powacrm-researcher (web_scrape + web_search, NO db tools)
-    └── writes: companies.*, people.fit_score, events, job status
+    │  pg_cron every minute, inside the database
+public.run_research_tick()                     ← service-role only
+    ├── http POST /api/agents/{id}/run/stream  (the ONLY path that runs tools)
+    └── complete_research_job() / fail_research_job()
 ```
 
 The browser never holds a secret and never names a brand. It passes person ids;
 the RPC derives brand from person → company → brand and checks ownership; the
 worker reads the brand off the claimed job row. **No caller-supplied `brand_id`
-is ever trusted** — that is precisely the class of bug `0010` fixed, applied
-structurally this time.
+is ever trusted** — that is precisely the class of bug `0010` fixed.
+
+### Why the worker is not a Powabase workflow (rev 2)
+
+The first implementation ran the worker as a scheduled Powabase workflow. That
+is no longer the design. Every serious defect in phase 2 came from the workflow
+layer, and the evidence was gathered the expensive way:
+
+- A workflow **`agent` block runs the agent with no tools and no system prompt**,
+  returning `status: success` — so every research result was ungrounded model
+  recall carrying a fabricated `sources` array. Only `/api/agents/{id}/run/stream`
+  executes the ReAct tool loop. Three different block config shapes for
+  re-attaching tools all failed.
+- A `condition` block **gates nothing** on its own; the routing lives on the
+  edge's `condition` field, and without it both branches run.
+- Blocks execute **strictly sequentially**, so parallel branches buy no throughput.
+- A block `id` that is not a UUID returns an opaque **HTTP 500**, not a
+  validation error.
+- An unresolvable `agent_id` **silently degrades** to `gpt-4o-mini` with no
+  system prompt rather than failing.
+
+Powabase's own primitives are fine — the *agent* is excellent, and calling it
+directly over `/run/stream` produces genuinely grounded research. It is the
+workflow graph as a place to put logic that proved unsound. So the logic moves
+into the database, which this project already depends on and already tests:
+
+- **`pg_cron`** (preloaded on Powabase projects) schedules `run_research_tick()`
+  every minute. Verified firing on a live project.
+- **The `http` extension** (available; Postgres has outbound egress — verified)
+  calls the agent's streaming endpoint from SQL.
+- The service key and project URL live in **`vault`** (`supabase_vault`/`pgsodium`
+  are preloaded), never in a table a client can read and never in the repo.
+
+The result has no workflow, no server, and no second scheduler: one SQL function,
+scheduled by the database, calling one agent endpoint, writing through the same
+RPCs the rest of the app already uses. Note `current_database()` on a Powabase
+pooler connection is `postgres`, which matches `cron.database_name` — so cron
+jobs run in the same database as the application's tables.
 
 **Research is per-company.** Ten leads at one company cost one research pass.
 The fit score is computed per person in that pass, because fit depends on title.
@@ -181,28 +222,33 @@ JSON only and the workflow parses and validates it. Either way validation is the
 workflow's job — an unparseable or schema-violating response fails the job and
 writes nothing. Scores are clamped to 0–100 to satisfy the existing CHECK.
 
-## 6. The worker — `wf-research-tick`
+## 6. The worker — `run_research_tick()`, scheduled by `pg_cron`
 
-Scheduled workflow, `schedule_type: interval`, 60 s (the platform floor), with
-**3 parallel branches** (~3 leads/minute; a batch of 20 completes in ~7 minutes).
+A single `SECURITY DEFINER` SQL function, scheduled every minute by `pg_cron`,
+service-role only and never granted to `authenticated`. One job per tick.
 
-Per branch: claim one job (`claim_research_jobs(1)`) → if none, exit → run the
-agent with the company name, domain and the brand's `icp_notes` +
-`product_description`, plus the people at that company → validate the JSON →
-write `companies.research`/`research_data`/`tech_stack`/`researched_at`, each
-person's `fit_score`, a `researched` event per person, and set the job `done`.
+Per tick: requeue jobs stalled over 15 minutes → claim exactly one queued job →
+read the company, the brand's `icp_notes`/`product_description`, and the people
+to score → `POST /api/agents/{id}/run/stream` via the `http` extension → extract
+the JSON from the reply → `complete_research_job` or `fail_research_job`.
 
-**Failure handling:** record `error`, leave `attempts` incremented by the claim.
-A job that has failed 3 times is left `failed` and surfaces in the UI rather than
-retrying forever. A job stuck in `running` for over 15 minutes is returned to
-`queued` by the same tick (the worker can die mid-run; nothing else would free
-it). `injection_observed: true` is written into `research_data` and shown in the
-UI — a page that tried to instruct the agent is a fact about that prospect worth
-seeing.
+**Extraction, not fence-stripping.** The agent returns narration, then a fenced
+block, then the object — roughly a thousand characters of prose precede the JSON.
+Taking the first `{` through the last `}` parses correctly and survives both the
+prose prefix and the fence. Anything unparseable fails the job with a readable
+error rather than reaching `complete_research_job`.
 
-**Stage:** the job advances `sourced`/`enriched` → `researched`. It **never**
-moves a lead to `disqualified`, per the locked decision — a bad scrape must not
-silently bury a real prospect.
+**Failure handling.** An HTTP error, a timeout, a reply with no terminal event,
+or unparseable output all route to `fail_research_job`, which returns the job to
+`queued` under three attempts and marks it `failed` at three. A job can never be
+left `running`: the stall sweep is the second layer.
+
+**Throughput** is one job per minute, since a research run takes 35–50 s and the
+tick is scheduled every 60 s. A batch of ten companies drains in roughly ten
+minutes. Research is per company, so ten leads at one company cost one job.
+
+**Stage:** the job advances `sourced`/`enriched` → `researched`, and never moves
+a lead to `disqualified` — a bad scrape must not silently bury a real prospect.
 
 ## 7. SPA surface
 
