@@ -9,6 +9,7 @@ import { leadName, useStages, type Lead } from '@/board/useLeads';
 import { InlineField } from './InlineField';
 import { Timeline } from './Timeline';
 import type { TimelineEvent } from './groupEventsByMonth';
+import { summarizeVerdicts, useRequestResearch, useResearchJob } from '@/research/useResearch';
 
 type FullLead = Lead & {
   linkedin_url: string | null; created_at: string; company_id: string | null;
@@ -72,6 +73,22 @@ export function LeadPage() {
     onSettled: () => qc.invalidateQueries({ queryKey: ['events', id] }),
   });
 
+  const companyId = lead?.company_id ?? null;
+  const jobQuery = useResearchJob(companyId);
+  const { data: job } = jobQuery;
+  const requestResearch = useRequestResearch(brand.id);
+  const [researchSummary, setResearchSummary] = useState<string | null>(null);
+  const runResearch = () => {
+    if (!id) return;
+    setResearchSummary(null);
+    requestResearch.mutate([id], {
+      onSuccess: results => {
+        setResearchSummary(summarizeVerdicts(results));
+        qc.invalidateQueries({ queryKey: ['research_job', companyId] });
+      },
+    });
+  };
+
   // `/leads/:id` is bookmarkable and hand-typeable, and `.single()` answers a
   // missing (or soft-deleted, since the SELECT policy hides tombstones) id with
   // HTTP 406 / PGRST116. Without this branch a stale bookmark showed "Loading…"
@@ -102,7 +119,35 @@ export function LeadPage() {
         <h2 style={{ margin: 0, fontSize: 'var(--font-lg)' }}>{leadName(lead)}</h2>
         <p title={new Date(lead.created_at).toLocaleString()}
           style={{ fontSize: 'var(--font-xs)', color: 'var(--fg-tertiary)' }}>Added {days}d ago</p>
-        {stage && <StageTag label={stage.label} color={stage.color} />}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+          {stage && <StageTag label={stage.label} color={stage.color} />}
+          {/* Hidden rather than disabled when there's no company -- there is
+              nothing an RPC round trip could tell the user that "no company"
+              doesn't already say. */}
+          {lead.company_id && (
+            <button onClick={runResearch}
+              disabled={requestResearch.isPending || job?.status === 'queued' || job?.status === 'running'}>
+              {requestResearch.isPending ? 'Requesting…' : 'Research'}
+            </button>
+          )}
+        </div>
+        {job?.status === 'queued' && (
+          <p style={{ fontSize: 'var(--font-xs)', color: 'var(--fg-tertiary)', marginTop: 'var(--space-1)' }}>Queued…</p>
+        )}
+        {job?.status === 'running' && (
+          <p style={{ fontSize: 'var(--font-xs)', color: 'var(--fg-tertiary)', marginTop: 'var(--space-1)' }}>Researching…</p>
+        )}
+        {job?.status === 'failed' && (
+          <div style={{ fontSize: 'var(--font-xs)', color: 'var(--tag-red-fg)', marginTop: 'var(--space-1)' }}>
+            {/* The job's own error is the most useful thing on the screen when
+                a run fails -- it names the site or the reason, not just "failed". */}
+            Failed: {job.error ?? 'unknown error'}{' '}
+            <button onClick={runResearch} disabled={requestResearch.isPending}>Retry</button>
+          </div>
+        )}
+        {researchSummary && !requestResearch.isPending && (
+          <p style={{ fontSize: 'var(--font-xs)', color: 'var(--fg-tertiary)', marginTop: 'var(--space-1)' }}>{researchSummary}</p>
+        )}
         <div style={{ marginTop: 'var(--space-4)', display: 'grid', gap: 'var(--space-1)' }}>
           <InlineField label="First name" value={lead.first_name} onSave={v => patch.mutate({ first_name: v })} />
           <InlineField label="Last name" value={lead.last_name} onSave={v => patch.mutate({ last_name: v })} />
@@ -127,12 +172,16 @@ export function LeadPage() {
             </button>
           ))}
         </div>
-        {(patch.error || addNote.error) && (
+        {(patch.error || addNote.error || requestResearch.error || (jobQuery.error && !job)) && (
           <div style={{ background: 'var(--tag-red-bg)', color: 'var(--tag-red-fg)', padding: 'var(--space-3)',
             borderRadius: 'var(--radius-md)', fontSize: 'var(--font-sm)', marginBottom: 'var(--space-3)' }}>
             {/* Without this a rejected write just snapped the field back, which reads
-                as "I mistyped it" rather than "the server refused". */}
-            Couldn't save: {(patch.error ?? addNote.error)!.message}
+                as "I mistyped it" rather than "the server refused". Gate the job-poll
+                error on `!job`, same reasoning as BrandContext: a failed background
+                refetch in TanStack Query v5 retains the last good `data`, so a
+                momentary blip on the 5s poll must not blank out a status that's
+                still perfectly valid. */}
+            Couldn't save: {(patch.error ?? addNote.error ?? requestResearch.error ?? jobQuery.error)!.message}
           </div>
         )}
         {tab === 'activity' ? (
