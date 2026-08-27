@@ -13,9 +13,13 @@ describe('summarizeVerdicts', () => {
     expect(s).toContain('1 queued');
     expect(s).toContain('no domain');
   });
-  it('calls out the cap, because that one needs action', () => {
-    expect(summarizeVerdicts([r('capped', 'daily cap of 25 reached (25 used today)')]))
-      .toContain('daily cap');
+  it('calls out the cap with its real numbers, because that one needs action', () => {
+    // Asserts on the actual numbers from a realistic RPC detail, not just the
+    // word "cap" -- a flat "N over the daily cap" label would satisfy a bare
+    // `.toContain('daily cap')` without ever telling the user it's 25 of 25.
+    const s = summarizeVerdicts([r('capped', 'daily cap of 25 reached (25 used today)')]);
+    expect(s).toContain('daily cap');
+    expect(s).toContain('25');
   });
   it('collapses already-queued into something honest', () => {
     expect(summarizeVerdicts([r('already_queued')])).toContain('already');

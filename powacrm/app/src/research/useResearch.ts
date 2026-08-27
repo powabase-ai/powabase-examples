@@ -18,8 +18,8 @@ export function summarizeVerdicts(results: ResearchResult[]): string {
 
   const queued = results.filter(r => r.verdict === 'queued').length;
   const alreadyQueued = results.filter(r => r.verdict === 'already_queued').length;
-  const capped = results.filter(r => r.verdict === 'capped').length;
   const skipped = results.filter(r => r.verdict === 'skipped');
+  const capped = results.filter(r => r.verdict === 'capped');
   const notYours = results.filter(r => r.verdict === 'not_yours').length;
 
   const parts: string[] = [];
@@ -28,24 +28,48 @@ export function summarizeVerdicts(results: ResearchResult[]): string {
 
   // Skips are grouped by their detail reason so "no domain" and "researched
   // recently" don't collapse into one meaningless "N skipped".
-  const byDetail = new Map<string, number>();
-  for (const r of skipped) {
-    const key = r.detail ?? 'skipped';
-    byDetail.set(key, (byDetail.get(key) ?? 0) + 1);
-  }
-  for (const [detail, count] of byDetail) {
+  for (const [detail, count] of groupByDetail(skipped, 'skipped')) {
     parts.push(`${count} skipped (${shortenDetail(detail)})`);
   }
 
-  if (capped > 0) parts.push(`${capped} over the daily cap`);
+  // Capped entries keep their RPC detail VERBATIM -- NOT run through
+  // shortenDetail. "daily cap of 25 reached (25 used today)" carries the one
+  // actionable number in this whole summary (exactly what to go raise on the
+  // settings page), so trimming it the way skip reasons are trimmed would
+  // throw away the only useful part. Grouped the same way skips are: every
+  // capped result in one batch shares the same cap/used snapshot, because
+  // request_research() stops inserting the moment the cap is hit, so v_used
+  // never changes again for the rest of that call -- this never repeats the
+  // same message N times.
+  for (const [detail, count] of groupByDetail(capped, 'capped')) {
+    parts.push(`${count} capped (${detail})`);
+  }
+
+  // `not_yours`'s detail is deliberately uninformative -- "no such lead, or
+  // not yours" collapses "doesn't exist" and "exists but isn't yours" into
+  // one answer on purpose, so the verdict itself can't become an existence
+  // oracle for rows the caller can't read (see request_research()'s comment
+  // in db/migrations/0012_research_rpcs.sql). Surfacing it here would add
+  // words, not information, so -- unlike skipped/capped -- this stays a flat
+  // count.
   if (notYours > 0) parts.push(`${notYours} not yours`);
 
   return parts.join(' · ');
 }
 
-// The RPC's `detail` strings are full sentences, written for a log, not a
-// one-line summary sitting next to a count. This trims the common ones down
-// to what the test cases (and a person skimming the banner) actually need.
+function groupByDetail(results: ResearchResult[], fallback: string): [string, number][] {
+  const byDetail = new Map<string, number>();
+  for (const r of results) {
+    const key = r.detail ?? fallback;
+    byDetail.set(key, (byDetail.get(key) ?? 0) + 1);
+  }
+  return [...byDetail];
+}
+
+// The RPC's skip `detail` strings are full sentences, written for a log, not
+// a one-line summary sitting next to a count. This trims the common ones
+// down to what the test cases (and a person skimming the banner) actually
+// need. Capped details are NOT passed through this -- see the comment above.
 function shortenDetail(detail: string): string {
   if (detail.includes('no domain')) return 'no domain';
   if (detail.includes('within the last 30 days')) return 'researched recently';
