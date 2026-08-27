@@ -1,11 +1,15 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { useNavigate } from 'react-router-dom';
 import { useBrand } from '@/shell/BrandContext';
 import { positionBetween } from '@/lib/position';
+import { summarizeVerdicts, useRequestResearch } from '@/research/useResearch';
 import { StageTag } from './StageTag';
 import { createDragGuard, type DragGuard } from './dragGuard';
-import { groupByStage, leadName, useLeads, useMoveLead, useStages, LEAD_CAP, type Lead, type Stage } from './useLeads';
+import {
+  groupByStage, leadName, selectResearchBatch, useLeads, useMoveLead, useStages,
+  LEAD_CAP, RESEARCH_BATCH_SIZE, type Lead, type Stage,
+} from './useLeads';
 
 function Card({ lead, dragGuard }: { lead: Lead; dragGuard: DragGuard }) {
   const nav = useNavigate();
@@ -21,6 +25,50 @@ function Card({ lead, dragGuard }: { lead: Lead; dragGuard: DragGuard }) {
         {[lead.title, lead.company?.name].filter(Boolean).join(' · ')}
       </div>
       {lead.fit_score != null && <div style={{ fontSize: 'var(--font-xs)', color: 'var(--fg-tertiary)' }}>fit {lead.fit_score}</div>}
+    </div>
+  );
+}
+
+// Requests research for up to RESEARCH_BATCH_SIZE distinct unresearched
+// companies among `leads` (see selectResearchBatch's comment for why "N
+// leads" here always means "N companies", not "N of the RPC's person ids").
+// One lead per company is sent to request_research() -- research lands on the
+// company row, so every other lead at that company benefits once the job
+// completes, with no need to send them all.
+function ResearchBatchButton({ leads, brandId }: { leads: Lead[]; brandId: string }) {
+  const requestResearch = useRequestResearch(brandId);
+  const [summary, setSummary] = useState<string | null>(null);
+  const batch = selectResearchBatch(leads, RESEARCH_BATCH_SIZE);
+
+  if (batch.length === 0) {
+    return <p style={{ color: 'var(--fg-light)', fontSize: 'var(--font-sm)', marginBottom: 'var(--space-3)' }}>Nothing to research.</p>;
+  }
+
+  function run() {
+    setSummary(null);
+    requestResearch.mutate(batch.map(l => l.id), { onSuccess: results => setSummary(summarizeVerdicts(results)) });
+  }
+
+  return (
+    <div style={{ marginBottom: 'var(--space-3)' }}>
+      <button onClick={run} disabled={requestResearch.isPending}>
+        {requestResearch.isPending ? 'Requesting…' : `Research ${batch.length} unresearched lead${batch.length === 1 ? '' : 's'}`}
+      </button>
+      {requestResearch.error && (
+        <div style={{ background: 'var(--tag-red-bg)', color: 'var(--tag-red-fg)', padding: 'var(--space-3)',
+          borderRadius: 'var(--radius-md)', fontSize: 'var(--font-sm)', marginTop: 'var(--space-2)' }}>
+          Couldn't request research: {requestResearch.error.message}
+        </div>
+      )}
+      {summary && !requestResearch.isPending && (
+        <p style={{ fontSize: 'var(--font-xs)', color: 'var(--fg-tertiary)', marginTop: 'var(--space-1)' }}>
+          {summary}
+          {/* The worker claims one queued job per minute, serialized -- a batch
+              this size does not resolve immediately, and the button re-enabling
+              must not read as "done". */}
+          {' '}· runs one company per minute in the background, so this batch may take up to {batch.length} minute{batch.length === 1 ? '' : 's'}.
+        </p>
+      )}
     </div>
   );
 }
@@ -97,6 +145,7 @@ export function BoardPage() {
           Couldn't move that lead: {move.error.message}
         </div>
       )}
+      <ResearchBatchButton leads={leads} brandId={brand.id} />
       <div style={{ display: 'flex', gap: 'var(--space-4)', overflowX: 'auto' }}>
         {stages.map(s => <Column key={s.value} stage={s} leads={grouped[s.value]} dragGuard={dragGuard} />)}
       </div>

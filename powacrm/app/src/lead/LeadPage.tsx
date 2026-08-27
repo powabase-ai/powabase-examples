@@ -10,10 +10,14 @@ import { InlineField } from './InlineField';
 import { Timeline } from './Timeline';
 import type { TimelineEvent } from './groupEventsByMonth';
 import { summarizeVerdicts, useRequestResearch, useResearchJob } from '@/research/useResearch';
+import { ResearchPanel, type ResearchData } from '@/research/ResearchPanel';
 
 type FullLead = Lead & {
   linkedin_url: string | null; created_at: string; company_id: string | null;
-  company: { id: string; name: string | null; domain: string | null; research: string | null } | null;
+  company: {
+    id: string; name: string | null; domain: string | null; research: string | null;
+    research_data: ResearchData | null; tech_stack: unknown; researched_at: string | null;
+  } | null;
 };
 
 export function LeadPage() {
@@ -32,7 +36,7 @@ export function LeadPage() {
     retry: false,
     queryFn: async () => {
       const { data, error } = await supabase.from('people')
-        .select('id,first_name,last_name,title,email,stage,position,fit_score,linkedin_url,created_at,company_id,company:companies(id,name,domain,research)')
+        .select('id,first_name,last_name,title,email,stage,position,fit_score,linkedin_url,created_at,company_id,company:companies(id,name,domain,research,research_data,tech_stack,researched_at)')
         .eq('id', id!).single();
       if (error) throw error;
       return data as unknown as FullLead;
@@ -195,9 +199,7 @@ export function LeadPage() {
             <Timeline events={events} />
           </>
         ) : (
-          <div style={{ whiteSpace: 'pre-wrap', fontSize: 'var(--font-sm)', color: 'var(--fg-secondary)' }}>
-            {lead.company?.research ?? 'No research yet — the researcher agent arrives in phase 2.'}
-          </div>
+          <ResearchPanel company={lead.company} />
         )}
       </section>
     </div>

@@ -5,7 +5,8 @@ import { currentActorName } from '@/lib/actor';
 export type Lead = {
   id: string; first_name: string | null; last_name: string | null; title: string | null;
   email: string | null; stage: string; position: number; fit_score: number | null;
-  company: { id: string; name: string | null; domain: string | null } | null;
+  company_id: string | null;
+  company: { id: string; name: string | null; domain: string | null; researched_at: string | null } | null;
 };
 export type Stage = { value: string; label: string; color: string; position: number };
 
@@ -44,7 +45,7 @@ export function useLeads(brandId: string) {
     queryKey: ['leads', brandId],
     queryFn: async () => {
       const { data, error } = await supabase.from('people')
-        .select('id,first_name,last_name,title,email,stage,position,fit_score,company:companies(id,name,domain)')
+        .select('id,first_name,last_name,title,email,stage,position,fit_score,company_id,company:companies(id,name,domain,researched_at)')
         // Order before limiting. Without an ORDER BY, *which* 1000 rows Postgres
         // returns is arbitrary and changes after any write, so on a larger brand
         // a single drag made unrelated cards appear and vanish.
@@ -55,6 +56,31 @@ export function useLeads(brandId: string) {
       return data as unknown as Lead[];
     },
   });
+}
+
+// Research is billed per COMPANY, not per lead: ten leads at one
+// unresearched company cost one research job, not ten (request_research()'s
+// partial unique index on research_jobs.company_id enforces this server-side
+// -- a second person at an already-queued company comes back `already_queued`,
+// not a second job). Picking "the first N leads" by board order without
+// de-duplicating would let one company with many leads eat the whole batch,
+// so a click asking for 10 could spend a single job and report back as if it
+// tried ten. This de-dupes by company_id BEFORE capping at `size`, so both
+// the returned array's length and the button label built from it mean "N
+// distinct companies" -- the unit a click here actually spends.
+export const RESEARCH_BATCH_SIZE = 10;
+
+export function selectResearchBatch(leads: Lead[], size = RESEARCH_BATCH_SIZE): Lead[] {
+  const seenCompanies = new Set<string>();
+  const batch: Lead[] = [];
+  for (const lead of leads) {
+    if (!lead.company_id || lead.company?.researched_at) continue;
+    if (seenCompanies.has(lead.company_id)) continue;
+    seenCompanies.add(lead.company_id);
+    batch.push(lead);
+    if (batch.length >= size) break;
+  }
+  return batch;
 }
 
 export function useMoveLead(brandId: string) {
