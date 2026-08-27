@@ -160,10 +160,30 @@ REVOKE ALL ON FUNCTION public.claim_research_jobs(int) FROM PUBLIC, anon, authen
 CREATE OR REPLACE FUNCTION public.complete_research_job(_job_id uuid, _payload jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
-  v_brand uuid; v_company uuid; f jsonb; n int := 0; v_person uuid; v_score int;
+  v_brand uuid; v_company uuid; v_status text; f jsonb; n int := 0;
+  v_person uuid; v_score int; v_injection boolean;
 BEGIN
-  SELECT brand_id, company_id INTO v_brand, v_company FROM research_jobs WHERE id = _job_id;
+  -- FOR UPDATE holds the row lock for the rest of this call, so a concurrent
+  -- complete/fail call on the SAME job (see the status guard below) can't race
+  -- past the status check before this one commits its own status change.
+  SELECT brand_id, company_id, status INTO v_brand, v_company, v_status
+    FROM research_jobs WHERE id = _job_id FOR UPDATE;
   IF v_brand IS NULL THEN RAISE EXCEPTION 'no such research job'; END IF;
+
+  -- Fixed in review: this function had no status precondition, so completing an
+  -- already-`done` job -- or one that was swept back to `queued` and re-claimed
+  -- by someone else while this call was still in flight -- would write a SECOND
+  -- `researched` event per person and overwrite companies.research with
+  -- whatever this call happened to be holding. Not hypothetical:
+  -- requeue_stalled_research_jobs() exists precisely because a worker CAN run
+  -- past its 15-minute window, at which point the job is swept, re-claimed, and
+  -- re-completed by someone else -- and then the original, slow worker finally
+  -- returns and calls this. A no-op is the correct response, not an exception:
+  -- "someone else already finished this" is the outcome the caller wanted, not
+  -- a failure worth retrying.
+  IF v_status IS DISTINCT FROM 'running' THEN
+    RETURN jsonb_build_object('ok', false, 'reason', 'job is not running', 'status', v_status, 'people_scored', 0);
+  END IF;
 
   -- Validate before writing anything. The payload came from an agent that just
   -- read an attacker-controlled web page, so it is untrusted input: a malformed
@@ -190,12 +210,45 @@ BEGIN
     researched_at = now()
   WHERE id = v_company;
 
+  -- injection_observed is a cosmetic flag, not something worth failing a good
+  -- report over. Fixed in review: a bare `::boolean` cast here raised on any
+  -- non-boolean-shaped string (e.g. "maybe") and aborted the whole call. Fall
+  -- back to false, same treatment as the key being absent -- this payload came
+  -- from an agent that just read an attacker-controlled web page, so a
+  -- malformed value here is the expected case, not the exception.
+  BEGIN
+    v_injection := coalesce((_payload->>'injection_observed')::boolean, false);
+  EXCEPTION WHEN invalid_text_representation THEN
+    v_injection := false;
+  END;
+
   FOR f IN SELECT * FROM jsonb_array_elements(_payload->'fit') LOOP
-    v_person := nullif(f->>'person_id','')::uuid;
+    -- Fixed in review: a bare `::uuid` cast raised on any non-uuid string and
+    -- aborted the ENTIRE call, losing every other person's score along with
+    -- it. person_id can't be substituted for -- there's no fallback identifier
+    -- -- so a malformed one is simply skipped, the same as a missing one.
+    BEGIN
+      v_person := nullif(f->>'person_id','')::uuid;
+    EXCEPTION WHEN invalid_text_representation THEN
+      v_person := NULL;
+    END;
     CONTINUE WHEN v_person IS NULL;
-    -- Clamp rather than reject: people.fit_score has a 0-100 CHECK, and one
-    -- out-of-range number from the model should not throw away a good report.
-    v_score := least(100, greatest(0, coalesce((f->>'score')::int, 0)));
+
+    -- Fixed in review: `(f->>'score')::int` raised on a fractional score
+    -- (live example: "82.5" -> invalid input syntax for type integer) and
+    -- aborted the whole call the same way. Unlike person_id, a score IS
+    -- substitutable -- fall back to 0, the same default already used for a
+    -- missing score, rather than dropping a person who otherwise has a valid
+    -- id and rationale. Cast through numeric first so a fractional value
+    -- rounds instead of erroring; round() is "round half away from zero", so
+    -- 82.5 -> 83. Then clamp: people.fit_score has a 0-100 CHECK, and an
+    -- out-of-range number from the model should not throw away a good report
+    -- either.
+    BEGIN
+      v_score := least(100, greatest(0, round(coalesce((f->>'score')::numeric, 0))))::int;
+    EXCEPTION WHEN invalid_text_representation THEN
+      v_score := 0;
+    END;
 
     UPDATE people SET
       fit_score = v_score,
@@ -207,7 +260,7 @@ BEGIN
       INSERT INTO events (brand_id, person_id, company_id, event_type, actor_source, actor_name, properties)
       VALUES (v_brand, v_person, v_company, 'researched', 'AGENT', 'Researcher',
               jsonb_build_object('score', v_score, 'rationale', f->>'rationale',
-                                 'injection_observed', coalesce((_payload->>'injection_observed')::boolean, false)));
+                                 'injection_observed', v_injection));
     END IF;
   END LOOP;
 
@@ -218,10 +271,19 @@ REVOKE ALL ON FUNCTION public.complete_research_job(uuid, jsonb) FROM PUBLIC, an
 
 CREATE OR REPLACE FUNCTION public.fail_research_job(_job_id uuid, _error text)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
-DECLARE v_attempts int; v_status text;
+DECLARE v_attempts int; v_current text; v_status text;
 BEGIN
-  SELECT attempts INTO v_attempts FROM research_jobs WHERE id = _job_id;
+  SELECT attempts, status INTO v_attempts, v_current FROM research_jobs WHERE id = _job_id FOR UPDATE;
   IF v_attempts IS NULL THEN RAISE EXCEPTION 'no such research job'; END IF;
+
+  -- Fixed in review: same missing status precondition as complete_research_job,
+  -- and for the same reason -- without it, a stale failure report from a slow
+  -- worker could flip an already-`done` (or already-requeued-and-reclaimed)
+  -- job's status backwards, re-queuing finished work.
+  IF v_current IS DISTINCT FROM 'running' THEN
+    RETURN jsonb_build_object('ok', false, 'reason', 'job is not running', 'status', v_current);
+  END IF;
+
   -- Three strikes. Retrying forever would spend credits on a site that is never
   -- going to load.
   v_status := CASE WHEN v_attempts >= 3 THEN 'failed' ELSE 'queued' END;
