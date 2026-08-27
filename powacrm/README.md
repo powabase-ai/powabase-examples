@@ -10,12 +10,15 @@ human takes over. It's a real outbound tool *and* an open-source example of
 building a **backend-less** product on the Powabase AI BaaS.
 
 PowaCRM is **not a standalone app** — it's a consumer of a **Powabase project**,
-which provides its database, auth, agents, workflows, and webhook endpoints.
-Unlike its sibling [`rankforge/`](../rankforge), PowaCRM ships **no server of its
-own**: the React SPA talks straight to the project's PostgREST API (Anon key +
-RLS), and every pipeline job — Apollo sourcing, AI research, message drafting,
-the sequence-engine tick, Dux Soup / SendGrid webhook ingestion — runs inside
-Powabase workflows and agents.
+which provides its database, auth, agents, and webhook endpoints. Unlike its
+sibling [`rankforge/`](../rankforge), PowaCRM ships **no server of its own**:
+the React SPA talks straight to the project's PostgREST API (Anon key + RLS).
+AI research runs from a `pg_cron` job inside the database calling the
+researcher agent directly — no Powabase workflow is involved (see
+[Research](#research) below and [`platform/README.md`](platform/README.md)
+for why). Apollo sourcing, message drafting, the sequence-engine tick, and
+Dux Soup / SendGrid webhook ingestion are later-phase pipeline jobs and not
+yet built.
 
 ## What it does
 
@@ -54,7 +57,15 @@ React SPA (app/) ── Anon key + GoTrue JWT ──▶ Powabase PostgREST (publ
       │                                        Powabase Realtime (events/touches)
       └── deployed workflow webhooks ────────▶ Powabase workflows ──▶ Apollo · Dux Soup · SendGrid
                                                Powabase agents (researcher, copywriter)
+
+pg_cron (inside Postgres) ── http extension ──▶ POST /api/agents/{id}/run/stream (researcher agent)
+                                                 writes back via complete_research_job / fail_research_job
 ```
+
+AI research does **not** go through a Powabase workflow — see
+[Research](#research). The workflow row above is for later-phase pipeline
+jobs (Apollo sourcing, drafting, sequencing, webhook ingestion), none of
+which are built yet.
 
 | Dir | Stack | Purpose |
 |---|---|---|
@@ -107,14 +118,15 @@ scripts and must never reach `app/` or the browser.
 ### 2. Build the schema
 
 Migrations are plain SQL and **must be applied in numeric order, `0001` →
-`0012`** — later ones depend on tables, policies and functions the earlier ones
+`0013`** — later ones depend on tables, policies and functions the earlier ones
 create, `0007`/`0008` supersede functions first defined in `0006`/`0005`, `0009`
-replaces every policy from `0004` with per-owner ones, and `0011`/`0012` add the
-research queue and its RPCs on top of all of it.
+replaces every policy from `0004` with per-owner ones, `0011`/`0012` add the
+research queue and its RPCs, and `0013` adds the in-database worker
+(`run_research_tick()` and its `pg_cron` schedule) on top of all of it.
 One command does all of them:
 
 ```bash
-./db/migrate.sh          # applies db/migrations/0001…0012 in order
+./db/migrate.sh          # applies db/migrations/0001…0013 in order
 ```
 
 Or apply them one at a time if you prefer to read as you go:
@@ -152,24 +164,38 @@ Signing up already gives every account its own empty starter brand, so the app
 works without the seed. The seed only adds the populated `gpt-trainer` demo
 brand — skip it if you would rather start clean.
 
-### 4. Provision the research agent and worker
+### 4. Provision the research agent and the worker's config
 
-The researcher agent and the `wf-research-tick` scheduled worker are **platform**
-resources, not database ones, so the migrations do not create them. One script
-does, and it needs the Service Role key:
+The researcher agent is a **platform** resource, not a database one, so the
+migrations do not create it. Two scripts finish the setup, in this order:
 
 ```bash
 export VITE_POWABASE_URL='https://<ref>.p.powabase.ai'
 export PB_SERVICE_KEY='...'                 # server-side only
-./platform/provision.sh
+./platform/provision.sh                     # creates/updates the agent + its tools
+
+export PB_DB_URL='postgresql://...'         # Studio → Connect → Database URL
+./db/setup/set_worker_config.sh             # stores the project URL, service key and
+                                             # agent id in vault, for run_research_tick()
 ```
 
-It creates or updates the agent from `platform/researcher-agent.json`,
-reconciles its attached tools to exactly the two that file lists, writes and
-deploys the workflow graph from `platform/wf-research-tick.json`, and verifies
-the schedule survived the save. It is idempotent — re-run it after editing
-either JSON file. Skip this and everything else still works; you just get no
-research. See [`platform/README.md`](platform/README.md).
+`platform/provision.sh` creates or updates the agent from
+`platform/researcher-agent.json` and reconciles its attached tools to exactly
+the two that file lists (`web_scrape`, `web_search`) — attaching anything
+missing, removing anything extra. It is idempotent — re-run it after editing
+the JSON file. See [`platform/README.md`](platform/README.md).
+
+`db/setup/set_worker_config.sh` looks the agent up by name (paginating
+`GET /api/agents`) and calls `set_research_worker_config()` to store the
+project URL, the Service Role key, and the agent's id in `vault` — nothing a
+client-reachable table or PostgREST could ever expose. It must run *after*
+`provision.sh`, since it fails if the agent does not exist yet, and it needs
+`PB_DB_URL` on top of the two platform variables. Re-running it overwrites
+the three values in place.
+
+Skip either step and everything else still works; you just get no research —
+the `pg_cron` job schedule from `0013` is already in place, but
+`run_research_tick()` has nothing in `vault` to call the agent with.
 
 ### 5. Run it
 
@@ -223,15 +249,25 @@ inside the `request_research` RPC, and a company researched in the last 30 days
 is skipped rather than re-run. Requests become rows in a `research_jobs` queue
 that only the RPCs may write, so the cap cannot be sidestepped from the browser.
 
-**Throughput is deliberately modest.** `wf-research-tick` fires once a minute
-and does **one job per tick**. Workflow executions serialize, and a tick that
-comes due while the previous execution is still running is **skipped, not
-queued** — so the real rate is one job per `max(60 s, execution duration)`, and
-a research run takes 35–50 s. In practice: roughly one company a minute, so
-selecting ten companies on the board and hitting **Research all** takes about
-ten minutes to drain. The daily cap binds long before throughput does. The
-reasoning, and the measurements behind it, are in
-[`platform/README.md`](platform/README.md).
+**The worker is a `pg_cron` job inside the database — not a workflow, and not
+a server.** `run_research_tick()` (`db/migrations/0013_inline_worker.sql`) is
+scheduled by `pg_cron` every minute. Each tick requeues any job stalled over
+15 minutes, claims exactly one queued job, calls `powacrm-researcher` directly
+over `POST /api/agents/{id}/run/stream` via the `http` extension, extracts the
+JSON result, and writes it back through the same `complete_research_job` /
+`fail_research_job` RPCs the rest of the app uses. Setup needs both
+`./platform/provision.sh` (creates the agent) and `./db/setup/set_worker_config.sh`
+(puts the project URL, service key, and agent id in `vault`, which is what
+`run_research_tick()` reads) — see [Setup](#setup) step 4. There used to be a
+scheduled Powabase workflow doing this instead; it produced ungrounded,
+fabricated research and has been removed — see
+[`platform/README.md`](platform/README.md) for why.
+
+**Throughput is deliberately modest: one job per minute.** A research run
+takes 35–50 s and the tick is scheduled every 60 s, so the worker turns over
+roughly one company a minute. Selecting ten companies on the board and
+hitting **Research all** takes about ten minutes to drain. The daily cap
+binds long before throughput does.
 
 The researcher agent holds **exactly two tools, `web_scrape` and `web_search`**,
 and that is a security boundary rather than a minimalism preference — see below.
@@ -274,10 +310,10 @@ Still worth doing, whatever your setup:
    superuser connection, so anything agent-driven must be driven from a trusted
    backend, never from an end-user's token. That is why the researcher — whose
    whole job is reading pages an outsider can edit — is given **only**
-   `web_scrape` and `web_search`, and why the *workflow*, not the agent, writes
-   the result back through `complete_research_job`. Adding `database_write`,
-   `http_request` or `code_execute` to that agent would put the entire schema
-   one prompt injection away, and no policy would stop it.
+   `web_scrape` and `web_search`, and why `run_research_tick()`, not the
+   agent, writes the result back through `complete_research_job`. Adding
+   `database_write`, `http_request` or `code_execute` to that agent would put
+   the entire schema one prompt injection away, and no policy would stop it.
    `db/tests/test_0012_injection.sh` feeds the agent a real injection payload
    and asserts both halves: the tool list is exactly those two, and the agent
    reports the attempt instead of obeying it.
@@ -294,8 +330,12 @@ Under active development.
   lead view, CSV import. See `db/migrations/0001`–`0010`, `app/src/`, and
   [`docs/2026-08-26-phase1-foundation-plan.md`](docs/2026-08-26-phase1-foundation-plan.md).
 - **Phase 2 — implemented.** AI research: the queue and RPCs
-  (`db/migrations/0011`–`0012`), the researcher agent and the scheduled worker
-  (`platform/`), and the trigger, job status and rendering in the app. Plan:
+  (`db/migrations/0011`–`0012`), the researcher agent (`platform/`), the
+  in-database `pg_cron` worker (`db/migrations/0013`), and the trigger, job
+  status and rendering in the app. Design:
+  [`docs/2026-08-27-phase2-research-design.md`](docs/2026-08-27-phase2-research-design.md)
+  (rev 2 — the worker moved out of a Powabase workflow and into the database;
+  see its §2). Original plan (superseded on the worker's architecture):
   [`docs/2026-08-27-phase2-research-plan.md`](docs/2026-08-27-phase2-research-plan.md).
 - **Later phases** add Apollo sourcing, the copywriter and drafting queue, the
   sequence engine, and the LinkedIn/email execution legs.
