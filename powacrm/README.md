@@ -84,6 +84,17 @@ never in this repo or the browser bundle. The SPA holds the Anon key only.
 - **Node 20+** (the app is built with Vite 8 / React 19) and npm.
 - **A Powabase project** — sign up at [powabase.ai](https://powabase.ai) and
   create one. PowaCRM has no backend of its own; the project *is* the backend.
+- **Two Postgres extensions on the project: `pg_cron` and `http`.** Neither is
+  enabled by default on a Powabase project. `0013` creates both itself
+  (`CREATE EXTENSION IF NOT EXISTS`), which needs them to be *available* on the
+  image and creatable by your database role; `pg_cron` additionally has to be
+  in the server's `shared_preload_libraries`. Enable them in Studio →
+  **Database → Extensions**. `http` must land in schema **`public`** —
+  `run_research_tick()` pins `search_path = public, pg_temp`, so an `http`
+  installed into an `extensions` schema fails at run time with `function
+  http(http_request) does not exist`. `db/migrate.sh` checks all of this before
+  it applies anything (`db/setup/preflight.sql`), and `0013` re-checks it
+  itself. Only research needs them; `0001`–`0012` (the whole CRM) do not.
 - **`psql`**, or **Docker** if you'd rather not install it. `db/apply.sh` uses
   `psql` when it's on your `PATH` and otherwise falls back to
   `docker run --rm -i postgres:16-alpine psql`.
@@ -118,16 +129,23 @@ scripts and must never reach `app/` or the browser.
 ### 2. Build the schema
 
 Migrations are plain SQL and **must be applied in numeric order, `0001` →
-`0013`** — later ones depend on tables, policies and functions the earlier ones
+`0014`** — later ones depend on tables, policies and functions the earlier ones
 create, `0007`/`0008` supersede functions first defined in `0006`/`0005`, `0009`
 replaces every policy from `0004` with per-owner ones, `0011`/`0012` add the
-research queue and its RPCs, and `0013` adds the in-database worker
-(`run_research_tick()` and its `pg_cron` schedule) on top of all of it.
+research queue and its RPCs, `0013` adds the in-database worker
+(`run_research_tick()` and its `pg_cron` schedule) on top of all of it, and
+`0014` bounds `brands.research_daily_cap` in the schema.
 One command does all of them:
 
 ```bash
-./db/migrate.sh          # applies db/migrations/0001…0013 in order
+./db/migrate.sh          # preflight, then db/migrations/0001…0014 in order
 ```
+
+`db/migrate.sh` runs `db/setup/preflight.sql` first. It is read-only and it
+fails fast, by name, if `pg_cron`, `http` or `unaccent` is missing — otherwise
+the first sign of trouble is `0013` dying on `schema "cron" does not exist`
+after twelve migrations have already applied. Run it on its own any time with
+`./db/apply.sh db/setup/preflight.sql`.
 
 Or apply them one at a time if you prefer to read as you go:
 

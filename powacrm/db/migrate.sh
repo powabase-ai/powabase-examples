@@ -13,6 +13,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 : "${PB_DB_URL:?Set PB_DB_URL to the Powabase Database URL (Studio -> Connect -> Database URL)}"
 
+# Extensions first. 0013 needs pg_cron and http, and neither is on by default;
+# without this check the failure arrives twelve migrations later as a raw
+# `schema "cron" does not exist`, with 0013 rolled back. See db/setup/preflight.sql.
+echo "==> setup/preflight.sql"
+./apply.sh setup/preflight.sql
+
 shopt -s nullglob
 files=(migrations/[0-9][0-9][0-9][0-9]_*.sql)
 if [ ${#files[@]} -eq 0 ]; then

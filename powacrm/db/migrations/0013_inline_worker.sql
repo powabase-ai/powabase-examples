@@ -36,6 +36,67 @@
 BEGIN;
 
 -- ---------------------------------------------------------------------------
+-- 0. THE EXTENSIONS THIS MIGRATION DEPENDS ON.
+--
+-- 0013 is the first migration that needs anything beyond core Postgres and the
+-- `unaccent` 0001 creates: `cron.*` at the bottom of this file, and `http(...)`
+-- inside run_research_tick(). NEITHER IS ENABLED BY DEFAULT on a Powabase
+-- project. On the project this app was developed against both had been
+-- installed by hand -- pg_extension shows `unaccent` (created by 0001) with a
+-- much lower OID than `http` and `pg_cron`, which were created afterwards --
+-- and that hid the gap for the whole of phase 2. On a fresh project this file
+-- died at `schema "cron" does not exist`; because db/apply.sh runs with
+-- ON_ERROR_STOP=1 and db/migrate.sh with `set -e`, ALL of 0013 rolled back:
+-- no claim fix, no vault function, no worker, and a migrate.sh that stopped
+-- with a Postgres error and no explanation.
+--
+-- `SCHEMA public` on http is load-bearing. run_research_tick() pins
+-- `search_path = public, pg_temp` (0008's hardening rule), so an http living
+-- in an `extensions` schema -- a common Supabase-lineage convention, and where
+-- this very project keeps pgcrypto, pg_net and uuid-ossp -- is invisible to it
+-- and the worker fails at RUN time with `function http(http_request) does not
+-- exist`, long after the migration reported success. `IF NOT EXISTS` does NOT
+-- verify the schema of an extension that already exists (verified: it emits
+-- `extension "http" already exists, skipping` and ignores the SCHEMA clause),
+-- so the check below reads pg_extension rather than trusting the statement.
+--
+-- Failures here are caught and re-raised with a message that names the
+-- extension and what to do about it, because `permission denied to create
+-- extension "pg_cron"` on its own does not tell an installer that the CRM
+-- itself (0001-0012) is already applied and working, and that only research
+-- is missing.
+-- ---------------------------------------------------------------------------
+DO $ext$
+DECLARE
+  v_schema text;
+BEGIN
+  BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_cron;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'powacrm 0013 requires the pg_cron extension and could not create it: %', SQLERRM
+      USING HINT = 'Enable pg_cron on the project (Studio -> Database -> Extensions); it also has to be in the server''s shared_preload_libraries, which is not something this migration can do. Everything before 0013 has already been applied, so the CRM works -- only AI research is missing. Re-run just this file afterwards with ./db/apply.sh db/migrations/0013_inline_worker.sql.';
+  END;
+
+  BEGIN
+    CREATE EXTENSION IF NOT EXISTS http SCHEMA public;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'powacrm 0013 requires the http extension (pgsql-http) and could not create it: %', SQLERRM
+      USING HINT = 'Enable "http" on the project (Studio -> Database -> Extensions) with schema `public`, then re-run ./db/apply.sh db/migrations/0013_inline_worker.sql.';
+  END;
+
+  IF to_regnamespace('cron') IS NULL THEN
+    RAISE EXCEPTION 'powacrm 0013 requires pg_cron, but schema "cron" does not exist even after CREATE EXTENSION pg_cron'
+      USING HINT = 'pg_cron installs its objects into a `cron` schema. If this fires, pg_cron is present under a name or layout this migration does not understand -- schedule public.run_research_tick() every minute by hand and delete the DO block at the end of this file.';
+  END IF;
+
+  SELECT extnamespace::regnamespace::text INTO v_schema FROM pg_extension WHERE extname = 'http';
+  IF v_schema IS DISTINCT FROM 'public' THEN
+    RAISE EXCEPTION 'powacrm 0013 requires the http extension in schema "public"; it is installed in %', coalesce(v_schema, '(nowhere -- not installed)')
+      USING HINT = 'run_research_tick() pins search_path = public, pg_temp, so http anywhere else resolves to "function http(http_request) does not exist" at run time. Fix it with: ALTER EXTENSION http SET SCHEMA public;';
+  END IF;
+END $ext$;
+
+-- ---------------------------------------------------------------------------
 -- 1. THE CLAIM BUG.
 --
 -- claim_research_jobs(1) could claim N jobs, not one. Reproduced live: a single
