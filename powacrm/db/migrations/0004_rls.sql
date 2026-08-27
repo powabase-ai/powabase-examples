@@ -1,3 +1,35 @@
+-- ============================================================================
+-- TRUST BOUNDARY -- READ THIS BEFORE PUTTING REAL DATA IN A PROJECT USING THESE
+-- POLICIES.
+--
+-- Phase 1 of PowaCRM is SINGLE-TENANT BY DESIGN. Every policy below grants the
+-- `authenticated` role full SELECT/INSERT/UPDATE across all eight tables, with
+-- no per-user, per-org or per-brand scoping. The only thing these policies
+-- check is "are you logged in at all"; `WITH CHECK (true)` on the INSERT
+-- policies means an authenticated client can write ANY `brand_id`.
+--
+-- That matters because the SPA ships the project's Anon key in its browser
+-- bundle, so ANYONE who can load the app can reach GoTrue's signup endpoint. If
+-- the project is left with signups enabled and mailer autoconfirm on (the
+-- Powabase default), a stranger can self-register, be confirmed instantly, land
+-- in `authenticated`, and read and write every row in this schema. RLS is the
+-- only gate here, and it trusts any authenticated user.
+--
+-- So, before pointing a project holding real data at this schema:
+--   1. Disable or gate signups in Studio (Authentication -> Providers/Settings:
+--      turn off "Allow new users to sign up", or require email confirmation and
+--      an invite flow), and create the operator account yourself -- see
+--      `db/setup/create_user.sh`.
+--   2. Treat the Database URL and Service Role key as server-side-only secrets.
+--      The browser must only ever see the Anon key.
+--   3. A multi-user or multi-tenant phase MUST replace these policies with ones
+--      scoped against a membership table, and must scope `_brand_id` inside
+--      `public.import_people` (0007_import_company_by_name.sql) the same way.
+--
+-- The README's "Security and the trust boundary" section says the same thing in
+-- prose.
+-- ============================================================================
+
 DO $$
 DECLARE t text;
 BEGIN

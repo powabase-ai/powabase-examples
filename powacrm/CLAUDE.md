@@ -21,7 +21,7 @@ server-side only, never in `app/`.
 
 | Dir | Stack | Purpose |
 |---|---|---|
-| `app/` | React 18 · Vite · TS · TanStack Query · supabase-js | Dashboard / lite CRM |
+| `app/` | React 19 · Vite · TS · TanStack Query · supabase-js | Dashboard / lite CRM |
 | `db/` | SQL migrations + psql test scripts | Schema, RLS, RPCs |
 | `docs/` | — | Design spec + phase plans |
 

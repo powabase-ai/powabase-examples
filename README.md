@@ -11,7 +11,7 @@ Each app lives in its own subdirectory with its own README, backend, and fronten
 | App | What it is | Stack |
 |---|---|---|
 | [`rankforge/`](./rankforge) | Production SEO/GEO blog-article platform — multi-org, multi-brand: research → grounded generation → editorial review → publish, with autonomous content scouts. | FastAPI · psycopg3 · Next.js 16 · TanStack Query |
-| [`powacrm/`](./powacrm) | Backend-less outbound sales automation — lite CRM + AI-researched, hyperpersonalized LinkedIn/email sequences (Apollo · Dux Soup · SendGrid) run entirely by Powabase workflows and agents. | React 18 · Vite · TanStack Query · PostgREST/RLS |
+| [`powacrm/`](./powacrm) | Backend-less outbound sales automation — lite CRM + AI-researched, hyperpersonalized LinkedIn/email sequences (Apollo · Dux Soup · SendGrid) run entirely by Powabase workflows and agents. | React 19 · Vite · TanStack Query · PostgREST/RLS |
 
 ## Layout
 

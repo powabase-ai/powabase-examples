@@ -12,12 +12,12 @@
 
 ## Global Constraints
 
-- Project root: `/home/zipeng/Agentic/Codebase/example-apps/powacrm/` (all paths below relative to it). Frontend lives in `app/`, database in `db/`.
-- Powabase project URL: `https://5c0cec181406a05fc355.p.powabase.ai`. Credentials come from environment variables, NEVER hardcoded or committed: `PB_DB_URL` (Database URL, migrations only), `PB_SERVICE_KEY` (setup scripts only), `VITE_POWABASE_URL` + `VITE_POWABASE_ANON_KEY` (the only credentials the SPA may see, in `app/.env.local`, gitignored).
+- Project root: `powacrm/` in the `powabase-examples` repo (all paths below relative to it). Frontend lives in `app/`, database in `db/`.
+- Powabase project URL: `https://<ref>.p.powabase.ai`. Credentials come from environment variables, NEVER hardcoded or committed: `PB_DB_URL` (Database URL, migrations only), `PB_SERVICE_KEY` (setup scripts only), `VITE_POWABASE_URL` + `VITE_POWABASE_ANON_KEY` (the only credentials the SPA may see, in `app/.env.local`, gitignored).
 - Every direct REST call in scripts sends BOTH headers: `apikey: <key>` and `Authorization: Bearer <key>`.
 - Every table follows spec §3.1: `id uuid primary key default gen_random_uuid()`, `created_at`/`updated_at timestamptz not null default now()` + `set_updated_at` trigger, `deleted_at timestamptz`, actor columns (`created_by_source` text CHECK + `created_by_name` + `created_by_context jsonb`), enums as `text + CHECK` (no PG enum types).
 - RLS enabled on every table; policies grant `authenticated` only; SELECT policies filter `deleted_at IS NULL`; the `anon` role gets nothing.
-- Commits: small, per task, run from repo root `/home/zipeng` (the git repo root), message suffix `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- Commits: small, per task, run from the git repo root, message suffix `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 - Saved-views UI is deferred (spec puts only board/lead-view/import in phase 1); the `views` table ships now so later phases don't migrate.
 
 ---
@@ -109,7 +109,7 @@ Expected: `test_0001 OK`
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/db powacrm/.gitignore
+cd <repo root> && git add powacrm/db powacrm/.gitignore
 git commit --no-verify -m "feat(powacrm): db migration infra + shared helpers
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -304,7 +304,7 @@ Expected: `test_0002 OK`
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/db
+cd <repo root> && git add powacrm/db
 git commit --no-verify -m "feat(powacrm): core tables (brands, stages, companies, people)
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -333,11 +333,11 @@ BEGIN
   INSERT INTO people (brand_id, first_name) VALUES (b, 'Eve') RETURNING id INTO p;
 
   INSERT INTO events (brand_id, person_id, event_type, actor_source, actor_name, properties)
-  VALUES (b, p, 'note', 'MANUAL', 'Hunter', '{"body": "hello"}');
+  VALUES (b, p, 'note', 'MANUAL', 'Test User', '{"body": "hello"}');
   -- unknown event type rejected (FK to event_types)
   BEGIN
     INSERT INTO events (brand_id, person_id, event_type, actor_source, actor_name)
-    VALUES (b, p, 'nonsense', 'MANUAL', 'Hunter');
+    VALUES (b, p, 'nonsense', 'MANUAL', 'Test User');
     RAISE EXCEPTION 'expected fk violation on event_type';
   EXCEPTION WHEN foreign_key_violation THEN NULL; END;
   -- happens_at defaulted
@@ -439,7 +439,7 @@ Expected: `test_0003 OK`
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/db
+cd <repo root> && git add powacrm/db
 git commit --no-verify -m "feat(powacrm): events timeline, import batches, views tables
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -554,7 +554,7 @@ Expected: `test_0004 OK`
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/db
+cd <repo root> && git add powacrm/db
 git commit --no-verify -m "feat(powacrm): RLS policies, auth user setup, gpt-trainer seed
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -698,7 +698,7 @@ Expected: `test_0005 OK`
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/db
+cd <repo root> && git add powacrm/db
 git commit --no-verify -m "feat(powacrm): import_people RPC with dedupe-then-restore
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -723,7 +723,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - [ ] **Step 1: Scaffold and install**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps/powacrm
+cd <repo root>/powacrm
 npm create vite@latest app -- --template react-ts
 cd app && npm install
 npm install @supabase/supabase-js @tanstack/react-query react-router-dom papaparse @dnd-kit/core
@@ -830,7 +830,7 @@ Run: `npm test` → PASS. Copy `.env.example` to `.env.local` and fill with the 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/app
+cd <repo root> && git add powacrm/app
 git commit --no-verify -m "feat(powacrm): SPA scaffold, design tokens, powabase client
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -1016,7 +1016,7 @@ Run `npm run dev`. Expected: login screen → sign in with the GoTrue user (Task
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/app
+cd <repo root> && git add powacrm/app
 git commit --no-verify -m "feat(powacrm): auth flow, app shell, brand switcher
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -1129,7 +1129,7 @@ export function useMoveLead(brandId: string) {
       if (error) throw error;
       await supabase.from('events').insert({
         brand_id: brandId, person_id: lead.id, event_type: 'stage_changed',
-        actor_source: 'MANUAL', actor_name: 'Hunter',
+        actor_source: 'MANUAL', actor_name: await currentActorName(),
         properties: { diff: { stage: { before: lead.stage, after: toStage } } },
       });
     },
@@ -1233,7 +1233,7 @@ Run: `npm test` → PASS. Then `npm run dev`: import is not built yet, so insert
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/app
+cd <repo root> && git add powacrm/app
 git commit --no-verify -m "feat(powacrm): pipeline kanban board with optimistic drag
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -1438,7 +1438,7 @@ export function LeadPage() {
     mutationFn: async (body: string) => {
       const { error } = await supabase.from('events').insert({
         brand_id: brand.id, person_id: id, company_id: lead?.company_id ?? null,
-        event_type: 'note', actor_source: 'MANUAL', actor_name: 'Hunter', properties: { body },
+        event_type: 'note', actor_source: 'MANUAL', actor_name: await currentActorName(), properties: { body },
       });
       if (error) throw error;
     },
@@ -1507,7 +1507,7 @@ Run: `npm test` → PASS. `npm run dev`: click a board card → lead page shows 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/app
+cd <repo root> && git add powacrm/app
 git commit --no-verify -m "feat(powacrm): lead record view with inline edit + timeline
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -1698,7 +1698,7 @@ Run: `npm test` → PASS. `npm run dev`: build a small CSV (headers `First Name,
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/app
+cd <repo root> && git add powacrm/app
 git commit --no-verify -m "feat(powacrm): CSV import with column mapping + RPC
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -1744,7 +1744,7 @@ Expected: `ALL DB TESTS OK`; vitest green; `vite build` succeeds with no TS erro
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /home/zipeng/Agentic/Codebase/example-apps && git add powacrm/db
+cd <repo root> && git add powacrm/db
 git commit --no-verify -m "test(powacrm): aggregate DB test runner + phase 1 verification
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
