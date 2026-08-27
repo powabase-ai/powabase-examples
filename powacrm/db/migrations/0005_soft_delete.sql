@@ -1,3 +1,8 @@
+-- SUPERSEDED by 0008_search_path_hardening.sql, which re-creates this function
+-- with `SET search_path = public, pg_temp` and wraps the CREATE + REVOKE in a
+-- transaction. This file is kept byte-identical to what was applied; apply both,
+-- in order.
+--
 -- The people _sel policy filters `deleted_at IS NULL`, and that USING clause
 -- is evaluated against the NEW row on UPDATE (PostgreSQL re-checks the
 -- SELECT-side USING policy for the post-update row), so an authenticated
