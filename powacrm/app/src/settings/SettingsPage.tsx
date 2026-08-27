@@ -3,6 +3,7 @@ import type { CSSProperties, FormEvent } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/powabase';
 import { useBrand, type Brand } from '@/shell/BrandContext';
+import { RESEARCH_CAP_MAX, RESEARCH_CAP_MIN, validateResearchCap } from './capField';
 
 export function SettingsPage() {
   const { brand } = useBrand();
@@ -39,16 +40,15 @@ export function SettingsPage() {
   // take. Validate up front instead: compute whether the cap is usable, show
   // why when it isn't, and refuse to submit at all rather than quietly drop
   // just that one field.
-  const parsedCap = Number.parseInt(dailyCap, 10);
-  const capError = dailyCap.trim() === ''
-    ? 'Required.'
-    : !Number.isFinite(parsedCap) || parsedCap < 0
-      ? 'Must be a whole number, 0 or greater.'
-      : null;
+  //
+  // The bound itself lives in ./capField and, decisively, in the database
+  // (`brands_research_daily_cap_range`, 0014). This check is the courtesy
+  // message, not the control: a form is one `fetch` away from being bypassed.
+  const { value: parsedCap, error: capError } = validateResearchCap(dailyCap);
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    if (capError) return;
+    if (capError !== null || parsedCap === null) return;
     save.mutate({
       name: name.trim() || brand.name,
       product_description: productDescription.trim() || null,
@@ -115,9 +115,11 @@ export function SettingsPage() {
         <div>
           <label style={labelStyle} htmlFor="settings-cap">Research daily cap</label>
           <p style={{ fontSize: 'var(--font-xs)', color: 'var(--fg-tertiary)', marginTop: 0, marginBottom: 'var(--space-2)' }}>
-            Maximum research jobs this brand may enqueue per day. Every run spends credits.
+            Maximum research jobs this brand may enqueue per day, {RESEARCH_CAP_MIN}–{RESEARCH_CAP_MAX}. Every run
+            spends the project owner's platform credits, which is why the ceiling is enforced by the database and
+            not just by this form.
           </p>
-          <input id="settings-cap" type="number" min={0} step={1} style={{ ...fieldStyle, maxWidth: 120 }}
+          <input id="settings-cap" type="number" min={RESEARCH_CAP_MIN} max={RESEARCH_CAP_MAX} step={1} style={{ ...fieldStyle, maxWidth: 120 }}
             value={dailyCap} onChange={e => setDailyCap(e.target.value)}
             aria-invalid={capError ? true : undefined} aria-describedby={capError ? 'settings-cap-error' : undefined} />
           {capError && (

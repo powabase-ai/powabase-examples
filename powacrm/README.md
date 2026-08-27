@@ -244,10 +244,14 @@ It runs entirely on **Powabase platform credits**: `web_scrape` is Firecrawl and
 or configure for research.
 
 **On demand, and capped.** Nothing is researched until someone asks. Each brand
-has a `research_daily_cap` (25/day by default, editable in Settings) enforced
-inside the `request_research` RPC, and a company researched in the last 30 days
-is skipped rather than re-run. Requests become rows in a `research_jobs` queue
-that only the RPCs may write, so the cap cannot be sidestepped from the browser.
+has a `research_daily_cap` (25/day by default, editable in Settings, **hard
+ceiling 100**) enforced inside the `request_research` RPC, and a company
+researched in the last 30 days is skipped rather than re-run. Requests become
+rows in a `research_jobs` queue that only the RPCs may write, so the cap cannot
+be sidestepped from the browser. The ceiling itself is a CHECK constraint
+(`brands_research_daily_cap_range`, `db/migrations/0014_research_cap_bound.sql`)
+and not a form validation, because the form is one `PATCH /rest/v1/brands` away
+from being ignored — see [Security](#security-and-the-trust-boundary).
 
 **The worker is a `pg_cron` job inside the database — not a workflow, and not
 a server.** `run_research_tick()` (`db/migrations/0013_inline_worker.sql`) is
@@ -274,8 +278,22 @@ and that is a security boundary rather than a minimalism preference — see belo
 
 ## Security and the trust boundary
 
-**Public signup is supported. What an account gets you is your own data, and
-nothing else.**
+**Public signup is supported, and it isolates data completely. Since phase 2 it
+does not isolate *spend* — if you have enabled research, close signups.**
+
+An account gets you your own data and nothing else: the isolation below is
+airtight and was verified against a live second account. But research runs on
+the **project owner's** Powabase platform credits (`web_scrape` is Firecrawl,
+`web_search` is Exa, plus the model run), and every account can enqueue
+research against its own brand. That is a stranger spending your money, not
+reading your data. The `research_daily_cap` ceiling in
+`db/migrations/0014_research_cap_bound.sql` bounds it — a brand may not be set
+above **100 jobs/day**, enforced by a CHECK constraint rather than by the
+Settings form, which an account can simply skip — but an account may create
+more than one brand, so the bound is per brand and not per person. If research
+is on and you do not want strangers holding accounts, turn signups off (point 2
+below). In phase 1, before research existed, a stranger's account really was
+harmless; that is no longer the whole story.
 
 Every table hangs off a brand, and `brands.owner_id` names the single
 `auth.users` row that owns it. `db/migrations/0009_access_control.sql` scopes
@@ -302,10 +320,13 @@ Still worth doing, whatever your setup:
 1. **Keep the Database URL and Service Role key server-side.** Only the Anon key
    may reach the browser — that is what it is for. Both of the other two bypass
    RLS completely.
-2. **Turn off signups if you don't want them.** Isolation means a stranger's
-   account is harmless, not that you want the accounts. Studio →
-   Authentication → "Allow new users to sign up". There is no API for this; it
-   is a Studio-only setting.
+2. **Turn signups off unless you actually want them — and treat that as
+   required once research is enabled.** Isolation keeps a stranger out of your
+   data; it does not keep them out of your credits, because their own brand is
+   a legitimate place to enqueue research that you pay for. The 0–100 cap
+   constraint bounds each brand's daily spend, not the number of brands an
+   account can make. Studio → Authentication → "Allow new users to sign up".
+   There is no API for this; it is a Studio-only setting.
 3. **Remember Powabase agents bypass RLS.** Agent database tools run on the
    superuser connection, so anything agent-driven must be driven from a trusted
    backend, never from an end-user's token. That is why the researcher — whose
@@ -331,8 +352,9 @@ Under active development.
   [`docs/2026-08-26-phase1-foundation-plan.md`](docs/2026-08-26-phase1-foundation-plan.md).
 - **Phase 2 — implemented.** AI research: the queue and RPCs
   (`db/migrations/0011`–`0012`), the researcher agent (`platform/`), the
-  in-database `pg_cron` worker (`db/migrations/0013`), and the trigger, job
-  status and rendering in the app. Design:
+  in-database `pg_cron` worker (`db/migrations/0013`), the spend ceiling on
+  `research_daily_cap` (`db/migrations/0014`), and the trigger, job status and
+  rendering in the app. Design:
   [`docs/2026-08-27-phase2-research-design.md`](docs/2026-08-27-phase2-research-design.md)
   (rev 2 — the worker moved out of a Powabase workflow and into the database;
   see its §2). Original plan (superseded on the worker's architecture):
