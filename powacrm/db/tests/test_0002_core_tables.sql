@@ -12,7 +12,10 @@ CREATE TEMP TABLE _t2_fixture (b uuid, ts1 timestamptz);
 DO $$
 DECLARE b uuid;
 BEGIN
-  INSERT INTO brands (name) VALUES ('_test_brand') RETURNING id INTO b;
+  -- brands.owner_id is NOT NULL since 0009_access_control.sql, and this script
+  -- runs as a superuser with no auth.uid() to default from, so name an owner
+  -- explicitly. Any account will do -- these fixtures are torn down below.
+  INSERT INTO brands (name, owner_id) VALUES ('_test_brand', (SELECT id FROM auth.users ORDER BY created_at, id LIMIT 1)) RETURNING id INTO b;
   INSERT INTO _t2_fixture (b, ts1) SELECT b, updated_at FROM brands WHERE id = b;
 
   -- actor default

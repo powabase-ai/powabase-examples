@@ -4,7 +4,10 @@
 DO $$
 DECLARE b uuid; imp uuid; r jsonb; c1 uuid; c2 uuid; n int; sp text;
 BEGIN
-  INSERT INTO brands (name) VALUES ('_test_imp_name') RETURNING id INTO b;
+  -- brands.owner_id is NOT NULL since 0009_access_control.sql, and this script
+  -- runs as a superuser with no auth.uid() to default from, so name an owner
+  -- explicitly. Any account will do -- these fixtures are torn down below.
+  INSERT INTO brands (name, owner_id) VALUES ('_test_imp_name', (SELECT id FROM auth.users ORDER BY created_at, id LIMIT 1)) RETURNING id INTO b;
   INSERT INTO import_batches (brand_id, filename, row_count) VALUES (b, 'no-website.csv', 2) RETURNING id INTO imp;
 
   -- 1. name-only company is created and linked (the 0006 bug: this was silently NULL)

@@ -1,33 +1,20 @@
 -- ============================================================================
--- TRUST BOUNDARY -- READ THIS BEFORE PUTTING REAL DATA IN A PROJECT USING THESE
--- POLICIES.
+-- SUPERSEDED BY 0009_access_control.sql -- READ THAT FILE FIRST.
 --
--- Phase 1 of PowaCRM is SINGLE-TENANT BY DESIGN. Every policy below grants the
--- `authenticated` role full SELECT/INSERT/UPDATE across all eight tables, with
--- no per-user, per-org or per-brand scoping. The only thing these policies
--- check is "are you logged in at all"; `WITH CHECK (true)` on the INSERT
--- policies means an authenticated client can write ANY `brand_id`.
+-- The policies created below grant the `authenticated` role full
+-- SELECT/INSERT/UPDATE across all eight tables with NO per-user scoping: the
+-- only thing they check is "are you logged in at all". Because the SPA ships
+-- the project's Anon key in its browser bundle and public signup is open, that
+-- meant any stranger who loaded the app could self-register and then read and
+-- write every row in the schema -- everyone else's leads included.
 --
--- That matters because the SPA ships the project's Anon key in its browser
--- bundle, so ANYONE who can load the app can reach GoTrue's signup endpoint. If
--- the project is left with signups enabled and mailer autoconfirm on (the
--- Powabase default), a stranger can self-register, be confirmed instantly, land
--- in `authenticated`, and read and write every row in this schema. RLS is the
--- only gate here, and it trusts any authenticated user.
+-- 0009 replaces every policy in this file with per-owner ones built on
+-- `brands.owner_id` and `owns_brand(uuid)`. This file is kept unchanged because
+-- applied migrations are history, not a place to edit; a from-scratch build
+-- passes through these permissive policies for the few seconds between 0004 and
+-- 0009, on a database that has no users yet.
 --
--- So, before pointing a project holding real data at this schema:
---   1. Disable or gate signups in Studio (Authentication -> Providers/Settings:
---      turn off "Allow new users to sign up", or require email confirmation and
---      an invite flow), and create the operator account yourself -- see
---      `db/setup/create_user.sh`.
---   2. Treat the Database URL and Service Role key as server-side-only secrets.
---      The browser must only ever see the Anon key.
---   3. A multi-user or multi-tenant phase MUST replace these policies with ones
---      scoped against a membership table, and must scope `_brand_id` inside
---      `public.import_people` (0007_import_company_by_name.sql) the same way.
---
--- The README's "Security and the trust boundary" section says the same thing in
--- prose.
+-- Do not copy the policy shape below into anything real. Copy 0009's.
 -- ============================================================================
 
 DO $$

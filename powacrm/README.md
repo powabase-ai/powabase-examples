@@ -107,12 +107,13 @@ scripts and must never reach `app/` or the browser.
 ### 2. Build the schema
 
 Migrations are plain SQL and **must be applied in numeric order, `0001` →
-`0008`** — later ones depend on tables, policies and functions the earlier ones
-create, and `0007`/`0008` supersede functions first defined in `0006`/`0005`.
+`0009`** — later ones depend on tables, policies and functions the earlier ones
+create, `0007`/`0008` supersede functions first defined in `0006`/`0005`, and `0009`
+replaces every policy from `0004` with per-owner ones.
 One command does all of them:
 
 ```bash
-./db/migrate.sh          # applies db/migrations/0001…0008 in order
+./db/migrate.sh          # applies db/migrations/0001…0009 in order
 ```
 
 Or apply them one at a time if you prefer to read as you go:
@@ -157,41 +158,53 @@ columns are both optional), and clicking a card opens the lead record.
 ### 5. Verify
 
 ```bash
-./db/tests/run_all.sh    # schema, RLS, and RPC assertions — ends "ALL DB TESTS OK"
+./db/tests/run_all.sh    # schema, RLS, per-owner isolation, and RPC assertions
+                         # — ends "ALL DB TESTS OK"
 cd app && npm test       # vitest unit + jsdom component tests
 cd app && npm run build   # type-check + production build
 ```
 
 ## Security and the trust boundary
 
-**Phase 1's RLS policies are single-tenant by design. Disable or gate signups
-in Studio before pointing this schema at a project that holds real data.**
+**Public signup is supported. What an account gets you is your own data, and
+nothing else.**
 
-`db/migrations/0004_rls.sql` grants the `authenticated` role full
-SELECT/INSERT/UPDATE on all eight tables, with no per-user or per-brand
-scoping — the only thing it checks is that you are logged in at all. The SPA
-ships the project's Anon key in its browser bundle (that is what an Anon key is
-for), so anyone who can load the app can also reach the project's GoTrue signup
-endpoint. If the project is left with **signups enabled and mailer autoconfirm
-on** — the Powabase default — a stranger can self-register, be confirmed
-instantly, land in `authenticated`, and read and write every row.
+Every table hangs off a brand, and `brands.owner_id` names the single
+`auth.users` row that owns it. `db/migrations/0009_access_control.sql` scopes
+every policy to that: `brands` on `owner_id = auth.uid()`, and everything else
+through `owns_brand(brand_id)`. A stranger who signs up gets a starter brand of
+their own and sees zero rows of yours — not your leads, not your companies, not
+your timelines, and not your user id.
 
-So, before real data goes in:
+The two `SECURITY DEFINER` functions matter here more than the policies do.
+`public.import_people` and `public.soft_delete_person` run as the database
+superuser and **bypass RLS entirely**, so fixing the policies alone would have
+left them wide open — any signed-up user could have passed someone else's
+`_brand_id` and written into their data. Both now check ownership themselves
+before touching a row. If you add a `SECURITY DEFINER` function to this schema,
+it needs its own authorization check; RLS will not do it for you.
 
-1. **Close signups.** In Studio → Authentication, turn off "allow new users to
-   sign up" (or require email confirmation plus an invite step) and create the
-   operator account yourself with `db/setup/create_user.sh`, which uses the
-   Service Role key. The sibling [`rankforge/`](../rankforge) app shows the
-   invite-code variant of the same idea.
-2. **Keep the Database URL and Service Role key server-side.** Only the Anon
-   key may reach the browser. Powabase runs agent DB tools as the DB superuser
-   with **RLS bypassed**, so anything agent-driven must stay out of end-user
-   reach.
-3. **Scope before going multi-user.** A multi-tenant phase must replace those
-   policies with ones keyed on a membership table, and must scope the
-   `_brand_id` argument of `public.import_people`
-   (`db/migrations/0007_import_company_by_name.sql`) the same way — today it is
-   taken from the caller as-is.
+What this is **not**: teams, sharing, or roles. There is exactly one owner per
+brand and no way to grant a second person access to it. A collaborative phase
+needs a real membership table, which would replace `owns_brand`, not sit beside
+it.
+
+Still worth doing, whatever your setup:
+
+1. **Keep the Database URL and Service Role key server-side.** Only the Anon key
+   may reach the browser — that is what it is for. Both of the other two bypass
+   RLS completely.
+2. **Turn off signups if you don't want them.** Isolation means a stranger's
+   account is harmless, not that you want the accounts. Studio →
+   Authentication → "Allow new users to sign up". There is no API for this; it
+   is a Studio-only setting.
+3. **Remember Powabase agents bypass RLS.** Agent database tools run on the
+   superuser connection, so anything agent-driven must be driven from a trusted
+   backend, never from an end-user's token.
+
+Verify any of the above yourself with `./db/tests/test_0009_access_control.sh`,
+which signs up a second account over the public endpoint and asserts it can
+neither read, write, import into, nor delete from the first account's data.
 
 ## Status
 

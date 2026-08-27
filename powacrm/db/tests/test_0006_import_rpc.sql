@@ -1,7 +1,10 @@
 DO $$
 DECLARE b uuid; imp uuid; r jsonb; pid uuid;
 BEGIN
-  INSERT INTO brands (name) VALUES ('_test_imp') RETURNING id INTO b;
+  -- brands.owner_id is NOT NULL since 0009_access_control.sql, and this script
+  -- runs as a superuser with no auth.uid() to default from, so name an owner
+  -- explicitly. Any account will do -- these fixtures are torn down below.
+  INSERT INTO brands (name, owner_id) VALUES ('_test_imp', (SELECT id FROM auth.users ORDER BY created_at, id LIMIT 1)) RETURNING id INTO b;
   INSERT INTO import_batches (brand_id, filename, row_count) VALUES (b, 't.csv', 3) RETURNING id INTO imp;
 
   r := import_people(b, imp, '[

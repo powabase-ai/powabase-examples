@@ -1,7 +1,10 @@
 DO $$
 DECLARE b uuid; p uuid; n int;
 BEGIN
-  INSERT INTO brands (name) VALUES ('_test_ev') RETURNING id INTO b;
+  -- brands.owner_id is NOT NULL since 0009_access_control.sql, and this script
+  -- runs as a superuser with no auth.uid() to default from, so name an owner
+  -- explicitly. Any account will do -- these fixtures are torn down below.
+  INSERT INTO brands (name, owner_id) VALUES ('_test_ev', (SELECT id FROM auth.users ORDER BY created_at, id LIMIT 1)) RETURNING id INTO b;
   INSERT INTO people (brand_id, first_name) VALUES (b, 'Eve') RETURNING id INTO p;
 
   INSERT INTO events (brand_id, person_id, event_type, actor_source, actor_name, properties)
