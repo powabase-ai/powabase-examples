@@ -140,4 +140,109 @@ END $$;
 REVOKE ALL ON FUNCTION public.request_research(uuid[]) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.request_research(uuid[]) TO authenticated;
 
+-- ---------------------------------------------------------------------------
+-- PART 2: the worker side. None of these are granted to `authenticated`: they
+-- are called by the scheduled workflow with the service role key. A user token
+-- must never be able to mark its own job done with a payload of its choosing.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION public.claim_research_jobs(_limit int)
+RETURNS SETOF research_jobs LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  -- SKIP LOCKED is what makes overlapping ticks safe: two workers cannot claim
+  -- the same row, and neither blocks on the other.
+  UPDATE research_jobs SET status = 'running', started_at = now(), attempts = attempts + 1
+   WHERE id IN (SELECT id FROM research_jobs WHERE status = 'queued'
+                 ORDER BY created_at LIMIT greatest(_limit, 0) FOR UPDATE SKIP LOCKED)
+  RETURNING *;
+$$;
+REVOKE ALL ON FUNCTION public.claim_research_jobs(int) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.complete_research_job(_job_id uuid, _payload jsonb)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_brand uuid; v_company uuid; f jsonb; n int := 0; v_person uuid; v_score int;
+BEGIN
+  SELECT brand_id, company_id INTO v_brand, v_company FROM research_jobs WHERE id = _job_id;
+  IF v_brand IS NULL THEN RAISE EXCEPTION 'no such research job'; END IF;
+
+  -- Validate before writing anything. The payload came from an agent that just
+  -- read an attacker-controlled web page, so it is untrusted input: a malformed
+  -- or injected response must fail the job, not half-write a record.
+  --
+  -- Fixed in review: `jsonb_typeof(_payload->'fit') <> 'array'` is NULL (not
+  -- TRUE) when the 'fit' key is absent, because `->` returns SQL NULL for a
+  -- missing key and `jsonb_typeof(NULL)` is itself NULL -- so `NULL <> 'array'`
+  -- is NULL, the OR chain evaluates to NULL, and `IF NULL THEN` never fires.
+  -- A payload with no fit array at all would have sailed through un-rejected.
+  -- `IS DISTINCT FROM` is NULL-safe and never itself returns NULL.
+  IF jsonb_typeof(_payload) IS DISTINCT FROM 'object'
+     OR nullif(trim(coalesce(_payload->>'summary','')), '') IS NULL
+     OR jsonb_typeof(_payload->'fit') IS DISTINCT FROM 'array'
+    THEN RAISE EXCEPTION 'research payload is malformed: need an object with a non-empty summary and a fit array';
+  END IF;
+  IF _payload ? 'tech_stack' AND jsonb_typeof(_payload->'tech_stack') IS DISTINCT FROM 'array'
+    THEN RAISE EXCEPTION 'research payload tech_stack must be an array'; END IF;
+
+  UPDATE companies SET
+    research = _payload->>'summary',
+    research_data = _payload,
+    tech_stack = coalesce(_payload->'tech_stack', tech_stack),
+    researched_at = now()
+  WHERE id = v_company;
+
+  FOR f IN SELECT * FROM jsonb_array_elements(_payload->'fit') LOOP
+    v_person := nullif(f->>'person_id','')::uuid;
+    CONTINUE WHEN v_person IS NULL;
+    -- Clamp rather than reject: people.fit_score has a 0-100 CHECK, and one
+    -- out-of-range number from the model should not throw away a good report.
+    v_score := least(100, greatest(0, coalesce((f->>'score')::int, 0)));
+
+    UPDATE people SET
+      fit_score = v_score,
+      stage = CASE WHEN stage IN ('sourced','enriched') THEN 'researched' ELSE stage END
+    WHERE id = v_person AND brand_id = v_brand;   -- never cross a brand boundary
+
+    IF FOUND THEN
+      n := n + 1;
+      INSERT INTO events (brand_id, person_id, company_id, event_type, actor_source, actor_name, properties)
+      VALUES (v_brand, v_person, v_company, 'researched', 'AGENT', 'Researcher',
+              jsonb_build_object('score', v_score, 'rationale', f->>'rationale',
+                                 'injection_observed', coalesce((_payload->>'injection_observed')::boolean, false)));
+    END IF;
+  END LOOP;
+
+  UPDATE research_jobs SET status='done', finished_at=now(), error=NULL WHERE id=_job_id;
+  RETURN jsonb_build_object('ok', true, 'people_scored', n);
+END $$;
+REVOKE ALL ON FUNCTION public.complete_research_job(uuid, jsonb) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.fail_research_job(_job_id uuid, _error text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_attempts int; v_status text;
+BEGIN
+  SELECT attempts INTO v_attempts FROM research_jobs WHERE id = _job_id;
+  IF v_attempts IS NULL THEN RAISE EXCEPTION 'no such research job'; END IF;
+  -- Three strikes. Retrying forever would spend credits on a site that is never
+  -- going to load.
+  v_status := CASE WHEN v_attempts >= 3 THEN 'failed' ELSE 'queued' END;
+  UPDATE research_jobs SET status = v_status, error = _error,
+         finished_at = CASE WHEN v_status = 'failed' THEN now() ELSE NULL END
+   WHERE id = _job_id;
+  RETURN jsonb_build_object('ok', true, 'status', v_status, 'attempts', v_attempts);
+END $$;
+REVOKE ALL ON FUNCTION public.fail_research_job(uuid, text) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.requeue_stalled_research_jobs()
+RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE n int;
+BEGIN
+  -- A worker can die mid-run. Without this the job sits in `running` forever and
+  -- the partial unique index blocks the company from ever being researched again.
+  UPDATE research_jobs SET status='queued', started_at=NULL
+   WHERE status='running' AND started_at < now() - interval '15 minutes';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END $$;
+REVOKE ALL ON FUNCTION public.requeue_stalled_research_jobs() FROM PUBLIC, anon, authenticated;
+
 COMMIT;

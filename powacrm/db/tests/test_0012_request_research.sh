@@ -196,4 +196,19 @@ case "$(status "$R")" in 2*) fail "anon can call request_research" ;; esac
 printf '%s' "$(body "$R")" | grep -qiE 'permission denied|not authorized|insufficient' \
   || fail "anon was refused but not on privilege grounds: $(body "$R")"
 
+# 8. the worker RPCs must be unreachable with a user token: a client that could
+# call complete_research_job would be able to write any payload it liked.
+for fn in claim_research_jobs complete_research_job fail_research_job requeue_stalled_research_jobs; do
+  case "$fn" in
+    claim_research_jobs)   payload='{"_limit":1}' ;;
+    complete_research_job) payload="{\"_job_id\":\"$A_CO\",\"_payload\":{}}" ;;
+    fail_research_job)     payload="{\"_job_id\":\"$A_CO\",\"_error\":\"x\"}" ;;
+    *)                     payload='{}' ;;
+  esac
+  R=$(req -X POST "$BASE/rest/v1/rpc/$fn" "${A[@]}" -H "Content-Type: application/json" -d "$payload")
+  case "$(status "$R")" in 2*) fail "an authenticated user can call $fn" ;; esac
+  printf '%s' "$(body "$R")" | grep -qiE 'permission denied|not authorized|insufficient|does not exist' \
+    || fail "$fn refused a user token, but not on privilege grounds: $(body "$R")"
+done
+
 echo "test_0012 OK"
