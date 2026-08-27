@@ -33,15 +33,28 @@ export function SettingsPage() {
     onSettled: () => qc.invalidateQueries({ queryKey: ['brands'] }),
   });
 
+  // A blank or negative cap used to be silently discarded -- the mutation
+  // fell back to the brand's prior value while every other field on the form
+  // saved, with nothing telling the user their edit to THIS field didn't
+  // take. Validate up front instead: compute whether the cap is usable, show
+  // why when it isn't, and refuse to submit at all rather than quietly drop
+  // just that one field.
+  const parsedCap = Number.parseInt(dailyCap, 10);
+  const capError = dailyCap.trim() === ''
+    ? 'Required.'
+    : !Number.isFinite(parsedCap) || parsedCap < 0
+      ? 'Must be a whole number, 0 or greater.'
+      : null;
+
   function submit(e: FormEvent) {
     e.preventDefault();
-    const cap = Number.parseInt(dailyCap, 10);
+    if (capError) return;
     save.mutate({
       name: name.trim() || brand.name,
       product_description: productDescription.trim() || null,
       voice_notes: voiceNotes.trim() || null,
       icp_notes: icpNotes.trim() || null,
-      research_daily_cap: Number.isFinite(cap) && cap >= 0 ? cap : brand.research_daily_cap,
+      research_daily_cap: parsedCap,
     });
   }
 
@@ -105,11 +118,18 @@ export function SettingsPage() {
             Maximum research jobs this brand may enqueue per day. Every run spends credits.
           </p>
           <input id="settings-cap" type="number" min={0} step={1} style={{ ...fieldStyle, maxWidth: 120 }}
-            value={dailyCap} onChange={e => setDailyCap(e.target.value)} />
+            value={dailyCap} onChange={e => setDailyCap(e.target.value)}
+            aria-invalid={capError ? true : undefined} aria-describedby={capError ? 'settings-cap-error' : undefined} />
+          {capError && (
+            <p id="settings-cap-error" style={{ fontSize: 'var(--font-xs)', color: 'var(--tag-red-fg)',
+              marginTop: 'var(--space-1)', marginBottom: 0 }}>
+              {capError}
+            </p>
+          )}
         </div>
 
         <div>
-          <button type="submit" disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save'}</button>
+          <button type="submit" disabled={save.isPending || !!capError}>{save.isPending ? 'Saving…' : 'Save'}</button>
         </div>
       </form>
     </div>
