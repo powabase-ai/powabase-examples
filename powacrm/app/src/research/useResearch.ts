@@ -91,6 +91,74 @@ export function useRequestResearch(brandId: string) {
   });
 }
 
+export type ResearchStatus = ResearchJob['status'];
+
+// `queued` and `running` are the two statuses a job can leave on its own. In
+// practice a watcher only ever sees `queued`: one tick is one transaction
+// (db/migrations/0013_inline_worker.sql), so the claim that sets `running` is
+// invisible outside that transaction and the job appears to go straight from
+// `queued` to `done`. `running` is kept here anyway because it is a real
+// column value that a longer-lived worker would expose, and because treating
+// it as terminal would stop the poll on a job that is still in flight -- but
+// nothing in the UI may assume it will ever be SEEN.
+export function isResearchInFlight(status: ResearchStatus | null | undefined): boolean {
+  return status === 'queued' || status === 'running';
+}
+
+export type ResearchJobSnapshot = { id: string; status: ResearchStatus } | null;
+
+// True exactly when the job we were watching has just finished.
+//
+// This is the trigger for refreshing everything the run wrote -- the company's
+// research, the lead's fit score, the timeline event, the board -- none of
+// which live in the research_jobs row this hook polls. Without it the run
+// completed, the "Queued…" line vanished, and the entire result stayed
+// invisible until the user reloaded the page by hand.
+//
+// The three false cases are all real:
+//   * `prev` null -- first load of a page whose job finished days ago is not a
+//     completion; invalidating there would refetch on every mount forever.
+//   * a different job id -- a second run for the same company replacing a
+//     finished first one is a new job appearing, not the old one finishing.
+//   * `next` null -- a job row that disappears (deleted, or the poll's first
+//     answer) tells us nothing about how it ended.
+export function researchJobJustFinished(prev: ResearchJobSnapshot, next: ResearchJobSnapshot): boolean {
+  if (prev === null || next === null) return false;
+  if (prev.id !== next.id) return false;
+  return isResearchInFlight(prev.status) && !isResearchInFlight(next.status);
+}
+
+export type ResearchNote = { tone: 'muted' | 'error' | 'ok'; text: string; retry: boolean } | null;
+
+// The one line of status shown under the Research button. Every status the
+// column can hold gets a rendering: before this, `done` and `skipped` rendered
+// NOTHING, so a finished run read on screen as the request having quietly
+// evaporated.
+export function researchNote(job: Pick<ResearchJob, 'status' | 'error'> | null | undefined): ResearchNote {
+  switch (job?.status) {
+    // Deliberately one branch, not two. `running` is unreachable in the
+    // current one-tick-one-transaction worker, and a branch that can never
+    // render is a lie about how the system behaves -- but the wording has to
+    // stay true if a future worker does commit `running`, so it says what is
+    // happening rather than which of the two statuses produced it.
+    case 'queued':
+    case 'running':
+      return { tone: 'muted', text: 'Researching… this takes about a minute.', retry: false };
+    case 'done':
+      // Names where the result went. The bug this replaced was precisely that
+      // a finished run left no trace on this side of the page.
+      return { tone: 'ok', text: 'Research complete — see the Research tab.', retry: false };
+    case 'failed':
+      // The job's own error is the most useful thing on the screen when a run
+      // fails -- it names the site or the reason, not just "failed".
+      return { tone: 'error', text: `Failed: ${job.error ?? 'unknown error'}`, retry: true };
+    case 'skipped':
+      return { tone: 'muted', text: job.error ?? 'Skipped.', retry: true };
+    default:
+      return null;
+  }
+}
+
 // Polls the newest research_jobs row for a company. `refetchInterval` is
 // conditional on the fetched status, not just "while a job exists": once a job
 // lands in `done`/`failed`/`skipped` the interval must stop, or this keeps
@@ -106,9 +174,6 @@ export function useResearchJob(companyId: string | null) {
       if (error) throw error;
       return data as ResearchJob | null;
     },
-    refetchInterval: query => {
-      const status = query.state.data?.status;
-      return status === 'queued' || status === 'running' ? 5000 : false;
-    },
+    refetchInterval: query => (isResearchInFlight(query.state.data?.status) ? 5000 : false),
   });
 }

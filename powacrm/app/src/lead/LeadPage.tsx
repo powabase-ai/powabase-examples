@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/powabase';
@@ -9,7 +9,10 @@ import { leadName, useStages, type Lead } from '@/board/useLeads';
 import { InlineField } from './InlineField';
 import { Timeline } from './Timeline';
 import type { TimelineEvent } from './groupEventsByMonth';
-import { summarizeVerdicts, useRequestResearch, useResearchJob } from '@/research/useResearch';
+import {
+  isResearchInFlight, researchJobJustFinished, researchNote, summarizeVerdicts,
+  useRequestResearch, useResearchJob, type ResearchJobSnapshot,
+} from '@/research/useResearch';
 import { ResearchPanel, type ResearchData } from '@/research/ResearchPanel';
 
 type FullLead = Lead & {
@@ -82,6 +85,38 @@ export function LeadPage() {
   const { data: job } = jobQuery;
   const requestResearch = useRequestResearch(brand.id);
   const [researchSummary, setResearchSummary] = useState<string | null>(null);
+
+  // WHEN A RUN FINISHES, REFRESH WHAT IT WROTE.
+  //
+  // The worker's output does not land in research_jobs -- it lands in
+  // `companies.research_data` / `research`/`tech_stack`/`researched_at`, in
+  // `people.fit_score`, and in a `researched` timeline event. jobQuery is the
+  // only thing polling, and it stops the moment the job leaves `queued`, so
+  // without this the completion was the LAST thing the page ever heard: the
+  // "Researching…" line disappeared and the Research tab went on saying "No
+  // research yet", the fit score went on showing its old value, and the
+  // timeline went on missing the event, until the user reloaded by hand. The
+  // entire result of the feature was invisible.
+  //
+  // Keyed off a ref of the previous poll rather than a query `onSuccess` (v5
+  // removed those) or a bare `job?.status === 'done'` (which would re-fire on
+  // every subsequent render and on every visit to an already-researched lead).
+  const prevJob = useRef<ResearchJobSnapshot>(null);
+  useEffect(() => {
+    const next: ResearchJobSnapshot = job ? { id: job.id, status: job.status } : null;
+    if (researchJobJustFinished(prevJob.current, next)) {
+      qc.invalidateQueries({ queryKey: ['lead', id] });    // summary, tech stack, hooks, fit score
+      qc.invalidateQueries({ queryKey: ['events', id] });  // the `researched` timeline event
+      qc.invalidateQueries({ queryKey: ['leads', brand.id] }); // the board's fit scores
+      // The batch summary ("1 queued") described the REQUEST. Once the run has
+      // landed, leaving it under "Research complete." reads as a second job
+      // still waiting.
+      setResearchSummary(null);
+    }
+    prevJob.current = next;
+  }, [job, id, brand.id, qc]);
+
+  const jobNote = researchNote(job);
   const runResearch = () => {
     if (!id) return;
     setResearchSummary(null);
@@ -130,23 +165,22 @@ export function LeadPage() {
               doesn't already say. */}
           {lead.company_id && (
             <button onClick={runResearch}
-              disabled={requestResearch.isPending || job?.status === 'queued' || job?.status === 'running'}>
+              disabled={requestResearch.isPending || isResearchInFlight(job?.status)}>
               {requestResearch.isPending ? 'Requesting…' : 'Research'}
             </button>
           )}
         </div>
-        {job?.status === 'queued' && (
-          <p style={{ fontSize: 'var(--font-xs)', color: 'var(--fg-tertiary)', marginTop: 'var(--space-1)' }}>Queued…</p>
-        )}
-        {job?.status === 'running' && (
-          <p style={{ fontSize: 'var(--font-xs)', color: 'var(--fg-tertiary)', marginTop: 'var(--space-1)' }}>Researching…</p>
-        )}
-        {job?.status === 'failed' && (
-          <div style={{ fontSize: 'var(--font-xs)', color: 'var(--tag-red-fg)', marginTop: 'var(--space-1)' }}>
-            {/* The job's own error is the most useful thing on the screen when
-                a run fails -- it names the site or the reason, not just "failed". */}
-            Failed: {job.error ?? 'unknown error'}{' '}
-            <button onClick={runResearch} disabled={requestResearch.isPending}>Retry</button>
+        {/* One line for every terminal state, not just the failures. `done`
+            and `skipped` used to render nothing at all, so a completed run
+            looked identical to a request that had silently evaporated. */}
+        {jobNote && (
+          <div style={{ fontSize: 'var(--font-xs)', marginTop: 'var(--space-1)',
+            color: jobNote.tone === 'error' ? 'var(--tag-red-fg)'
+              : jobNote.tone === 'ok' ? 'var(--tag-green-fg)' : 'var(--fg-tertiary)' }}>
+            {jobNote.text}{jobNote.retry && ' '}
+            {jobNote.retry && (
+              <button onClick={runResearch} disabled={requestResearch.isPending}>Retry</button>
+            )}
           </div>
         )}
         {researchSummary && !requestResearch.isPending && (
