@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { DndContext, useDraggable, useDroppable, type DragEndEvent } from '@dnd-kit/core';
+import { DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { useNavigate } from 'react-router-dom';
 import { useBrand } from '@/shell/BrandContext';
 import { positionBetween } from '@/lib/position';
@@ -40,10 +40,30 @@ function Column({ stage, leads, dragGuard }: { stage: Stage; leads: Lead[]; drag
 
 export function BoardPage() {
   const { brand } = useBrand();
-  const { data: stages } = useStages();
-  const { data: leads } = useLeads(brand.id);
+  const stagesQuery = useStages();
+  const leadsQuery = useLeads(brand.id);
   const move = useMoveLead(brand.id);
   const dragGuard = useRef(createDragGuard()).current;
+  // dnd-kit's default sensors are a PointerSensor with NO activationConstraint,
+  // and AbstractPointerSensor starts the drag from its own constructor in that
+  // case. A plain click therefore fires a phantom onDragStart/onDragEnd AND
+  // installs a document capture-phase `click` listener that stopPropagation()s
+  // the click before React sees it -- which made every card unclickable and the
+  // whole /leads/:id route unreachable. An activation distance means the drag
+  // only begins once the pointer has actually moved.
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  const { data: stages, error: stagesError } = stagesQuery;
+  const { data: leads, error: leadsError } = leadsQuery;
+  const error = stagesError ?? leadsError;
+  if (error) {
+    return (
+      <div>
+        <h1 style={{ fontSize: 'var(--font-lg)', marginTop: 0 }}>Pipeline</h1>
+        <p style={{ color: 'var(--tag-red-fg)' }}>Couldn't load the pipeline: {error.message}</p>
+        <button onClick={() => { stagesQuery.refetch(); leadsQuery.refetch(); }}>Retry</button>
+      </div>
+    );
+  }
   if (!stages || !leads) return <p>Loading…</p>;
   const grouped = groupByStage(leads, stages.map(s => s.value));
 
@@ -58,7 +78,7 @@ export function BoardPage() {
   }
 
   return (
-    <DndContext onDragStart={() => dragGuard.onDragStart()} onDragEnd={onDragEnd}>
+    <DndContext sensors={sensors} onDragStart={() => dragGuard.onDragStart()} onDragEnd={onDragEnd}>
       <h1 style={{ fontSize: 'var(--font-lg)', marginTop: 0 }}>Pipeline</h1>
       <div style={{ display: 'flex', gap: 'var(--space-4)', overflowX: 'auto' }}>
         {stages.map(s => <Column key={s.value} stage={s} leads={grouped[s.value]} dragGuard={dragGuard} />)}
