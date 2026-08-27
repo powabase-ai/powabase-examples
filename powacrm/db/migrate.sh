@@ -6,7 +6,7 @@
 # migrations 0002-0004, which will fail on a database that already has them.
 # So this is a build-from-scratch command for a fresh project, not an
 # incremental "migrate to latest" -- to apply a single later migration to an
-# existing database, use ./apply.sh db/migrations/<file>.sql.
+# existing database, use ./db/apply.sh db/migrations/<file>.sql.
 #
 # Usage: PB_DB_URL=<Database URL> ./db/migrate.sh
 set -euo pipefail
@@ -26,4 +26,4 @@ for f in "${files[@]}"; do
 done
 
 echo "ALL MIGRATIONS APPLIED (${#files[@]} files)"
-echo "Next: ./apply.sh seed/seed_gpt_trainer.sql, then ./setup/create_user.sh"
+echo "Next: ./db/apply.sh db/seed/seed_gpt_trainer.sql, then ./db/setup/create_user.sh"
