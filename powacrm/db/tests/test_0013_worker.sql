@@ -271,6 +271,53 @@ END $$;
 RESET statement_timeout;
 
 -- ---------------------------------------------------------------------------
+-- 3b. A tick's diagnostics survive it, and an ungrounded run is a failure.
+--
+-- pg_cron discards the value a `SELECT run_research_tick()` returns, so before
+-- research_jobs.diagnostics existed, `tools_used: []` -- an agent that completed
+-- having called NO tools, i.e. the ungrounded run this whole migration exists to
+-- prevent -- looked exactly like a real research run afterwards. So did
+-- "truncated to the first 25 of 60 people", while the other 35 leads kept their
+-- stage and could not be re-researched for thirty days.
+--
+-- The ungrounded-run refusal itself needs a real agent call to drive, so it is
+-- asserted on the source, the same way the query_canceled handler above is: it
+-- is a guard that reads like a nice-to-have and whose removal has no symptom
+-- other than fabricated research being stored as fact.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE b uuid; c uuid; j uuid; src text; d jsonb;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_schema='public' AND table_name='research_jobs' AND column_name='diagnostics') THEN
+    RAISE EXCEPTION 'research_jobs has no diagnostics column -- every tick result would be returned to pg_cron and discarded';
+  END IF;
+
+  src := pg_get_functiondef('public.run_research_tick()'::regprocedure);
+  IF src NOT LIKE '%jsonb_array_length(v_tools) = 0%' THEN
+    RAISE EXCEPTION 'run_research_tick() no longer refuses a run that called no tools -- an ungrounded report would be written as research and would lock the company for 30 days';
+  END IF;
+  IF src NOT LIKE '%record_research_tick(v_job.id%' THEN
+    RAISE EXCEPTION 'run_research_tick() no longer records its result on the job row';
+  END IF;
+
+  -- And the recorder actually writes. Rolled back with the rest of the file.
+  SELECT id INTO b FROM brands WHERE name = 'gpt-trainer';
+  INSERT INTO companies (brand_id, name, domain) VALUES (b, '_t13_diag_co', 't13diag.example') RETURNING id INTO c;
+  INSERT INTO research_jobs (brand_id, company_id) VALUES (b, c) RETURNING id INTO j;
+  PERFORM record_research_tick(j, jsonb_build_object('ok', false, 'tools_used', '[]'::jsonb, 'note', 'probe'));
+  SELECT diagnostics INTO d FROM research_jobs WHERE id = j;
+  IF d IS NULL OR d->>'note' <> 'probe' THEN
+    RAISE EXCEPTION 'record_research_tick did not persist the tick result (got %)', coalesce(d::text, 'null');
+  END IF;
+
+  IF has_function_privilege('authenticated', 'public.record_research_tick(uuid,jsonb)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.record_research_tick(uuid,jsonb)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'record_research_tick is callable by a client role -- it writes an arbitrary jsonb onto any job row';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
 -- 4. Posture. The worker holds the Service Role key and bypasses RLS, so the
 --    only thing standing between a signed-in user and it is these grants.
 --    db/apply.sh connects as a superuser, so this asserts the catalogue rather

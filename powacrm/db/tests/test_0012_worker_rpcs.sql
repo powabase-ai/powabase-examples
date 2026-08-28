@@ -128,6 +128,18 @@ BEGIN
   SELECT count(*) INTO n FROM events WHERE person_id=p_other AND event_type='researched';
   IF n <> 0 THEN RAISE EXCEPTION 'a cross-brand fit entry produced an event for a person outside the job''s brand'; END IF;
   IF (SELECT status FROM research_jobs WHERE id=j2) <> 'done' THEN RAISE EXCEPTION 'edge-case job not marked done'; END IF;
+  -- injection_observed: 'maybe' is unparseable as a boolean, and the panel gates
+  -- its injection warning on this value. Fixed in review -- it used to fall back
+  -- to FALSE, so a model that detected an injection and DESCRIBED it in words
+  -- got the warning suppressed in exactly the case the flag exists for. Anything
+  -- that is not an explicit false now reads as true, and the raw value is kept
+  -- beside it so a human can see what the model actually wrote.
+  SELECT count(*) INTO n FROM events
+   WHERE person_id = p3 AND event_type = 'researched'
+     AND (properties->>'injection_observed')::boolean IS TRUE
+     AND properties->'injection_observed_raw' = '"maybe"'::jsonb;
+  IF n <> 1 THEN RAISE EXCEPTION 'a non-boolean injection_observed did not fail toward the warning with the raw value kept: %',
+    (SELECT properties FROM events WHERE person_id=p3 AND event_type='researched' LIMIT 1); END IF;
 
   -- hooks and sources must be arrays. Blocker B3's server half: they were stored
   -- verbatim, and a string `hooks` threw `hooks.map is not a function` in the SPA
@@ -150,6 +162,44 @@ BEGIN
     IF SQLSTATE = 'P0001' AND SQLERRM = 'a string `sources` was accepted' THEN RAISE; END IF;
   END;
 
+  -- A RUN THAT SCORED NOBODY IS A FAILED RUN, not a silent success that locks
+  -- the company out of research for thirty days. Every person_id below is a
+  -- fresh uuid that matches nothing, which is what a hallucinating agent
+  -- produces. Before the fix this returned ok:true with people_scored 0, marked
+  -- the job done, and had already stamped researched_at -- so request_research
+  -- answered `skipped / researched within the last 30 days` from then on and the
+  -- paid run could never be retried.
+  UPDATE companies SET researched_at = NULL WHERE id = c;
+  BEGIN
+    PERFORM complete_research_job(j2, jsonb_build_object(
+      'summary', 'Plausible write-up.',
+      'fit', jsonb_build_array(
+        jsonb_build_object('person_id', gen_random_uuid(), 'score', 90, 'rationale', 'invented'),
+        jsonb_build_object('person_id', gen_random_uuid(), 'score', 70, 'rationale', 'invented'))));
+    RAISE EXCEPTION 'a run that scored nobody was accepted as done';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLSTATE = 'P0001' AND SQLERRM = 'a run that scored nobody was accepted as done' THEN RAISE; END IF;
+  END;
+  -- The subtransaction rollback above covers the writes, so what is worth
+  -- asserting here is the state a caller would actually see afterwards: the job
+  -- is still `running` (the worker will hand it to fail_research_job) and the
+  -- freshness lock was never armed.
+  IF (SELECT status FROM research_jobs WHERE id=j2) <> 'running'
+    THEN RAISE EXCEPTION 'the zero-scored job was moved out of running'; END IF;
+  IF (SELECT researched_at FROM companies WHERE id=c) IS NOT NULL
+    THEN RAISE EXCEPTION 'researched_at was stamped by a run that scored nobody -- the company is now locked for 30 days'; END IF;
+
+  -- An EMPTY fit array is a different case and must still succeed: the company
+  -- write-up is worth keeping. It just does not arm the 30-day lock, so the user
+  -- can ask again rather than waiting a month for a run that scored no one.
+  r := complete_research_job(j2, jsonb_build_object(
+    'summary', 'Nobody at this company fits.', 'fit', '[]'::jsonb));
+  IF (r->>'ok')::boolean IS NOT TRUE THEN RAISE EXCEPTION 'an empty fit array was rejected: %', r; END IF;
+  IF (r->>'people_scored')::int <> 0 THEN RAISE EXCEPTION 'expected 0 people scored, got %', r; END IF;
+  IF (SELECT research FROM companies WHERE id=c) <> 'Nobody at this company fits.'
+    THEN RAISE EXCEPTION 'the empty-fit write-up was not stored'; END IF;
+  IF (SELECT researched_at FROM companies WHERE id=c) IS NOT NULL
+    THEN RAISE EXCEPTION 'researched_at was stamped although nobody was scored'; END IF;
 
   -- fail path: under 3 attempts it goes back to the queue, at 3 it stops
   INSERT INTO research_jobs (brand_id, company_id) VALUES (b,c) RETURNING id INTO j;

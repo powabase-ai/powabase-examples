@@ -51,9 +51,21 @@ if [ "$code" = "404" ]; then
     echo "user created via signup fallback (HTTP $code)"
     exit 0
   fi
-  if [ "$code" = "422" ] || [ "$code" = "409" ] || printf '%s' "$resp" | grep -qi "already registered\|already exists"; then
+  # Same body match as the admin branch above, and for the same reason. This
+  # clause used to accept ANY 422 -- and, through a third `||` clause, any status
+  # at all whose body happened to contain "already exists" -- as success. A
+  # weak-password rejection therefore exited 0 having created nothing, and
+  # resurfaced later as a KeyError on 'access_token' or an unexplained RLS test
+  # failure. "Already exists" is the only 422 that means the account is there.
+  if { [ "$code" = "422" ] || [ "$code" = "409" ]; } \
+     && printf '%s' "$resp" | grep -qi "already registered\|already exists\|email_exists"; then
     echo "user already exists via signup fallback (HTTP $code) -- treating as success"
     exit 0
+  fi
+  if [ "$code" = "422" ]; then
+    echo "FAIL: signup fallback rejected the request (HTTP 422): $resp"
+    echo "      This is NOT 'already exists' -- check PB_TEST_PASSWORD meets the project's password policy."
+    exit 1
   fi
   echo "FAIL: signup fallback returned HTTP $code: $resp"
   exit 1

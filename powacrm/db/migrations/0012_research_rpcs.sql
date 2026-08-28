@@ -161,7 +161,8 @@ CREATE OR REPLACE FUNCTION public.complete_research_job(_job_id uuid, _payload j
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   v_brand uuid; v_company uuid; v_status text; f jsonb; n int := 0;
-  v_person uuid; v_score int; v_injection boolean;
+  v_person uuid; v_score int; v_injection boolean; v_injection_raw jsonb;
+  v_fit_entries int := 0;
 BEGIN
   -- FOR UPDATE holds the row lock for the rest of this call, so a concurrent
   -- complete/fail call on the SAME job (see the status guard below) can't race
@@ -215,25 +216,33 @@ BEGIN
   IF _payload ? 'sources' AND jsonb_typeof(_payload->'sources') IS DISTINCT FROM 'array'
     THEN RAISE EXCEPTION 'research payload sources must be an array, got %', jsonb_typeof(_payload->'sources'); END IF;
 
-
-  UPDATE companies SET
-    research = _payload->>'summary',
-    research_data = _payload,
-    tech_stack = coalesce(_payload->'tech_stack', tech_stack),
-    researched_at = now()
-  WHERE id = v_company;
-
   -- injection_observed is a cosmetic flag, not something worth failing a good
-  -- report over. Fixed in review: a bare `::boolean` cast here raised on any
-  -- non-boolean-shaped string (e.g. "maybe") and aborted the whole call. Fall
-  -- back to false, same treatment as the key being absent -- this payload came
-  -- from an agent that just read an attacker-controlled web page, so a
-  -- malformed value here is the expected case, not the exception.
+  -- report over, so an unparseable value is coerced rather than raised on.
+  -- Fixed twice in review. First: a bare `::boolean` cast raised on any
+  -- non-boolean-shaped string (e.g. "maybe") and aborted the whole call. Then
+  -- the coercion fell back to FALSE -- which is the wrong direction. The panel
+  -- gates its "a page this agent read attempted to instruct it" banner on this
+  -- value, and the single input most likely to be unparseable is a model that
+  -- DID detect an injection and described it in words ("detected on the pricing
+  -- page"). Falling back to false silently withheld the warning in exactly the
+  -- case it exists for. A spurious banner costs a moment of scrutiny; a missing
+  -- one costs the thing the flag is for. So: an explicit false is false, absent
+  -- is false, and ANYTHING ELSE the agent chose to put here is true.
+  --
+  -- The raw value is kept alongside the boolean, because "true" and "the model
+  -- wrote a sentence we could not parse" are different facts and the second one
+  -- is the one a human wants to read.
+  v_injection_raw := _payload->'injection_observed';
   BEGIN
-    v_injection := coalesce((_payload->>'injection_observed')::boolean, false);
+    v_injection := CASE
+      WHEN v_injection_raw IS NULL OR jsonb_typeof(v_injection_raw) = 'null' THEN false
+      ELSE coalesce((_payload->>'injection_observed')::boolean, true)
+    END;
   EXCEPTION WHEN invalid_text_representation THEN
-    v_injection := false;
+    v_injection := true;
   END;
+
+  SELECT count(*) INTO v_fit_entries FROM jsonb_array_elements(_payload->'fit');
 
   FOR f IN SELECT * FROM jsonb_array_elements(_payload->'fit') LOOP
     -- Fixed in review: a bare `::uuid` cast raised on any non-uuid string and
@@ -273,12 +282,51 @@ BEGIN
       INSERT INTO events (brand_id, person_id, company_id, event_type, actor_source, actor_name, properties)
       VALUES (v_brand, v_person, v_company, 'researched', 'AGENT', 'Researcher',
               jsonb_build_object('score', v_score, 'rationale', f->>'rationale',
-                                 'injection_observed', v_injection));
+                                 'injection_observed', v_injection)
+              -- Only when it was not already a clean boolean, so the ordinary
+              -- event stays the shape every existing reader expects.
+              || CASE WHEN v_injection_raw IS NOT NULL
+                       AND jsonb_typeof(v_injection_raw) NOT IN ('boolean','null')
+                      THEN jsonb_build_object('injection_observed_raw', v_injection_raw)
+                      ELSE '{}'::jsonb END);
     END IF;
   END LOOP;
 
+  -- Fixed in review: A RUN THAT SCORED NOBODY USED TO REPORT SUCCESS AND THEN
+  -- LOCK THE COMPANY FOR THIRTY DAYS.
+  --
+  -- Hallucinated person_ids are dropped one at a time above (correctly -- one bad
+  -- uuid should not throw away everyone else's score), `n` counts the survivors,
+  -- and this used to set status='done' unconditionally with researched_at already
+  -- stamped. The user saw a green "Research complete", a populated Research tab,
+  -- no score change anywhere, and an empty timeline -- and from then on
+  -- request_research answered `skipped / researched within the last 30 days`. A
+  -- paid agent run produced nothing and the system refused to retry it.
+  --
+  -- So: fit entries but nobody matched means the agent invented its ids, which is
+  -- a failed run. Raising hands it to fail_research_job in the worker, which
+  -- retries it (three strikes) instead of burying it. Raising also rolls back the
+  -- people/events writes and the companies UPDATE below never happens, so no
+  -- half-written record survives.
+  IF v_fit_entries > 0 AND n = 0 THEN
+    RAISE EXCEPTION 'research payload scored none of its % fit entries: not one person_id matched a person in this brand (the agent invented them)', v_fit_entries;
+  END IF;
+
+  -- researched_at is the 30-day freshness lock, so it is stamped only when the
+  -- run actually scored someone. An empty `fit` is not a failure -- the company
+  -- write-up is still worth keeping -- but it is not worth blocking a retry for
+  -- a month either, and the daily cap remains the real spend control.
+  UPDATE companies SET
+    research = _payload->>'summary',
+    research_data = _payload,
+    tech_stack = coalesce(_payload->'tech_stack', tech_stack),
+    researched_at = CASE WHEN n > 0 THEN now() ELSE researched_at END
+  WHERE id = v_company;
+
   UPDATE research_jobs SET status='done', finished_at=now(), error=NULL WHERE id=_job_id;
-  RETURN jsonb_build_object('ok', true, 'people_scored', n);
+  RETURN jsonb_build_object('ok', true, 'people_scored', n,
+    'fit_entries', v_fit_entries, 'people_dropped', v_fit_entries - n,
+    'researched_at_stamped', n > 0);
 END $$;
 REVOKE ALL ON FUNCTION public.complete_research_job(uuid, jsonb) FROM PUBLIC, anon, authenticated;
 

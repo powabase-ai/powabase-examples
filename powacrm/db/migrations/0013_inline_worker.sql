@@ -300,6 +300,48 @@ END $$;
 REVOKE ALL ON FUNCTION public.set_research_worker_config(text, text, text) FROM PUBLIC, anon, authenticated;
 
 -- ---------------------------------------------------------------------------
+-- 2b. WHERE A TICK'S DIAGNOSTICS GO.
+--
+-- run_research_tick() returns a jsonb result on every path -- people_scored,
+-- tools_used, the truncation note, the error text -- and pg_cron THROWS IT AWAY.
+-- cron.job_run_details records the command's status and, at best, the last
+-- notice; the return value of a `SELECT run_research_tick()` is not retained
+-- anywhere. Two things were invisible as a result:
+--
+--   * `tools_used: []` -- an UNGROUNDED run, which is the exact failure this
+--     whole migration exists to prevent (see the file header: the workflow
+--     `agent` block reported success while executing no tools, so every result
+--     it produced was model recall with a fabricated `sources` array). An
+--     ungrounded run and a real one were indistinguishable after the fact.
+--   * "truncated to the first 25 of 60 people" -- the other 35 leads keep their
+--     stage and cannot be re-researched for 30 days, and nobody was told.
+--
+-- The result now lands on the job row it describes. research_jobs is already
+-- readable by the brand's owner and by nobody else (0011: SELECT policy on
+-- owns_brand, no write policy at all), which is the right audience: it is their
+-- run and their credits. It carries no secret -- the vault values never enter
+-- this object, and the error strings are the same ones already stored in
+-- research_jobs.error.
+-- ---------------------------------------------------------------------------
+ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS diagnostics jsonb;
+
+COMMENT ON COLUMN research_jobs.diagnostics IS
+  'What run_research_tick() saw on the tick that touched this job: people_scored, people_total, tools_used (an empty array means the agent ran ungrounded), and any note or error. pg_cron discards the function''s return value, so this is the only durable copy.';
+
+-- Called on every exit path after the claim. A separate function rather than an
+-- UPDATE at each `RETURN` for one reason: there are eleven of those returns, and
+-- the one that gets forgotten is always the failure path nobody expected.
+CREATE OR REPLACE FUNCTION public.record_research_tick(_job_id uuid, _result jsonb)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  IF _job_id IS NOT NULL THEN
+    UPDATE research_jobs SET diagnostics = _result WHERE id = _job_id;
+  END IF;
+  RETURN _result;
+END $$;
+REVOKE ALL ON FUNCTION public.record_research_tick(uuid, jsonb) FROM PUBLIC, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
 -- 3. THE WORKER.
 --
 -- Per tick: sweep stalled jobs -> claim exactly one -> build the prompt from
@@ -393,6 +435,7 @@ BEGIN
 
   SELECT * INTO v_job FROM claim_research_jobs(1);
   IF v_job.id IS NULL THEN
+    -- Nothing was claimed, so there is no job row to record this against.
     RETURN jsonb_build_object('ok', true, 'requeued', v_requeued, 'claimed', 0, 'note', 'queue empty');
   END IF;
 
@@ -404,8 +447,8 @@ BEGIN
     IF v_url IS NULL OR v_key IS NULL OR v_agent IS NULL THEN
       PERFORM fail_research_job(v_job.id,
         'worker is not configured: run db/setup/set_worker_config.sh to store the project url, service key and agent id in vault');
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'note', 'worker not configured');
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'worker not configured'));
     END IF;
 
     -- --- context -----------------------------------------------------------
@@ -418,16 +461,16 @@ BEGIN
       FROM companies c WHERE c.id = v_job.company_id AND c.deleted_at IS NULL;
     IF NOT FOUND THEN
       PERFORM fail_research_job(v_job.id, 'company row not found, or deleted since this job was queued');
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'note', 'company missing');
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'company missing'));
     END IF;
     v_domain := nullif(trim(coalesce(v_domain, '')), '');
     IF v_domain IS NULL THEN
       -- request_research refuses these at enqueue time, so this only fires when
       -- the domain was cleared between enqueue and claim.
       PERFORM fail_research_job(v_job.id, 'company has no domain to research');
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'note', 'no domain');
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'no domain'));
     END IF;
 
     SELECT b.product_description, b.icp_notes INTO v_product, v_icp
@@ -449,8 +492,8 @@ BEGIN
 
     IF coalesce(v_people_n, 0) = 0 THEN
       PERFORM fail_research_job(v_job.id, 'no people at this company to score');
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'note', 'no people to score');
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'no people to score'));
     END IF;
     IF v_people_total > v_people_n THEN
       v_note := format('truncated to the first %s of %s people; the rest keep their stage until a later pass',
@@ -483,15 +526,15 @@ BEGIN
       -- set above. Never let the service key reach the error text.
       v_err := left(SQLERRM, 400);
       PERFORM fail_research_job(v_job.id, 'agent request failed: ' || v_err);
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'note', 'agent request failed', 'error', v_err);
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'agent request failed', 'error', v_err));
     END;
 
     IF v_http_status IS NULL OR v_http_status >= 300 THEN
       PERFORM fail_research_job(v_job.id,
         format('agent stream HTTP %s: %s', v_http_status, left(coalesce(v_content, ''), 300)));
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'http_status', v_http_status, 'note', 'agent stream returned an error status');
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'http_status', v_http_status, 'note', 'agent stream returned an error status'));
     END IF;
 
     -- --- find the terminal event in the SSE body ---------------------------
@@ -522,15 +565,15 @@ BEGIN
       -- from half a report is worse than failing it.
       PERFORM fail_research_job(v_job.id,
         'agent stream ended with no complete event' || coalesce(': ' || v_stream_error, ''));
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'note', 'no terminal event in the agent stream');
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'no terminal event in the agent stream'));
     END IF;
     IF coalesce(v_final->>'status', '') <> 'completed' OR nullif(v_final->>'error', '') IS NOT NULL THEN
       PERFORM fail_research_job(v_job.id,
         format('agent run did not complete: status=%s error=%s',
                coalesce(v_final->>'status', 'null'), left(coalesce(v_final->>'error', ''), 200)));
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'note', 'agent run did not complete');
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'agent run did not complete'));
     END IF;
 
     v_answer := coalesce(v_final->>'content', '');
@@ -540,6 +583,26 @@ BEGIN
     IF jsonb_typeof(v_final->'tool_calls') = 'array' THEN
       SELECT coalesce(jsonb_agg(t->>'tool_name'), '[]'::jsonb) INTO v_tools
         FROM jsonb_array_elements(v_final->'tool_calls') t;
+    END IF;
+
+    -- AN UNGROUNDED RUN IS A FAILED RUN, and this is the one place it can be
+    -- detected. The header of this file is the whole argument: phase 2's
+    -- workflow `agent` block executed NO TOOLS while reporting success, so every
+    -- research result it produced was model recall wearing a fabricated
+    -- `sources` array -- confident, plausible, and about a company nobody read.
+    -- That is worse than an error, because an error is visible. An empty
+    -- tool_calls list on the complete event is exactly that failure, and it must
+    -- not be allowed to reach complete_research_job: once written, a fabricated
+    -- report is indistinguishable from a real one and it locks the company for
+    -- thirty days.
+    --
+    -- Failing hands it to fail_research_job, so it retries and gives up at three
+    -- attempts rather than looping.
+    IF jsonb_array_length(v_tools) = 0 THEN
+      PERFORM fail_research_job(v_job.id,
+        'agent completed without calling any tool -- the report would be ungrounded model recall, not research. Check the agent has web_scrape and web_search attached (platform/provision.sh) and that this is the /run/stream endpoint.');
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'tools_used', v_tools, 'note', 'ungrounded run: the agent called no tools'));
     END IF;
 
     -- --- extract the JSON object -------------------------------------------
@@ -566,8 +629,8 @@ BEGIN
     IF v_payload IS NULL THEN
       PERFORM fail_research_job(v_job.id,
         'agent returned no parseable JSON object. First 300 characters of the reply: ' || left(v_answer, 300));
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'tools_used', v_tools, 'note', 'no parseable JSON in the agent reply');
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'tools_used', v_tools, 'note', 'no parseable JSON in the agent reply'));
     END IF;
 
     -- --- write it back -----------------------------------------------------
@@ -579,19 +642,19 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
       v_err := left(SQLERRM, 400);
       PERFORM fail_research_job(v_job.id, 'complete_research_job rejected the payload: ' || v_err);
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'tools_used', v_tools, 'note', 'complete rejected', 'error', v_err);
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'tools_used', v_tools, 'note', 'complete rejected', 'error', v_err));
     END;
 
     -- ok:false from complete_research_job is its status guard, not an error:
     -- the job was no longer `running`, i.e. somebody else already finished it.
     -- Failing it here would flip finished work backwards, so this is a no-op.
-    RETURN jsonb_build_object(
+    RETURN record_research_tick(v_job.id, jsonb_build_object(
       'ok', coalesce((v_res->>'ok')::boolean, false),
       'requeued', v_requeued, 'claimed', 1, 'job_id', v_job.id,
       'people_scored', coalesce((v_res->>'people_scored')::int, 0),
       'people_total', v_people_total, 'tools_used', v_tools,
-      'note', coalesce(nullif(v_res->>'reason', ''), v_note));
+      'note', coalesce(nullif(v_res->>'reason', ''), v_note)));
 
   EXCEPTION
     -- Listed by name because `OTHERS` does not match it -- see the header. This
@@ -603,8 +666,8 @@ BEGIN
       v_err := left(SQLERRM, 400);
       PERFORM fail_research_job(v_job.id,
         'worker was cancelled mid-tick (statement timeout or pg_cancel_backend): ' || v_err);
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'note', 'worker cancelled', 'error', v_err);
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'worker cancelled', 'error', v_err));
 
     WHEN OTHERS THEN
       -- The backstop. The claim above happened before this subtransaction
@@ -612,8 +675,8 @@ BEGIN
       -- record why.
       v_err := left(SQLERRM, 400);
       PERFORM fail_research_job(v_job.id, 'worker error: ' || v_err);
-      RETURN jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
-        'job_id', v_job.id, 'note', 'worker error', 'error', v_err);
+      RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
+        'job_id', v_job.id, 'note', 'worker error', 'error', v_err));
   END;
 END $$;
 REVOKE ALL ON FUNCTION public.run_research_tick() FROM PUBLIC, anon, authenticated;

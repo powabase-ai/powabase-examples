@@ -136,8 +136,16 @@ export function LeadPage() {
   // Same reasoning as BrandContext: a failed refetch keeps the cached data, and
   // replacing a perfectly good record page with an error screen (losing whatever
   // the user was mid-edit) is worse than showing slightly stale data.
-  if (loadError && !lead) {
-    const notFound = (loadError as { code?: string }).code === 'PGRST116';
+  //
+  // `(!lead || !stages || !events)` mirrors the loading gate below exactly. With
+  // `loadError && !lead` the two did not line up: a deep link whose events query
+  // 500s, or whose stage_options request fails, skipped the error branch and hit
+  // the loading branch instead -- "Loading…" forever, no message, no retry.
+  if (loadError && (!lead || !stages || !events)) {
+    // Only the lead's own 406 means "not found". The gate above now also fires
+    // when the lead loaded fine and a SECONDARY query failed, and calling that
+    // "Lead not found" would be a lie about which request broke.
+    const notFound = !lead && (leadQuery.error as { code?: string } | null)?.code === 'PGRST116';
     return (
       <div>
         <h1 style={{ fontSize: 'var(--font-lg)', marginTop: 0 }}>{notFound ? 'Lead not found' : "Couldn't load this lead"}</h1>

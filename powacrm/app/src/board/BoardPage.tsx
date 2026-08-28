@@ -103,7 +103,13 @@ export function BoardPage() {
   const { data: stages, error: stagesError } = stagesQuery;
   const { data: leads, error: leadsError } = leadsQuery;
   const error = stagesError ?? leadsError;
-  if (error && !leads) {
+  // `error && (!stages || !leads)`, not `error && !leads`. The loading branch
+  // below fires when EITHER query has no data, so gating the error branch on
+  // just one of them left a permanent "Loading…" whenever the OTHER one failed:
+  // a 503 on stage_options with leads already cached showed a spinner with no
+  // message and no retry, forever. The two conditions have to cover the same
+  // ground or there is a state that falls between them.
+  if (error && (!stages || !leads)) {
     return (
       <div>
         <h1 style={{ fontSize: 'var(--font-lg)', marginTop: 0 }}>Pipeline</h1>
