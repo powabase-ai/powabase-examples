@@ -1,7 +1,16 @@
 # PowaCRM — Design Spec
 
 **Date:** 2026-08-26 (rev 2 — Twenty architecture review folded in; rev 2.1 — repackaged as a powabase-examples app)
-**Status:** Approved design, pending implementation plan
+**Status:** Approved design for the full product. **Phases 1 and 2 are built
+(the lite CRM and AI research); everything else on this page — Apollo sourcing,
+drafting, sequences, Dux Soup / SendGrid execution and webhook ingestion — is
+design only and has no code in this repo.** Two things below are also superseded
+by what shipped: research runs from a `pg_cron` job inside Postgres, **not** a
+Powabase workflow (see
+[`2026-08-27-phase2-research-design.md`](2026-08-27-phase2-research-design.md)
+§2 and [`../platform/README.md`](../platform/README.md)), and the authorization
+model is per-owner (`brands.owner_id` + `owns_brand()`, `0009`) rather than
+role-only. The migrations in `db/` are authoritative.
 **Repo:** `powabase-ai/powabase-examples` → `powacrm/` (open-source example app, sibling of `rankforge/`)
 **First brand:** gpt-trainer (multi-brand from day one; brand data is local seed, never committed)
 

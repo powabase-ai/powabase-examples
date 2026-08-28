@@ -1,5 +1,37 @@
 # PowaCRM Phase 2 (Research) Implementation Plan
 
+> ## ⚠️ HISTORICAL RECORD — TASK 5 BUILDS SOMETHING THAT NO LONGER EXISTS
+>
+> This is the plan as it was written on 2026-08-27 and executed, kept unedited
+> so the migrations have a record of where they came from. Phase 2b then
+> replaced its central mechanism, so parts of it are now instructions for
+> building the wrong thing.
+>
+> **Task 5 is superseded by
+> [`db/migrations/0013_inline_worker.sql`](../db/migrations/0013_inline_worker.sql).**
+> It tells you to provision a scheduled Powabase workflow, `wf-research-tick`,
+> with three parallel branches. That workflow has been **deleted**, and
+> `platform/wf-research-tick.json` does not exist. The worker now lives inside
+> Postgres: one `SECURITY DEFINER` function, `run_research_tick()`, scheduled by
+> `pg_cron`, calling the agent over `/run/stream` through the `http` extension.
+> The reason is in
+> [`2026-08-27-phase2-research-design.md`](2026-08-27-phase2-research-design.md)
+> §2 and in [`../platform/README.md`](../platform/README.md): the workflow's
+> `agent` block reported success having executed **no tools**, so every research
+> result it produced was model recall wearing a fabricated `sources` array.
+> `0013` refuses a run that called no tools, which a workflow could not do.
+>
+> **Task 3's `claim_research_jobs` is superseded too**, by the same migration.
+> The body it prescribes puts `LIMIT` inside an `IN`-subquery, which bounds the
+> subquery and not the `UPDATE`; under a Nested Loop Semi Join it claims the
+> whole queue. `0013` replaces it with a `MATERIALIZED` CTE.
+>
+> Also written after this plan: the three-condition age backstop and the
+> abandonment's own transaction (`0012`), the diagnostics column and the http
+> extension relocation (`0013`), and the `research_daily_cap` ceiling (`0014`).
+> **The migrations in `db/` are the authoritative description of this app. This
+> file is a diary.**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A researcher agent profiles a lead's company from the open web and writes back a summary, tech stack, hooks with evidence, and a 0–100 fit score — triggered on demand, authorized by RLS, executed by a scheduled worker.
@@ -450,6 +482,13 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 3: Worker-side RPCs — claim, complete, fail
 
+> **⚠️ PARTLY SUPERSEDED.** The `claim_research_jobs` body prescribed below puts
+> `LIMIT` inside an `IN`-subquery, which bounds the subquery and not the
+> `UPDATE`; under a Nested Loop Semi Join it claims the whole queue.
+> [`db/migrations/0013_inline_worker.sql`](../db/migrations/0013_inline_worker.sql)
+> replaces it with a `MATERIALIZED` CTE, and
+> `requeue_stalled_research_jobs` now returns two counts rather than one.
+
 **Files:**
 - Modify: `db/migrations/0012_research_rpcs.sql` (append; keep it one transaction)
 - Create: `db/tests/test_0012_worker_rpcs.sql`
@@ -792,6 +831,12 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ---
 
 ### Task 5: Provision the scheduled research worker
+
+> **⚠️ SUPERSEDED — do not build this.** The `wf-research-tick` workflow below was
+> deleted in phase 2b and `platform/wf-research-tick.json` does not exist. The
+> worker is `run_research_tick()` in
+> [`db/migrations/0013_inline_worker.sql`](../db/migrations/0013_inline_worker.sql),
+> scheduled by `pg_cron`. See the banner at the top of this file for why.
 
 **Files:**
 - Create: `platform/wf-research-tick.json`

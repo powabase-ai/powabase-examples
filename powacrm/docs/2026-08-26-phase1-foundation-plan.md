@@ -1,5 +1,32 @@
 # PowaCRM — Phase 1 (Foundation) Implementation Plan
 
+> ## ⚠️ HISTORICAL RECORD — DO NOT BUILD THE RLS IN THIS PLAN
+>
+> This is the plan as it was written on 2026-08-26 and executed, kept unedited
+> so the migrations have a record of where they came from. **It is not a guide
+> to the schema that shipped**, and one part of it is actively unsafe to copy.
+>
+> **The authorization model in Task 4 is superseded by
+> [`db/migrations/0009_access_control.sql`](../db/migrations/0009_access_control.sql).**
+> The policies below are `TO authenticated` with `USING (true)` /
+> `WITH CHECK (true)` — the only thing they check is whether you are signed in
+> at all. The SPA ships the project's Anon key in its browser bundle and public
+> signup is open, so under those policies any stranger could self-register and
+> then read and write every row in the schema, everyone else's leads included.
+> That is not a hypothetical: it was reproduced against a live project, and
+> `0004_rls.sql:17` now opens with *"Do not copy the policy shape below into
+> anything real."*
+>
+> What shipped instead: `brands.owner_id` names the one account that owns a
+> brand, and every other table is gated on `owns_brand(brand_id)`. Read `0009`
+> for the model, and `db/tests/test_0009_access_control.sh` for the proof that
+> it holds with real tokens.
+>
+> Other things this plan predates: soft-delete hardening (`0005`, `0008`), the
+> import RPC's silent-data-loss fix (`0007`), the cross-tenant batch write fixed
+> by `0010`, and all of phase 2 (`0011`–`0014`). **The migrations in `db/` are
+> the authoritative description of this app. This file is a diary.**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A working lite CRM on Powabase: schema with all cross-cutting conventions, RLS + GoTrue auth, and a React SPA with design tokens, app shell, pipeline kanban board, lead record view, and CSV import.

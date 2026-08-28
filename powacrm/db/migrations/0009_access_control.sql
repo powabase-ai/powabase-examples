@@ -258,6 +258,19 @@ $$;
 REVOKE ALL ON FUNCTION public.soft_delete_person(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.soft_delete_person(uuid) TO authenticated;
 
+-- SUPERSEDED by 0010_import_batch_scope.sql -- READ THAT FILE BEFORE COPYING
+-- THIS ONE. The paragraph immediately below is the reasoning that shipped, and
+-- it is wrong: it argues that `_import_id` needs no brand check, and the closing
+-- `UPDATE import_batches ... WHERE id = _import_id` in this version therefore
+-- has no brand predicate at all. A signed-up user could pass their OWN brand
+-- (clearing the guard at the top) together with SOMEONE ELSE'S batch id and
+-- overwrite that row -- status flipped to 'completed', counters zeroed, `errors`
+-- emptied. Confirmed against a live project. 0010 adds the missing predicate and
+-- narrows the per-row `WHEN OTHERS` while it is in there. This file is kept as
+-- applied; apply both, in order.
+--
+-- The reasoning that was wrong, kept verbatim so the mistake is legible:
+--
 -- `_import_id` is not checked separately: an import_batches row belongs to a
 -- brand, and the only thing the function does with it is stamp counters on it.
 -- The batch a caller can create in the first place is one in a brand it owns

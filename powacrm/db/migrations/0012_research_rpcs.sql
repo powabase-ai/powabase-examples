@@ -130,6 +130,16 @@ BEGIN
       CONTINUE;
     END IF;
 
+    -- SUPERSEDED IN PART by 0014_research_cap_bound.sql, which is what makes
+    -- this check worth anything. As written here the cap is read straight off
+    -- brands.research_daily_cap, and that column shipped with NO constraint:
+    -- `brands_upd` (0009) lets an owner update their own brand row, and the
+    -- Settings form validated the field in the browser only -- so one PostgREST
+    -- PATCH raised a brand's own ceiling to anything it liked, and the worker
+    -- converts that directly into paid agent runs on the PROJECT owner's
+    -- credits. Reproduced live at 100000 and at -5. 0014 adds the server-side
+    -- CHECK (1..100). Read both; the check below is only a spend control
+    -- because of it.
     SELECT research_daily_cap INTO v_cap FROM brands WHERE id = v_brand;
     SELECT count(*) INTO v_used FROM research_jobs
      WHERE brand_id = v_brand AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC');
@@ -169,6 +179,15 @@ GRANT EXECUTE ON FUNCTION public.request_research(uuid[]) TO authenticated;
 -- must never be able to mark its own job done with a payload of its choosing.
 -- ---------------------------------------------------------------------------
 
+-- SUPERSEDED by 0013_inline_worker.sql -- READ THAT FILE BEFORE COPYING THIS
+-- ONE. The body below puts the LIMIT inside an IN-subquery, which bounds the
+-- subquery and not the UPDATE: under a Nested Loop Semi Join with no
+-- Materialize above it, the subquery is re-executed per outer row and the
+-- UPDATE claims the WHOLE QUEUE. Observed live -- one tick claimed all four
+-- queued jobs and stranded three in `running` until the 15-minute sweep. 0013
+-- replaces it with a MATERIALIZED CTE, which is evaluated exactly once. This
+-- file is kept as applied, with only the ordering key corrected (see below,
+-- and note that a fresh install applies this file first); apply both, in order.
 CREATE OR REPLACE FUNCTION public.claim_research_jobs(_limit int)
 RETURNS SETOF research_jobs LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
   -- SKIP LOCKED is what makes overlapping ticks safe: two workers cannot claim

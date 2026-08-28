@@ -1,7 +1,7 @@
 # PowaCRM Phase 2 — Research — Design Spec
 
 **Date:** 2026-08-27 (rev 2 — the worker moved into the database; Powabase workflows removed)
-**Status:** Approved design; phase 2 implemented, worker being re-hosted per rev 2
+**Status:** Approved design; phase 2 implemented, worker re-hosted in the database per rev 2 (`db/migrations/0013_inline_worker.sql`). This spec is kept in sync with the migrations — unlike the dated plan documents beside it, which are historical records.
 **Repo:** `powabase-ai/powabase-examples` → `powacrm/`
 **Builds on:** phase 1 (`docs/2026-08-26-phase1-foundation-plan.md`), migrations `0001`–`0010`
 
@@ -148,8 +148,9 @@ generic `field_updated`.
 
 ## 4. RPCs
 
-Both `LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp`,
-matching the posture `0007`–`0010` established.
+`SECURITY DEFINER SET search_path = public, pg_temp`, matching the posture
+`0007`–`0010` established. `request_research` is `plpgsql`;
+`claim_research_jobs` is a single statement and stays `LANGUAGE sql`.
 
 ### `request_research(_person_ids uuid[]) RETURNS jsonb`
 `REVOKE ALL … FROM PUBLIC, anon; GRANT EXECUTE … TO authenticated;`
@@ -174,15 +175,61 @@ INSERT policy on `research_jobs` at all.
 `REVOKE ALL … FROM PUBLIC, anon, authenticated;` — service-role only.
 
 ```sql
-UPDATE research_jobs SET status = 'running', started_at = now(), attempts = attempts + 1
-WHERE id IN (
-  SELECT id FROM research_jobs WHERE status = 'queued'
-  ORDER BY created_at LIMIT _limit FOR UPDATE SKIP LOCKED
-) RETURNING *;
+WITH picked AS MATERIALIZED (
+  SELECT id FROM research_jobs
+   WHERE status = 'queued'
+   ORDER BY created_at, id
+   LIMIT greatest(_limit, 0)
+   FOR UPDATE SKIP LOCKED
+)
+UPDATE research_jobs j
+   SET status = 'running', started_at = now(), attempts = j.attempts + 1
+  FROM picked
+ WHERE j.id = picked.id
+RETURNING j.*;
 ```
 
 `SKIP LOCKED` is what makes overlapping ticks safe: two workers cannot claim the
 same job.
+
+**The `MATERIALIZED` CTE is load-bearing, and this spec used to prescribe the
+broken shape.** Rev 1 put the `LIMIT` inside an `IN`-subquery — which bounds the
+*subquery*, not the `UPDATE`. Given a Nested Loop Semi Join with that subquery
+on the inner side and no `Materialize` above it, the subquery is re-executed
+once per outer row, each execution locks and returns a different queued job
+(the previous one is no longer `queued`), and the `UPDATE` claims **the entire
+queue**. That plan is not exotic: `research_jobs_queue_idx` already covers
+`status='queued' ORDER BY created_at`, so the subquery needs no sort, which is
+exactly when a rescan looks cheap. Observed live: one tick claimed all four
+queued jobs and stranded three in `running` until the 15-minute sweep. A
+`MATERIALIZED` CTE is evaluated exactly once, so `LIMIT 1` means one row under
+every plan. `db/tests/test_0013_worker.sql` §1 forces the adverse plan with
+planner GUCs so the assertion does not depend on the planner's mood.
+
+`ORDER BY created_at, id`, not `created_at` alone: `request_research` stamps a
+whole batch with one `created_at`, so `created_at` on its own leaves a batch's
+order undefined — and the age backstop's head-of-queue probe sorts by the same
+key, so the two have to agree on which job is next.
+
+### `requeue_stalled_research_jobs() RETURNS (requeued int, abandoned int)`
+`REVOKE ALL … FROM PUBLIC, anon, authenticated;` — service-role only.
+
+Two sweeps, in this order:
+
+1. **The age backstop.** A job is abandoned (`failed`, with an error naming the
+   age and the attempt count) only when all three hold: it is older than an
+   hour, it is at the `(created_at, id)` head of the queue, and *nothing in the
+   project has finished in the last hour*. All three are needed. The
+   three-strike ceiling in `fail_research_job` cannot bound a worker that
+   **dies** rather than fails, because `attempts = attempts + 1` is written
+   inside the transaction that rolls back — but age alone mass-failed legitimate
+   batches, since `request_research` stamps a whole batch with one `created_at`.
+2. **The 15-minute stall sweep**, returning a long-`running` job to `queued`.
+
+`abandoned` is not a report — it is a signal. `run_research_tick()` returns
+immediately when it is non-zero, so the abandonment **commits in a transaction
+of its own** rather than sharing one with an agent run that may terminate the
+backend and roll it back. See §6.
 
 ## 5. The agent — `powacrm-researcher`
 
@@ -227,10 +274,31 @@ writes nothing. Scores are clamped to 0–100 to satisfy the existing CHECK.
 A single `SECURITY DEFINER` SQL function, scheduled every minute by `pg_cron`,
 service-role only and never granted to `authenticated`. One job per tick.
 
-Per tick: requeue jobs stalled over 15 minutes → claim exactly one queued job →
-read the company, the brand's `icp_notes`/`product_description`, and the people
-to score → `POST /api/agents/{id}/run/stream` via the `http` extension → extract
-the JSON from the reply → `complete_research_job` or `fail_research_job`.
+Per tick: sweep (`requeue_stalled_research_jobs`) → **if it abandoned anything,
+return here** → claim exactly one queued job → read the company, the brand's
+`icp_notes`/`product_description`, and the people to score → `POST
+/api/agents/{id}/run/stream` via the `http` extension → extract the JSON from
+the reply → `complete_research_job` or `fail_research_job`.
+
+**Why the tick stops after an abandonment.** One tick is one transaction. If the
+tick swept and then ran a job in the same transaction, an uncatchable
+termination of the backend during that run — the *only* failure the age backstop
+exists for — would roll the abandonment back with it. Nothing would ever be
+abandoned, and the queue would be retried every minute forever: precisely the
+unbounded paid-run loop the backstop is there to stop. Returning early commits
+the abandonment on its own; the next tick, a minute later, does the running.
+The alternative is a second `cron.schedule` entry for the sweep, which commits
+independently and costs no throughput, but doubles what an operator has to
+reason about, pause during the test suite and unschedule on teardown. The
+backstop self-disarms to at most one abandonment per hour project-wide, so the
+early return costs at most a minute an hour.
+
+**An ungrounded run is a failed run.** If the terminal `complete` event carries
+an empty `tool_calls` list, the tick refuses it rather than writing it: a report
+produced without reading anything is model recall wearing a fabricated `sources`
+array, and once stored it is indistinguishable from real research and locks the
+company for thirty days. This check is the reason the worker is a database
+function and not a workflow (§2).
 
 **Extraction, not fence-stripping.** The agent returns narration, then a fenced
 block, then the object — roughly a thousand characters of prose precede the JSON.
