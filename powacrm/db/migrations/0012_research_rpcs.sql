@@ -479,9 +479,21 @@ BEGIN
   --
   -- ONE HOUR. The designed worst case for an honest job is 45 minutes: three
   -- attempts, each of which can sit up to the 15-minute stall window before the
-  -- sweep below returns it to the queue. An hour clears that with headroom and
-  -- caps a crash-looper at roughly 60 paid runs (one tick per minute) instead of
-  -- an unbounded number.
+  -- sweep below returns it to the queue. An hour clears that with headroom.
+  --
+  -- WHAT THIS DOES NOT BOUND. An earlier draft of this comment claimed the
+  -- backstop caps a crash-looper at roughly 60 paid runs. That is only true when
+  -- the crash-looper is the ONLY thing in the queue. Condition 3 asks whether
+  -- anything finished in the window, and a healthy job finishing alongside the
+  -- looper re-arms it -- so a looper sharing a queue with steady traffic is never
+  -- abandoned by age. That is the deliberate cost of distinguishing "a job that
+  -- kills the worker" from "a worker that is simply stopped" using only evidence
+  -- that survives a backend kill: an in-transaction heartbeat rolls back with the
+  -- tick, so the sweep has nothing else durable to read. The three-strike counter
+  -- in fail_research_job still bounds every failure the worker can actually
+  -- catch; this backstop only covers terminations it cannot. Closing the gap
+  -- properly means reading cron.job_run_details (guarded on to_regnamespace('cron'),
+  -- as 0013 does elsewhere), which a CRM-only install would not have.
   --
   -- FOR UPDATE SKIP LOCKED is load-bearing, not decoration. One tick is one
   -- transaction, so a job another worker is CURRENTLY running still reads as
