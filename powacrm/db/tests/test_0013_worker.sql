@@ -73,8 +73,17 @@ BEGIN
     -- Identical created_at on purpose: request_research stamps a whole batch
     -- with the same timestamp, so ORDER BY created_at is a four-way tie -- part
     -- of what made the original bug bite.
+    --
+    -- 59 MINUTES, NOT AN ARBITRARY LONG TIME AGO. These fixtures used to be
+    -- dated 2000-01-01, which the age backstop in
+    -- requeue_stalled_research_jobs() now (correctly) treats as abandoned: a job
+    -- older than one hour is failed rather than claimed. Section 1 calls
+    -- claim_research_jobs directly and never sweeps, but section 2 goes through
+    -- run_research_tick(), which sweeps BEFORE it claims -- and with a 26-year
+    -- old fixture that tick found an empty queue. Any fixture that must still be
+    -- claimable belongs inside the window.
     INSERT INTO research_jobs (brand_id, company_id, created_at)
-      VALUES (b, c, timestamptz '2000-01-01 00:00:00+00');
+      VALUES (b, c, now() - interval '59 minutes');
   END LOOP;
 
   -- Pin the plan before relying on it. Without this the guard is a hope: if a
@@ -155,8 +164,10 @@ BEGIN
   --     company afterwards -- and it must not become an agent call on
   --     "https://".
   INSERT INTO companies (brand_id, name) VALUES (b, '_t13_no_domain') RETURNING id INTO c;
+  -- 59 minutes, not an arbitrary long time ago -- see section 1's note: the
+  -- tick sweeps before it claims, and the sweep abandons anything over an hour.
   INSERT INTO research_jobs (brand_id, company_id, created_at)
-    VALUES (b, c, timestamptz '2000-01-01 00:00:00+00') RETURNING id INTO j;
+    VALUES (b, c, now() - interval '59 minutes') RETURNING id INTO j;
 
   r := run_research_tick();
   IF (r->>'job_id') IS DISTINCT FROM j::text THEN
@@ -181,8 +192,10 @@ BEGIN
   --      onto a row the owner believes they removed.
   INSERT INTO companies (brand_id, name, domain)
     VALUES (b, '_t13_deleted', '_t13-deleted.invalid') RETURNING id INTO c;
+  -- 59 minutes, not an arbitrary long time ago -- see section 1's note: the
+  -- tick sweeps before it claims, and the sweep abandons anything over an hour.
   INSERT INTO research_jobs (brand_id, company_id, created_at)
-    VALUES (b, c, timestamptz '2000-01-01 00:00:00+00') RETURNING id INTO j;
+    VALUES (b, c, now() - interval '59 minutes') RETURNING id INTO j;
   UPDATE companies SET deleted_at = now() WHERE id = c;
 
   r := run_research_tick();
@@ -203,8 +216,10 @@ BEGIN
   --     there is nothing for the agent to return -- fail before spending a run.
   INSERT INTO companies (brand_id, name, domain)
     VALUES (b, '_t13_no_people', '_t13-no-people.invalid') RETURNING id INTO c;
+  -- 59 minutes, not an arbitrary long time ago -- see section 1's note: the
+  -- tick sweeps before it claims, and the sweep abandons anything over an hour.
   INSERT INTO research_jobs (brand_id, company_id, created_at)
-    VALUES (b, c, timestamptz '2000-01-01 00:00:00+00') RETURNING id INTO j;
+    VALUES (b, c, now() - interval '59 minutes') RETURNING id INTO j;
 
   r := run_research_tick();
   IF (r->>'job_id') IS DISTINCT FROM j::text THEN
@@ -314,6 +329,83 @@ BEGIN
   IF has_function_privilege('authenticated', 'public.record_research_tick(uuid,jsonb)', 'EXECUTE')
      OR has_function_privilege('anon', 'public.record_research_tick(uuid,jsonb)', 'EXECUTE') THEN
     RAISE EXCEPTION 'record_research_tick is callable by a client role -- it writes an arbitrary jsonb onto any job row';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- 3c. The crash-loop backstop: a job that never gets old enough to fail is a
+--     standing charge on the owner's credits.
+--
+-- fail_research_job stops at three attempts, and that ceiling CANNOT bound a
+-- worker that dies rather than fails. claim_research_jobs writes
+-- `attempts = attempts + 1` inside the same transaction as the run, so a backend
+-- kill, an OOM, a restart or a pooler drop rolls back the claim and the
+-- increment together: the job returns to `queued` with attempts still 0, the
+-- next tick claims it a minute later, and it dies again -- one paid agent run
+-- per minute, forever, never reaching `failed`.
+--
+-- The fixture below is exactly that state and it cannot be faked any other way:
+-- an old job with NO recorded attempts. Every other column a sweep might key on
+-- (attempts, started_at, updated_at) is written inside the transaction that
+-- rolls back, so created_at is the only thing left standing.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  b uuid; c_old uuid; c_young uuid; c_run uuid;
+  j_old uuid; j_young uuid; j_running uuid;
+  st text; err text; att int;
+BEGIN
+  SELECT id INTO b FROM brands WHERE name = 'gpt-trainer';
+
+  INSERT INTO companies (brand_id, name, domain) VALUES (b,'_t13_old_co','t13old.example') RETURNING id INTO c_old;
+  INSERT INTO companies (brand_id, name, domain) VALUES (b,'_t13_young_co','t13young.example') RETURNING id INTO c_young;
+  INSERT INTO companies (brand_id, name, domain) VALUES (b,'_t13_run_co','t13run.example') RETURNING id INTO c_run;
+
+  -- The crash-looper: queued, three hours old, attempts 0 because every
+  -- increment rolled back with the worker that died.
+  INSERT INTO research_jobs (brand_id, company_id, created_at, attempts)
+    VALUES (b, c_old, now() - interval '3 hours', 0) RETURNING id INTO j_old;
+  -- An ordinary job waiting its turn. Must NOT be touched.
+  INSERT INTO research_jobs (brand_id, company_id, created_at, attempts)
+    VALUES (b, c_young, now() - interval '5 minutes', 0) RETURNING id INTO j_young;
+  -- A genuinely stalled RUNNING job, young enough to deserve another go: the
+  -- pre-existing 15-minute sweep must still return it to the queue, so the
+  -- backstop cannot have swallowed that behaviour.
+  INSERT INTO research_jobs (brand_id, company_id, created_at, status, started_at, attempts)
+    VALUES (b, c_run, now() - interval '20 minutes', 'running', now() - interval '20 minutes', 1)
+    RETURNING id INTO j_running;
+
+  PERFORM requeue_stalled_research_jobs();
+
+  SELECT status, error, attempts INTO st, err, att FROM research_jobs WHERE id = j_old;
+  IF st <> 'failed' THEN
+    RAISE EXCEPTION 'a 3-hour-old queued job with 0 attempts was left as % -- nothing bounds a crash loop, and each retry is a paid agent run', st;
+  END IF;
+  IF (SELECT finished_at FROM research_jobs WHERE id = j_old) IS NULL THEN
+    RAISE EXCEPTION 'the abandoned job was failed without a finished_at';
+  END IF;
+  -- The error text is the whole point of the finding: an operator has to be able
+  -- to tell a crash-looper from an ordinary agent failure, and the low attempts
+  -- count on an old job is the signature.
+  IF coalesce(err, '') NOT LIKE 'abandoned by the age backstop%' THEN
+    RAISE EXCEPTION 'the abandoned job does not say why it was abandoned: %', coalesce(err, '(null)');
+  END IF;
+  IF err NOT LIKE '%0 recorded attempt(s)%' THEN
+    RAISE EXCEPTION 'the abandonment error does not record the attempt count, which is what distinguishes a crash loop: %', err;
+  END IF;
+
+  IF (SELECT status FROM research_jobs WHERE id = j_young) <> 'queued' THEN
+    RAISE EXCEPTION 'the backstop failed a 5-minute-old queued job -- it must only reach jobs that have outlived the entire three-strike ladder';
+  END IF;
+
+  IF (SELECT status FROM research_jobs WHERE id = j_running) <> 'queued' THEN
+    RAISE EXCEPTION 'the 20-minute stalled running job was not requeued -- the age backstop displaced the stall sweep instead of preceding it';
+  END IF;
+
+  -- And the company is free again: nothing was written for it, so the owner can
+  -- ask for it once the cause is fixed.
+  IF (SELECT researched_at FROM companies WHERE id = c_old) IS NOT NULL THEN
+    RAISE EXCEPTION 'an abandoned job left researched_at stamped, locking the company for 30 days';
   END IF;
 END $$;
 
