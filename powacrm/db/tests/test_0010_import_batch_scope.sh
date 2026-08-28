@@ -15,10 +15,16 @@
 # which let B flip A's batch to completed with its counters zeroed and its errors
 # erased. The whole fix is `AND brand_id = _brand_id`; a later CREATE OR REPLACE
 # could silently drop it, which is exactly why this file exists.
+#
+# B is created through GoTrue's ADMIN API (lib_second_account.sh), not by public
+# signup: this is the regression test for a cross-tenant WRITE, and it must not
+# switch itself off because the operator followed README's advice and turned
+# signups off.
 set -euo pipefail
-: "${VITE_POWABASE_URL:?}" "${VITE_POWABASE_ANON_KEY:?}" \
+: "${VITE_POWABASE_URL:?}" "${VITE_POWABASE_ANON_KEY:?}" "${PB_SERVICE_KEY:?}" \
   "${PB_TEST_EMAIL:?}" "${PB_TEST_PASSWORD:?}" "${PB_DB_URL:?}"
 BASE="$VITE_POWABASE_URL"; ANON="$VITE_POWABASE_ANON_KEY"
+. "$(dirname "$0")/lib_second_account.sh"
 
 B_EMAIL="powacrm-batchscope-$(date +%s)-$$@example.com"
 B_PASSWORD="scope-$(date +%s)-Xq7pW"
@@ -36,13 +42,6 @@ req() { curl -s -w '\n%{http_code}' "$@"; }
 status() { printf '%s' "${1##*$'\n'}"; }
 body() { printf '%s' "${1%$'\n'*}"; }
 fail() { echo "FAIL: $*"; exit 1; }
-
-# If the project has signups turned off -- which README's own security section
-# recommends -- this test cannot run: it needs to create a second account. Skip
-# rather than fail, so a correctly-hardened project still gets a green suite.
-signup_disabled() { # signup_disabled <response-body>
-  printf '%s' "$1" | grep -qiE 'signup(s)? (are |is )?(not allowed|disabled)|signup_disabled'
-}
 
 B_ID=""; A_IB_ID=""; B_IB_ID=""; TRIGGER_MADE=""
 cleanup() {
@@ -70,24 +69,11 @@ A_IB_ID=$(curl -s -X POST "$BASE/rest/v1/import_batches" "${A[@]}" -H "Content-T
   | jget 'd[0]["id"]')
 [ -n "$A_IB_ID" ] || fail "A cannot create its own import batch"
 
-# --- B: self-signs-up publicly and owns a brand of its own -------------------
-R=$(req -X POST "$BASE/auth/v1/signup" -H "apikey: $ANON" -H "Content-Type: application/json" \
-  -d "$(B_EMAIL="$B_EMAIL" B_PASSWORD="$B_PASSWORD" python3 -c 'import json,os; print(json.dumps({"email": os.environ["B_EMAIL"], "password": os.environ["B_PASSWORD"]}))')")
-case "$(status "$R")" in
-  2*) ;;
-  *) if signup_disabled "$(body "$R")"; then
-       echo "test_0010 SKIPPED (signups are disabled on this project, so a second account cannot be created)"
-       exit 0
-     fi
-     fail "public signup is broken (HTTP $(status "$R")): $(body "$R")" ;;
-esac
+# --- B: an unrelated account that owns a brand of its own --------------------
+second_account "$B_EMAIL" "$B_PASSWORD" || exit $?
+B_TOKEN="$SECOND_ACCOUNT_TOKEN"
 B_ID=$(run_sql "SELECT id FROM auth.users WHERE lower(email)=lower('$B_EMAIL')")
-[ -n "$B_ID" ] || fail "signup succeeded but created no auth user"
-
-B_TOKEN=$(curl -s "$BASE/auth/v1/token?grant_type=password" -H "apikey: $ANON" -H "Content-Type: application/json" \
-  -d "$(B_EMAIL="$B_EMAIL" B_PASSWORD="$B_PASSWORD" python3 -c 'import json,os; print(json.dumps({"email": os.environ["B_EMAIL"], "password": os.environ["B_PASSWORD"]}))')" \
-  | jget 'd.get("access_token","")')
-[ -n "$B_TOKEN" ] || fail "B could not sign in"
+[ -n "$B_ID" ] || fail "account creation reported success but created no auth user"
 B=(-H "apikey: $ANON" -H "Authorization: Bearer $B_TOKEN")
 B_BRAND_ID=$(curl -s "$BASE/rest/v1/brands?select=id" "${B[@]}" | jget 'd[0]["id"] if d else ""')
 [ -n "$B_BRAND_ID" ] || fail "B has no starter brand"

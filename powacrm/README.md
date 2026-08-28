@@ -352,7 +352,13 @@ Still worth doing, whatever your setup:
    a legitimate place to enqueue research that you pay for. The 0–100 cap
    constraint bounds each brand's daily spend, not the number of brands an
    account can make. Studio → Authentication → "Allow new users to sign up".
-   There is no API for this; it is a Studio-only setting.
+   There is no API for this; it is a Studio-only setting. Turning signups off
+   does **not** cost you test coverage: the isolation suites create their second
+   account through GoTrue's admin API with `PB_SERVICE_KEY`
+   (`db/tests/lib_second_account.sh`). They used to sign it up publicly and skip
+   themselves silently when that was refused — so the hardening recommended
+   right here switched off every test proving the authorization model, and the
+   runner still printed `ALL DB TESTS OK`.
 3. **Remember Powabase agents bypass RLS.** Agent database tools run on the
    superuser connection, so anything agent-driven must be driven from a trusted
    backend, never from an end-user's token. That is why the researcher — whose

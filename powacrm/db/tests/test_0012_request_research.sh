@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # request_research() over real HTTP with two real accounts.
+#
+# Account B comes from GoTrue's ADMIN API (lib_second_account.sh), not from
+# public signup, so this suite does not switch itself off on a project that has
+# signups disabled -- which is what README's security section tells operators to
+# do. The assertions that need no second account at all (sections 5b and 5c: anon
+# cannot call request_research, and a user token cannot reach the worker RPCs)
+# run BEFORE the account is created, so even a build with no admin API and no
+# signups still proves them.
 set -euo pipefail
-: "${VITE_POWABASE_URL:?}" "${VITE_POWABASE_ANON_KEY:?}" \
+: "${VITE_POWABASE_URL:?}" "${VITE_POWABASE_ANON_KEY:?}" "${PB_SERVICE_KEY:?}" \
   "${PB_TEST_EMAIL:?}" "${PB_TEST_PASSWORD:?}" "${PB_DB_URL:?}"
 BASE="$VITE_POWABASE_URL"; ANON="$VITE_POWABASE_ANON_KEY"
+. "$(dirname "$0")/lib_second_account.sh"
 B_EMAIL="powacrm-research-$(date +%s)-$$@example.com"
 B_PASSWORD="res-$(date +%s)-Xq7pW"
 FAKE_ID="00000000-0000-0000-0000-000000000000"
@@ -18,7 +27,6 @@ req() { curl -s -w '\n%{http_code}' "$@"; }
 status() { printf '%s' "${1##*$'\n'}"; }
 body() { printf '%s' "${1%$'\n'*}"; }
 fail() { echo "FAIL: $*"; exit 1; }
-signup_disabled() { printf '%s' "$1" | grep -qiE 'signup(s)? (are |is )?(not allowed|disabled)|signup_disabled'; }
 verdict() { printf '%s' "$1" | python3 -c "import json,sys; print(json.load(sys.stdin)['results'][0]['verdict'])"; }
 jobid() { printf '%s' "$1" | python3 -c "import json,sys; v=json.load(sys.stdin)['results'][0]['job_id']; print(v if v is not None else '')"; }
 detail() { printf '%s' "$1" | python3 -c "import json,sys; print(json.load(sys.stdin)['results'][0]['detail'])"; }
@@ -108,17 +116,33 @@ R=$(req -X POST "$BASE/rest/v1/research_jobs" "${A[@]}" -H "Content-Type: applic
   -d "{\"brand_id\":\"$A_BRAND\",\"company_id\":\"$A_CO2\"}")
 case "$(status "$R")" in 2*) fail "authenticated inserted into research_jobs directly" ;; esac
 
+# 5b. anon cannot call it at all
+R=$(req -X POST "$BASE/rest/v1/rpc/request_research" -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+  -H "Content-Type: application/json" -d "{\"_person_ids\":[\"$A_PER\"]}")
+case "$(status "$R")" in 2*) fail "anon can call request_research" ;; esac
+printf '%s' "$(body "$R")" | grep -qiE 'permission denied|not authorized|insufficient' \
+  || fail "anon was refused but not on privilege grounds: $(body "$R")"
+
+# 5c. the worker RPCs must be unreachable with a user token: a client that could
+# call complete_research_job would be able to write any payload it liked.
+for fn in claim_research_jobs complete_research_job fail_research_job requeue_stalled_research_jobs; do
+  case "$fn" in
+    claim_research_jobs)   payload='{"_limit":1}' ;;
+    complete_research_job) payload="{\"_job_id\":\"$A_CO\",\"_payload\":{}}" ;;
+    fail_research_job)     payload="{\"_job_id\":\"$A_CO\",\"_error\":\"x\"}" ;;
+    *)                     payload='{}' ;;
+  esac
+  R=$(req -X POST "$BASE/rest/v1/rpc/$fn" "${A[@]}" -H "Content-Type: application/json" -d "$payload")
+  case "$(status "$R")" in 2*) fail "an authenticated user can call $fn" ;; esac
+  printf '%s' "$(body "$R")" | grep -qiE 'permission denied|not authorized|insufficient|does not exist' \
+    || fail "$fn refused a user token, but not on privilege grounds: $(body "$R")"
+done
+
 # 6. a stranger cannot research someone else's lead
-R=$(req -X POST "$BASE/auth/v1/signup" -H "apikey: $ANON" -H "Content-Type: application/json" \
-  -d "$(B_EMAIL="$B_EMAIL" B_PASSWORD="$B_PASSWORD" python3 -c 'import json,os; print(json.dumps({"email": os.environ["B_EMAIL"], "password": os.environ["B_PASSWORD"]}))')")
-case "$(status "$R")" in
-  2*) ;;
-  *) if signup_disabled "$(body "$R")"; then echo "test_0012 SKIPPED (signups disabled)"; exit 0; fi
-     fail "public signup is broken (HTTP $(status "$R")): $(body "$R")" ;;
-esac
+second_account "$B_EMAIL" "$B_PASSWORD" || exit $?
+B_TOKEN="$SECOND_ACCOUNT_TOKEN"
 B_ID=$(run_sql "SELECT id FROM auth.users WHERE lower(email)=lower('$B_EMAIL')")
-B_TOKEN=$(curl -s "$BASE/auth/v1/token?grant_type=password" -H "apikey: $ANON" -H "Content-Type: application/json" \
-  -d "$(B_EMAIL="$B_EMAIL" B_PASSWORD="$B_PASSWORD" python3 -c 'import json,os; print(json.dumps({"email": os.environ["B_EMAIL"], "password": os.environ["B_PASSWORD"]}))')" | jget 'd["access_token"]')
+[ -n "$B_ID" ] || fail "account creation reported success but created no auth user"
 B=(-H "apikey: $ANON" -H "Authorization: Bearer $B_TOKEN")
 B_BRAND=$(curl -s "$BASE/rest/v1/brands?select=id" "${B[@]}" | jget 'd[0]["id"]')
 
@@ -188,27 +212,5 @@ expect_verdicts = ['skipped', 'already_queued', 'not_yours']
 assert ids == expect_ids, ('ids', ids, expect_ids)
 assert verdicts == expect_verdicts, ('verdicts', verdicts, expect_verdicts)
 " || fail "a multi-id array did not return one result per id, in order: $OUT"
-
-# 7. anon cannot call it at all
-R=$(req -X POST "$BASE/rest/v1/rpc/request_research" -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
-  -H "Content-Type: application/json" -d "{\"_person_ids\":[\"$A_PER\"]}")
-case "$(status "$R")" in 2*) fail "anon can call request_research" ;; esac
-printf '%s' "$(body "$R")" | grep -qiE 'permission denied|not authorized|insufficient' \
-  || fail "anon was refused but not on privilege grounds: $(body "$R")"
-
-# 8. the worker RPCs must be unreachable with a user token: a client that could
-# call complete_research_job would be able to write any payload it liked.
-for fn in claim_research_jobs complete_research_job fail_research_job requeue_stalled_research_jobs; do
-  case "$fn" in
-    claim_research_jobs)   payload='{"_limit":1}' ;;
-    complete_research_job) payload="{\"_job_id\":\"$A_CO\",\"_payload\":{}}" ;;
-    fail_research_job)     payload="{\"_job_id\":\"$A_CO\",\"_error\":\"x\"}" ;;
-    *)                     payload='{}' ;;
-  esac
-  R=$(req -X POST "$BASE/rest/v1/rpc/$fn" "${A[@]}" -H "Content-Type: application/json" -d "$payload")
-  case "$(status "$R")" in 2*) fail "an authenticated user can call $fn" ;; esac
-  printf '%s' "$(body "$R")" | grep -qiE 'permission denied|not authorized|insufficient|does not exist' \
-    || fail "$fn refused a user token, but not on privilege grounds: $(body "$R")"
-done
 
 echo "test_0012 OK"

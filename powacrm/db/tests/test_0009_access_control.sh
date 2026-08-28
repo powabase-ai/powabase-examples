@@ -7,14 +7,17 @@
 # way to check "your account gets you your data and nothing else" is to hold two
 # real GoTrue tokens and talk to PostgREST the way the browser does.
 #
-# User A is PB_TEST_EMAIL, the account that already exists. User B signs itself
-# up through the PUBLIC signup endpoint with nothing but the Anon key -- which
-# is the threat model and, since public signup is a supported feature, also a
-# test that signup still works. B is deleted again on the way out.
+# User A is PB_TEST_EMAIL, the account that already exists. User B is created
+# through GoTrue's ADMIN API with the service key (lib_second_account.sh), not by
+# public signup: what this suite proves must not depend on whether the project
+# accepts signups, because README tells operators to turn them off. B holds an
+# ordinary user token once created -- which is the threat model -- and is deleted
+# again on the way out.
 set -euo pipefail
-: "${VITE_POWABASE_URL:?}" "${VITE_POWABASE_ANON_KEY:?}" \
+: "${VITE_POWABASE_URL:?}" "${VITE_POWABASE_ANON_KEY:?}" "${PB_SERVICE_KEY:?}" \
   "${PB_TEST_EMAIL:?}" "${PB_TEST_PASSWORD:?}" "${PB_DB_URL:?}"
 BASE="$VITE_POWABASE_URL"; ANON="$VITE_POWABASE_ANON_KEY"
+. "$(dirname "$0")/lib_second_account.sh"
 
 # Every table a client can reach. stage_options and event_types are shared
 # lookups by design (see 0009 section 4), so they are asserted separately.
@@ -38,13 +41,6 @@ req() { curl -s -w '\n%{http_code}' "$@"; }
 status() { printf '%s' "${1##*$'\n'}"; }
 body() { printf '%s' "${1%$'\n'*}"; }
 fail() { echo "FAIL: $*"; exit 1; }
-
-# If the project has signups turned off -- which README's own security section
-# recommends -- this test cannot run: it needs to create a second account. Skip
-# rather than fail, so a correctly-hardened project still gets a green suite.
-signup_disabled() { # signup_disabled <response-body>
-  printf '%s' "$1" | grep -qiE 'signup(s)? (are |is )?(not allowed|disabled)|signup_disabled'
-}
 
 # Assert a write was refused FOR AUTHORIZATION REASONS. A bare "not 2xx" check
 # would also pass on a typo'd payload (400, missing column) and would then be
@@ -115,28 +111,16 @@ for t in "${OWNED[@]}" "${LOOKUPS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# 3. User B self-signs-up through the PUBLIC endpoint with only the Anon key.
-#    This must work -- public signup is a feature, not an oversight -- and it
-#    must produce a starter brand, or B lands in an app that looks broken.
+# 3. User B is created through the admin API and signs in. It must land with a
+#    starter brand of its own, or B lands in an app that looks broken -- and
+#    "B sees nothing of A's" would be trivially true for an account with no
+#    workspace at all.
 # ---------------------------------------------------------------------------
-R=$(req -X POST "$BASE/auth/v1/signup" -H "apikey: $ANON" -H "Content-Type: application/json" \
-  -d "{\"email\":\"$B_EMAIL\",\"password\":\"$B_PASSWORD\"}")
-case "$(status "$R")" in
-  2*) ;;
-  *) if signup_disabled "$(body "$R")"; then
-       echo "test_0009 SKIPPED (signups are disabled on this project, so a second account cannot be created)"
-       exit 0
-     fi
-     fail "public signup is broken (HTTP $(status "$R")): $(body "$R")" ;;
-esac
+second_account "$B_EMAIL" "$B_PASSWORD" || exit $?
+B_TOKEN="$SECOND_ACCOUNT_TOKEN"
 
 B_ID=$(run_sql "SELECT id FROM auth.users WHERE lower(email)=lower('$B_EMAIL')")
-[ -n "$B_ID" ] || fail "signup returned success but created no auth user"
-
-B_TOKEN=$(curl -s "$BASE/auth/v1/token?grant_type=password" -H "apikey: $ANON" -H "Content-Type: application/json" \
-  -d "{\"email\":\"$B_EMAIL\",\"password\":\"$B_PASSWORD\"}" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))')
-[ -n "$B_TOKEN" ] || fail "B could not sign in"
+[ -n "$B_ID" ] || fail "account creation reported success but created no auth user"
 B=(-H "apikey: $ANON" -H "Authorization: Bearer $B_TOKEN")
 
 # ---------------------------------------------------------------------------

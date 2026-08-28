@@ -74,12 +74,46 @@ case "$TICK_PRIOR" in
   *)      echo "FAIL: could not read the powacrm-research-tick cron job state (got '$TICK_PRIOR')" >&2; exit 1 ;;
 esac
 
-./tests/test_0004_rls.sh
-./tests/test_0009_access_control.sh
-./tests/test_0010_import_batch_scope.sh
-./tests/test_0012_request_research.sh
+# ---------------------------------------------------------------------------
+# The HTTP suites, and the one thing this runner must never do: print OK for a
+# run that skipped the tests proving the authorization model.
+#
+# The three isolation suites used to `exit 0` with a SKIPPED line when they could
+# not create a second account, and this file printed ALL DB TESTS OK regardless.
+# They now create that account through GoTrue's admin API with PB_SERVICE_KEY
+# (db/tests/lib_second_account.sh), so the ordinary reason for skipping is gone.
+# The one that survives -- a build with no admin API AND signups disabled -- exits
+# 77, which is collected here and named in the closing line. A skipped suite is
+# not a passing suite, and the summary has to say so out loud or the next person
+# reads green as "isolation verified".
+#
+# 77 is the convention automake uses for "skipped". Anything else non-zero is a
+# real failure and still aborts under `set -e`.
+# ---------------------------------------------------------------------------
+SKIPPED=()
+run_http_suite() { # run_http_suite <path>
+  local rc=0
+  "$1" || rc=$?
+  case "$rc" in
+    0)  ;;
+    77) SKIPPED+=("$(basename "$1")") ;;
+    *)  exit "$rc" ;;
+  esac
+}
+
+run_http_suite ./tests/test_0004_rls.sh
+run_http_suite ./tests/test_0009_access_control.sh
+run_http_suite ./tests/test_0010_import_batch_scope.sh
+run_http_suite ./tests/test_0012_request_research.sh
 # Needs PB_SERVICE_KEY on top of the variables above, makes a real agent run
 # (~30 s) and spends platform credits -- it is the only check that the
 # researcher's tool allowlist and its injection resistance actually hold.
-./tests/test_0012_injection.sh
-echo "ALL DB TESTS OK"
+run_http_suite ./tests/test_0012_injection.sh
+
+if [ ${#SKIPPED[@]} -gt 0 ]; then
+  echo "DB TESTS OK -- ${#SKIPPED[@]} SUITE(S) SKIPPED (isolation NOT verified): ${SKIPPED[*]}"
+  echo "  Those suites need a second account. Set PB_SERVICE_KEY so they can use the"
+  echo "  GoTrue admin API, or enable signups, then run this again."
+else
+  echo "ALL DB TESTS OK"
+fi
