@@ -312,6 +312,16 @@ BEGIN
   IF src NOT LIKE '%jsonb_array_length(v_tools) = 0%' THEN
     RAISE EXCEPTION 'run_research_tick() no longer refuses a run that called no tools -- an ungrounded report would be written as research and would lock the company for 30 days';
   END IF;
+  -- And the gate has to be able to SEE an empty list. Added in review (round 3):
+  -- the FILTER was missing once, and reverting it left this suite green.
+  -- jsonb_agg over tool_calls elements that carry no `tool_name` produces
+  -- `[null]` -- length 1, not 0 -- which sails straight through the check above
+  -- and lets exactly the ungrounded run this file exists to stop be written as
+  -- research. Driving it needs a real agent reply, so it is asserted on the
+  -- source like the two guards either side of it.
+  IF src NOT LIKE E'%FILTER (WHERE nullif(t->>\'tool_name\', \'\') IS NOT NULL)%' THEN
+    RAISE EXCEPTION 'run_research_tick() aggregates tool_calls without the tool_name FILTER -- elements with no usable name produce [null], which has length 1, so the ungrounded-run gate above cannot fire';
+  END IF;
   -- EVERY exit path, not "at least one". Fixed in review (round 2): this used to
   -- be a single LIKE for one call site, and ten of the eleven could have been
   -- removed with the test still green -- which is precisely the failure mode
@@ -388,6 +398,14 @@ BEGIN
   -- Rolled back with the rest of the file.
   UPDATE research_jobs SET finished_at = now() - interval '4 hours'
    WHERE finished_at > now() - interval '1 hour';
+  -- And own the queue, the way 3a2 does. Added in review (round 3): this
+  -- section asserts that a three-hour-old fixture is at the HEAD of the queue,
+  -- which is only true if nothing older is queued -- and on a live project
+  -- something older may well be, turning this red for a reason that has nothing
+  -- to do with the backstop. Section 2 above happens to leave the queue empty,
+  -- but relying on a previous section's side effect is how a test starts
+  -- depending on the order of the file.
+  UPDATE research_jobs SET status = 'skipped' WHERE status IN ('queued','running');
 
   INSERT INTO companies (brand_id, name, domain) VALUES (b,'_t13_old_co','t13old.example') RETURNING id INTO c_old;
   INSERT INTO companies (brand_id, name, domain) VALUES (b,'_t13_young_co','t13young.example') RETURNING id INTO c_young;
@@ -498,8 +516,18 @@ BEGIN
   -- CASE 2: the same batch, but nothing has finished for an hour -- the worker
   -- was switched off, or the head job is killing it. Indistinguishable from
   -- here, so the backstop takes the head and ONLY the head: the loop is bounded
-  -- either way, and the next tick's own finished_at re-opens the gate for the
-  -- rest.
+  -- either way, and the backstop's own finished_at write on the row it just
+  -- abandoned re-closes the gate for the rest (corrected in review round 3: it
+  -- is not the next job's finished_at -- a strike-1 failure sets that to NULL,
+  -- and after the round-3 fix a tick that abandoned one does not go on to run
+  -- another).
+  --
+  -- "ONLY the head" is exact for THIS fixture, where every job is `queued`.
+  -- Condition 2 tests for a preceding job with status='queued', so a committed
+  -- stale `running` row would not shield the queued job behind it and two rows
+  -- could go in one call -- see the note in 0012. That state needs a
+  -- service-role caller invoking claim_research_jobs directly and is not
+  -- reachable on the pg_cron path, so it is documented rather than pinned.
   UPDATE research_jobs SET finished_at = now() - interval '4 hours'
    WHERE finished_at > now() - interval '1 hour';
 
@@ -713,13 +741,23 @@ BEGIN
   END IF;
 
   -- The schedule is part of the migration, so its absence is a real failure.
+  --
+  -- `active` is deliberately NOT asserted here, and that changed in review
+  -- (round 3). db/tests/run_all.sh now pauses this job BEFORE the SQL suites --
+  -- it has to, because sections 3a2/3c above take the live queue with an UPDATE
+  -- that would otherwise wait on a tick's row lock for up to 180 s. So `active`
+  -- is false during this run by design. What a migration produces is the row,
+  -- the schedule, the command and the database, and those are asserted. The live
+  -- active state belongs to run_all.sh, which reads it before pausing, restores
+  -- exactly what it found from an EXIT trap, fails loudly if the restore does
+  -- not take, and says so in its output when it finds the worker already off.
   SELECT count(*) INTO n FROM cron.job
-   WHERE jobname = 'powacrm-research-tick' AND active
+   WHERE jobname = 'powacrm-research-tick'
      AND schedule = '* * * * *'
      AND command LIKE '%run_research_tick%'
      AND database = current_database();
   IF n <> 1 THEN
-    RAISE EXCEPTION 'expected exactly 1 active powacrm-research-tick cron job in this database, found % -- re-apply db/migrations/0013_inline_worker.sql', n;
+    RAISE EXCEPTION 'expected exactly 1 powacrm-research-tick cron job in this database running `* * * * *`, found % -- re-apply db/migrations/0013_inline_worker.sql', n;
   END IF;
 END $$;
 

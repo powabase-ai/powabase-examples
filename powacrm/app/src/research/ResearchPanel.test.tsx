@@ -152,9 +152,28 @@ describe('ResearchPanel with an agent-authored payload', () => {
 
   it('renders duplicate tech-stack values instead of dropping one', () => {
     // `key={t}` collided on ["React","React"] -- ordinary model output.
-    render(<ResearchPanel company={company({
-      summary: 'Summary.', why_now: null, tech_stack: ['React', 'React', 'Postgres'], hooks: [], sources: [],
-    })} />);
+    //
+    // THE RERENDER IS THE TEST. Fixed in review (round 3): this used to assert
+    // only the initial mount, which was already green against `key={t}`.
+    // Duplicate keys do nothing visible on first render -- React renders both
+    // and warns -- they corrupt the list on RECONCILIATION, when the key map is
+    // used to match old children to new. So the list has to change while the
+    // component stays mounted, which is what a refetch after a re-research does.
+    // React's own warning says "duplicated and/or omitted", and both happen:
+    // against `key={t}` this rerender yields THREE "React" tags for a list that
+    // contains two. Either way the panel is showing a stack the agent did not
+    // report, which is the thing being guarded.
+    const stack = (tech_stack: string[]) => (
+      <ResearchPanel company={company({
+        summary: 'Summary.', why_now: null, tech_stack, hooks: [], sources: [],
+      })} />
+    );
+    const { rerender } = render(stack(['React', 'React', 'Postgres']));
     expect(screen.getAllByText('React').length).toBe(2);
+
+    rerender(stack(['Postgres', 'React', 'React', 'Vite']));
+    expect(screen.getAllByText('React').length).toBe(2);
+    expect(screen.getByText('Vite')).toBeTruthy();
+    expect(screen.getByText('Postgres')).toBeTruthy();
   });
 });

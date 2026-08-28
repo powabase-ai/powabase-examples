@@ -611,15 +611,34 @@ BEGIN
       -- Deliberately NOT falling back to the accumulated content_delta text: a
       -- truncated stream means a truncated JSON object, and completing a job
       -- from half a report is worse than failing it.
+      --
+      -- The upstream `error` frame goes to the SERVER LOG, not onto the job row.
+      -- Same rule as the HTTP body above (fixed in review round 2, extended to
+      -- the remaining three sites in round 3): research_jobs.error is readable
+      -- by the brand's owner under 0011's SELECT policy, and every one of these
+      -- strings is written by another service. Nothing secret can reach them
+      -- TODAY -- and "today" is the whole load-bearing word. The audience for a
+      -- verbatim upstream string is the operator, who has the log.
+      IF v_stream_error IS NOT NULL THEN
+        RAISE WARNING 'powacrm worker: agent stream carried an error frame for job %: %', v_job.id, v_stream_error;
+      END IF;
       PERFORM fail_research_job(v_job.id,
-        'agent stream ended with no complete event' || coalesce(': ' || v_stream_error, ''));
+        'agent stream ended with no complete event'
+        || CASE WHEN v_stream_error IS NULL THEN ''
+                ELSE '. The stream carried an error frame; its text is in the Postgres server log for this tick (cron.job_run_details names the run), not here.' END);
       RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
         'job_id', v_job.id, 'note', 'no terminal event in the agent stream'));
     END IF;
     IF coalesce(v_final->>'status', '') <> 'completed' OR nullif(v_final->>'error', '') IS NOT NULL THEN
+      -- The upstream error text to the log, the status code to the row: same
+      -- split as the HTTP failure above. The status is the part the owner needs
+      -- in order to tell "the agent is down" from "my data is wrong"; the
+      -- message is another service's prose and belongs to the operator.
+      RAISE WARNING 'powacrm worker: agent run did not complete for job % (status %); error: %',
+        v_job.id, coalesce(v_final->>'status', 'null'), left(coalesce(v_final->>'error', ''), 300);
       PERFORM fail_research_job(v_job.id,
-        format('agent run did not complete: status=%s error=%s',
-               coalesce(v_final->>'status', 'null'), left(coalesce(v_final->>'error', ''), 200)));
+        format('agent run did not complete: status=%s. The error text is in the Postgres server log for this tick (cron.job_run_details names the run), not here.',
+               coalesce(v_final->>'status', 'null')));
       RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
         'job_id', v_job.id, 'note', 'agent run did not complete'));
     END IF;
@@ -682,8 +701,15 @@ BEGIN
     END LOOP;
 
     IF v_payload IS NULL THEN
+      -- The reply itself is the most verbatim of the three: it is whatever the
+      -- model wrote after reading attacker-controlled web pages. It goes to the
+      -- log. The owner gets the fact and the length, which is enough to tell an
+      -- empty reply from a long one that would not parse.
+      RAISE WARNING 'powacrm worker: no parseable JSON in the agent reply for job %; first 300 characters: %',
+        v_job.id, left(v_answer, 300);
       PERFORM fail_research_job(v_job.id,
-        'agent returned no parseable JSON object. First 300 characters of the reply: ' || left(v_answer, 300));
+        format('agent returned no parseable JSON object (the reply was %s characters). The reply is in the Postgres server log for this tick (cron.job_run_details names the run), not here.',
+               length(v_answer)));
       RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
         'job_id', v_job.id, 'tools_used', v_tools, 'note', 'no parseable JSON in the agent reply'));
     END IF;

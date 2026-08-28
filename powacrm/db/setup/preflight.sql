@@ -95,7 +95,7 @@ BEGIN
        AND EXISTS (SELECT 1 FROM unnest(v_client_roles) r
                     WHERE has_function_privilege(r, p.oid, 'EXECUTE'));
     IF v_http_open > 0 THEN
-      RAISE NOTICE 'powacrm preflight: % http extension function(s) are currently executable by % . 0013 revokes them.', v_http_open, array_to_string(v_client_roles, ' or ');
+      RAISE NOTICE 'powacrm preflight: % http extension function(s) are currently executable by %. 0013 revokes them.', v_http_open, array_to_string(v_client_roles, ' or ');
     END IF;
   END IF;
 

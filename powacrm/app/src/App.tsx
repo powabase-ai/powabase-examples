@@ -41,10 +41,19 @@ export default function App() {
             LoginPage and BrandProvider render OUTSIDE the routed tree, so a
             throw from either -- a malformed session, a brands query that returns
             something unexpected -- had no boundary above it at all and took the
-            document with it. No resetKey here on purpose: there is no route
-            change to key on at this level, and the fallback's reload is the
-            honest recovery for a provider that cannot mount. */}
-        <ErrorBoundary>
+            document with it.
+
+            Keyed on the SESSION, not the route. There is no route change to
+            observe at this level, but there is one transition that swaps the
+            children entirely, and this boundary used to latch straight across
+            it (fixed in review, round 3): LoginPage throws once, transiently;
+            the magic-link callback lands; useSession yields a session; App
+            re-renders with a completely different tree -- and the fallback was
+            still there, recoverable only by Reload. "The fallback's reload is
+            the honest recovery" is a fair argument for a BrandProvider that
+            cannot mount. It is not one for a sign-in the user has already
+            completed successfully. */}
+        <ErrorBoundary resetKey={session ? 'authed' : 'anon'}>
           {!session ? <LoginPage /> : (
             <BrandProvider>
               <RoutedApp />

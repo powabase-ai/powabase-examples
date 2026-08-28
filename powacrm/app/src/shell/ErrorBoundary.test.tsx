@@ -51,11 +51,20 @@ describe('ErrorBoundary', () => {
     expect(screen.getByText(FALLBACK)).toBeTruthy();
   });
 
-  it('survives a thrown object that cannot be converted to text', () => {
+  it('describes a thrown object that cannot be converted to text', () => {
     // String() runs ToPrimitive and raises on this one -- the same hole the
     // research panel had.
+    //
+    // ASSERTING THE MESSAGE, NOT THE HEADING. Fixed in review (round 3): this
+    // test used to end at `getByText(FALLBACK)`, which was already true of the
+    // old code and so guarded nothing. The old fallback rendered
+    // `error.message` bare, and this value has no `message` -- so it read
+    // `undefined`, React rendered nothing, and the heading was on screen with an
+    // empty <pre> beneath it. The bug the test names is that the boundary cannot
+    // DESCRIBE the value, and that is what is asserted now.
     render(<ErrorBoundary><Boom throws={JSON.parse('{"toString":"x"}')} /></ErrorBoundary>);
     expect(screen.getByText(FALLBACK)).toBeTruthy();
+    expect(screen.getByText('Something was thrown that cannot be described in text.')).toBeTruthy();
   });
 
   it('shows the fallback for `throw null`, which is legal and has no message', () => {

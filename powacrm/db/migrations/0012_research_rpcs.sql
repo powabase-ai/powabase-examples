@@ -496,26 +496,63 @@ BEGIN
   -- head-of-queue on its own would abandon the head of a healthy backlog every
   -- tick, losing half the batch instead of all of it.
   --
+  -- "ONE JOB" IS REALLY "AT MOST TWO", and the second case is worth naming.
+  -- Condition 2 looks for a preceding job with status='queued' only, so a
+  -- COMMITTED stale `running` row does not shield the queued job behind it:
+  -- both can match in the same statement and both are abandoned. A committed
+  -- `running` row is only reachable when a service-role caller invokes
+  -- claim_research_jobs directly -- the worker's own claim is uncommitted for
+  -- the whole tick -- so this is not on the pg_cron path, and two is still a
+  -- bound rather than a batch. Recorded because it is the one case where "the
+  -- head, and only the head" is not literally true.
+  --
   -- RESIDUAL, and named rather than hidden: the first tick after the worker has
   -- been stopped for more than an hour can still abandon ONE job -- the head --
   -- because a stopped worker and a worker being killed by the head job leave
-  -- exactly the same evidence behind (nothing). That tick then runs the next
-  -- job, whose finished_at re-establishes condition 3, so the cost of a pause is
-  -- one job rather than the queue. The error text says both things could be
-  -- true instead of asserting the crash loop.
+  -- exactly the same evidence behind (nothing). The cost of a pause is one job
+  -- rather than the queue. The error text says both things could be true
+  -- instead of asserting the crash loop.
+  --
+  -- AND THE BACKSTOP DISARMS ITSELF, WHICH IS WHAT BOUNDS THAT. Corrected in
+  -- review (round 3): an earlier version of this paragraph said the NEXT job's
+  -- finished_at re-establishes condition 3. It does not, and it may never write
+  -- one at all -- a strike-1 failure sets finished_at back to NULL (see
+  -- fail_research_job above). What re-arms condition 3 is this statement's OWN
+  -- `finished_at = now()` on the row it just abandoned, in the same UPDATE.
+  --
+  -- The consequence is worth stating plainly, because it cuts both ways: AT
+  -- MOST ONE JOB PER HOUR, PROJECT-WIDE, CAN EVER BE ABANDONED. That is the
+  -- protection when the worker was merely switched off -- a paused queue loses
+  -- one job an hour, not all of it. It is also a throttle on genuine cleanup:
+  -- two consecutive crash-loopers cost roughly 120 paid runs before both are
+  -- abandoned, not 60, because the second one cannot be reached until an hour
+  -- after the first was.
   --
   -- ONE HOUR. The designed worst case for an honest job is 45 minutes: three
   -- attempts, each of which can sit up to the 15-minute stall window before the
   -- sweep below returns it to the queue. An hour clears that with headroom.
   --
-  -- WHAT THIS DOES NOT BOUND. An earlier draft of this comment claimed the
-  -- backstop caps a crash-looper at roughly 60 paid runs. That is only true when
-  -- the crash-looper is the ONLY thing in the queue. Condition 3 asks whether
-  -- anything finished in the window, and a healthy job finishing alongside the
-  -- looper re-arms it -- so a looper sharing a queue with steady traffic is never
-  -- abandoned by age. That is the deliberate cost of distinguishing "a job that
-  -- kills the worker" from "a worker that is simply stopped" using only evidence
-  -- that survives a backend kill: an in-transaction heartbeat rolls back with the
+  -- WHAT THIS DOES NOT BOUND, and it is narrower than the last two drafts of
+  -- this comment said. Corrected again in review (round 3).
+  --
+  -- A FAST-crashing looper at the head IS abandoned, even on a busy project.
+  -- claim_research_jobs(1) always takes the head, so a job that kills the worker
+  -- immediately stops anything else from running: nothing finishes, condition 3
+  -- arms within the hour, and the backstop takes it. The earlier claim that "a
+  -- looper sharing a queue with steady traffic is never abandoned by age" was
+  -- wrong -- it described a queue where the looper is somehow being stepped over,
+  -- which is only the case below.
+  --
+  -- A SLOW-crashing looper is the real gap: one that takes long enough to die
+  -- that the next tick starts while it is still holding its row. Ticks overlap,
+  -- the second one SKIP LOCKEDs past the looper, claims the job behind it and
+  -- finishes normally -- which re-arms condition 3 once a minute and the looper
+  -- is never old enough in a quiet window to be taken. It still burns a paid run
+  -- each time it is retried.
+  --
+  -- That gap is the deliberate cost of distinguishing "a job that kills the
+  -- worker" from "a worker that is simply stopped" using only evidence that
+  -- survives a backend kill: an in-transaction heartbeat rolls back with the
   -- tick, so the sweep has nothing else durable to read. The three-strike counter
   -- in fail_research_job still bounds every failure the worker can actually
   -- catch; this backstop only covers terminations it cannot. Closing the gap
@@ -573,6 +610,12 @@ BEGIN
        AND NOT EXISTS (SELECT 1 FROM research_jobs o
                         WHERE o.status = 'queued'
                           AND (o.created_at, o.id) < (j.created_at, j.id))
+       -- No index on finished_at, and that is deliberate at this size: 0014
+       -- caps research_daily_cap at 100, so research_jobs grows by at most a
+       -- few hundred rows a day and a scan once a minute is cheaper than a
+       -- second index to maintain on every write. If the cap ever rises,
+       -- `CREATE INDEX ... ON research_jobs (finished_at) WHERE finished_at IS
+       -- NOT NULL` is the partial index this wants.
        AND NOT EXISTS (SELECT 1 FROM research_jobs p
                         WHERE p.finished_at > now() - MAX_AGE)
      ORDER BY j.created_at, j.id

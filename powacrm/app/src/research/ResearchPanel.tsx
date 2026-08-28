@@ -1,3 +1,5 @@
+import { asText } from '@/lib/asText';
+
 // Renders `companies.research_data`, the structured payload written by
 // `complete_research_job` (db/migrations/0012_research_rpcs.sql).
 //
@@ -41,31 +43,12 @@ function asArray(v: unknown): { items: unknown[]; malformed: boolean } {
   return { items: [], malformed: true };
 }
 
-// STRING() IS NOT TOTAL, which is the hole this closes. It was the defence this
-// file claimed for every rendered field, and it throws on the one input class
-// this panel exists to survive: `String(x)` runs ToPrimitive, so an object
-// carrying a non-function `toString` -- `{"toString": "x"}` -- raises
-// `TypeError: Cannot convert object to primitive value` instead of returning
-// text. (Same for a `valueOf` that is not callable, and for an object created
-// with `Object.create(null)`, which has no `toString` at all.)
-//
-// It was reachable: complete_research_job validated `summary` with
-// `_payload->>'summary'`, and `->>` on a JSON object returns that object's text,
-// which is not empty -- so `{"summary":{"toString":"x"},"fit":[]}` was accepted,
-// stored, and threw here at render. 0012 now requires a string summary, but the
-// rows written before that check exists are still in the table, and no
-// server-side check covers a hook's `hook` or `evidence`. Layer two, again.
-export function asText(v: unknown): string {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'string') return v;
-  try {
-    return String(v);
-  } catch {
-    // Deliberately not '': an unreadable value is a malformed report, and a
-    // blank line reads as "the agent had nothing to say" instead.
-    return '(unreadable value)';
-  }
-}
+// asText moved to src/lib/asText.ts in review (round 3): lead/Timeline.tsx
+// renders the same agent-authored jsonb and needed the same helper, and a
+// `lead/` file importing from `research/` is the wrong direction for a leaf
+// helper. Re-exported from here because this panel's tests are where it is
+// exercised hardest.
+export { asText };
 
 // A string is what a model reaches for when it has something to say about a
 // boolean field ("maybe", "detected on the pricing page"). Anything that is not

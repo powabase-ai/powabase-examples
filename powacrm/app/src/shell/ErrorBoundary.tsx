@@ -33,7 +33,7 @@ type State = { caught: boolean; error: unknown; resetKey?: unknown };
 // is nothing left to catch it and the blank page this component exists to
 // prevent comes back by the one route it does not cover. `String()` is not the
 // answer on its own either: it runs ToPrimitive and raises on an object with a
-// non-function `toString` (see ResearchPanel.asText). Exported for its test.
+// non-function `toString` (see src/lib/asText.ts). Exported for its test.
 export function errorText(error: unknown): string {
   try {
     const raw = error !== null && typeof error === 'object' && 'message' in error
