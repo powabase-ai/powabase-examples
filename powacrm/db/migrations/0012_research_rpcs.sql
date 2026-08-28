@@ -150,9 +150,16 @@ CREATE OR REPLACE FUNCTION public.claim_research_jobs(_limit int)
 RETURNS SETOF research_jobs LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
   -- SKIP LOCKED is what makes overlapping ticks safe: two workers cannot claim
   -- the same row, and neither blocks on the other.
+  -- (created_at, id), not created_at alone: request_research stamps a whole
+  -- batch with one created_at, so created_at on its own leaves the order of a
+  -- batch undefined. requeue_stalled_research_jobs' head-of-queue test uses the
+  -- same key, and the two have to agree on which job is next or the backstop
+  -- would judge "head" by an order the claim does not follow. 0013 replaces
+  -- this body (the IN-subquery LIMIT is a plan-dependent bug); the ordering is
+  -- corrected here too because a fresh install applies this file first.
   UPDATE research_jobs SET status = 'running', started_at = now(), attempts = attempts + 1
    WHERE id IN (SELECT id FROM research_jobs WHERE status = 'queued'
-                 ORDER BY created_at LIMIT greatest(_limit, 0) FOR UPDATE SKIP LOCKED)
+                 ORDER BY created_at, id LIMIT greatest(_limit, 0) FOR UPDATE SKIP LOCKED)
   RETURNING *;
 $$;
 REVOKE ALL ON FUNCTION public.claim_research_jobs(int) FROM PUBLIC, anon, authenticated;
@@ -369,17 +376,17 @@ REVOKE ALL ON FUNCTION public.fail_research_job(uuid, text) FROM PUBLIC, anon, a
 CREATE OR REPLACE FUNCTION public.requeue_stalled_research_jobs()
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
-  -- Older than this and a job is abandoned rather than retried. See the note
-  -- below for why one hour, and why created_at is the only usable anchor.
+  -- Old enough to be a candidate for abandonment, and also the window over
+  -- which "has anything finished?" is judged. See the note below.
   MAX_AGE constant interval := interval '1 hour';
   n int;
 BEGIN
   -- ---------------------------------------------------------------------
   -- THE AGE BACKSTOP, and it is the only thing that bounds a crash loop.
   --
-  -- Fixed in review. The three-strike ceiling in fail_research_job cannot bound
-  -- a worker that DIES rather than fails: `attempts = attempts + 1` is written
-  -- by claim_research_jobs inside the same transaction as the run, so any
+  -- The three-strike ceiling in fail_research_job cannot bound a worker that
+  -- DIES rather than fails: `attempts = attempts + 1` is written by
+  -- claim_research_jobs inside the same transaction as the run, so any
   -- non-catchable termination -- backend killed, OOM, server restart, the pooler
   -- dropping the connection -- rolls back the claim AND the increment together.
   -- The job comes back `queued` with `attempts` unchanged (0, forever), the next
@@ -388,21 +395,54 @@ BEGIN
   -- retries is a paid agent run. run_research_tick()'s two exception handlers
   -- cover everything PL/pgSQL can catch; this covers what it cannot.
   --
-  -- created_at is the anchor because NOTHING ELSE SURVIVES. attempts and
+  -- created_at is the age anchor because NOTHING ELSE SURVIVES. attempts and
   -- started_at are both written inside the doomed transaction and both roll back
   -- with it, and updated_at is written by a trigger on the same UPDATE, so it
   -- rolls back too. A crash-looper is therefore indistinguishable from a
   -- freshly-queued job by every column except how long it has existed.
   --
+  -- AGE ALONE IS NOT ENOUGH, and shipping it alone was a bug. Fixed in review
+  -- (round 2): request_research inserts a whole batch in ONE transaction, so
+  -- every job in it carries the SAME created_at, and the worker drains one job
+  -- per minute while research_daily_cap is legal up to 100 (0014). A user who
+  -- selects 100 leads therefore has ~40 jobs cross a one-hour threshold on the
+  -- SAME tick, and an age-only backstop failed all forty at once -- inside the
+  -- documented limits, with an error blaming a crash loop that had not happened,
+  -- and with the daily cap already spent (the cap counts rows created today
+  -- whatever their outcome). The same thing happened to an entire queue after
+  -- any hour the worker was not running: cron deactivated for maintenance,
+  -- pg_cron down, a restore.
+  --
+  -- So a job is abandoned only when all three hold:
+  --
+  --   1. It is older than MAX_AGE.
+  --   2. It is at the HEAD of the queue -- no queued job sorts before it under
+  --      claim_research_jobs' own (created_at, id) order. A crash-looper always
+  --      is, because the claim takes the head and the crash puts it straight
+  --      back; a job merely waiting behind a backlog never is.
+  --   3. NOTHING HAS FINISHED in the last MAX_AGE. A worker that is draining a
+  --      backlog stamps finished_at once a minute, which is durable, committed
+  --      evidence that the queue is moving and that this job is waiting rather
+  --      than killing anything. A worker crash-looping on the head job finishes
+  --      nothing, because the head is all it ever reaches.
+  --
+  -- Condition 3 is what keeps 2 from becoming a slow version of the same bug:
+  -- head-of-queue on its own would abandon the head of a healthy backlog every
+  -- tick, losing half the batch instead of all of it.
+  --
+  -- RESIDUAL, and named rather than hidden: the first tick after the worker has
+  -- been stopped for more than an hour can still abandon ONE job -- the head --
+  -- because a stopped worker and a worker being killed by the head job leave
+  -- exactly the same evidence behind (nothing). That tick then runs the next
+  -- job, whose finished_at re-establishes condition 3, so the cost of a pause is
+  -- one job rather than the queue. The error text says both things could be
+  -- true instead of asserting the crash loop.
+  --
   -- ONE HOUR. The designed worst case for an honest job is 45 minutes: three
   -- attempts, each of which can sit up to the 15-minute stall window before the
   -- sweep below returns it to the queue. An hour clears that with headroom and
   -- caps a crash-looper at roughly 60 paid runs (one tick per minute) instead of
-  -- an unbounded number. It can in principle fail a job that was merely waiting
-  -- behind a very deep backlog -- the queue drains at one job per minute, so
-  -- that needs 60+ jobs ahead of it -- and that trade is deliberate: a
-  -- false-failed job cost nothing, says so in `error`, stamped no researched_at,
-  -- and can be requested again, while the other direction spends real money.
+  -- an unbounded number.
   --
   -- FOR UPDATE SKIP LOCKED is load-bearing, not decoration. One tick is one
   -- transaction, so a job another worker is CURRENTLY running still reads as
@@ -410,13 +450,20 @@ BEGIN
   -- to match if it waited in a backlog. Without SKIP LOCKED this UPDATE would
   -- block on that worker's row lock for the length of its agent call, inside
   -- every tick. Skipping locked rows means an in-flight job is never touched and
-  -- nothing ever waits.
+  -- nothing ever waits. The head-of-queue probe deliberately does NOT skip
+  -- locked rows: an in-flight job still reads as queued here, so its successor
+  -- correctly does not count as the head.
   -- ---------------------------------------------------------------------
   WITH abandoned AS MATERIALIZED (
     SELECT j.id, j.attempts, j.created_at
       FROM research_jobs j
      WHERE j.status IN ('queued','running')
        AND j.created_at < now() - MAX_AGE
+       AND NOT EXISTS (SELECT 1 FROM research_jobs o
+                        WHERE o.status = 'queued'
+                          AND (o.created_at, o.id) < (j.created_at, j.id))
+       AND NOT EXISTS (SELECT 1 FROM research_jobs p
+                        WHERE p.finished_at > now() - MAX_AGE)
      ORDER BY j.created_at, j.id
      FOR UPDATE SKIP LOCKED
   )
@@ -425,11 +472,11 @@ BEGIN
          finished_at = now(),
          -- Written so an operator can tell this apart from an ordinary failure
          -- at a glance: an ordinary one carries the agent's own error text, this
-         -- one names the age and the recorded attempts. A low attempts count on
-         -- an old job IS the crash-loop signature, because the increment is what
-         -- keeps rolling back.
+         -- one names the age, the attempts and the two states that produce it.
+         -- It no longer asserts a crash loop, because condition 3 cannot tell a
+         -- crash loop from a worker that was switched off.
          error = format(
-           'abandoned by the age backstop: still unfinished %s after it was queued, with %s recorded attempt(s). A worker killed mid-tick rolls back its own claim AND the attempts counter, so a job that reliably kills the worker never reaches the three-strike ceiling -- this is what stops it being retried every minute forever. Look at cron.job_run_details and the server log around %s. Nothing was written for this company and researched_at was not stamped, so it can be requested again once the cause is fixed.',
+           'abandoned by the age backstop: still unfinished %s after it was queued, at the head of the queue, and no research job in this project has finished in the last hour. Two situations look like this from the outside and this job is one of them: (a) it kills the worker mid-tick, which rolls back its own claim AND the attempts counter -- %s recorded attempt(s) here -- so it never reaches the three-strike ceiling and would otherwise be retried every minute forever; or (b) the worker has not been running at all. Look at cron.job_run_details and the server log around %s. Nothing was written for this company and researched_at was not stamped, so it can be requested again.',
            justify_interval(date_trunc('second', now() - a.created_at)), a.attempts, a.created_at)
     FROM abandoned a
    WHERE j.id = a.id;

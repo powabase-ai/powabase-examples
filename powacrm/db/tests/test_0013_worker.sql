@@ -357,6 +357,16 @@ DECLARE
 BEGIN
   SELECT id INTO b FROM brands WHERE name = 'gpt-trainer';
 
+  -- Condition 3 of the backstop (see requeue_stalled_research_jobs in 0012): a
+  -- job is abandoned only when NOTHING in this project has finished for an hour.
+  -- Section 2 above just drove a job to its third strike, which stamped
+  -- finished_at -- committed evidence that the worker is alive and draining the
+  -- queue. Backdate it: the state under test here is a worker that finishes
+  -- nothing at all, and that distinction is the whole point of the condition.
+  -- Rolled back with the rest of the file.
+  UPDATE research_jobs SET finished_at = now() - interval '4 hours'
+   WHERE finished_at > now() - interval '1 hour';
+
   INSERT INTO companies (brand_id, name, domain) VALUES (b,'_t13_old_co','t13old.example') RETURNING id INTO c_old;
   INSERT INTO companies (brand_id, name, domain) VALUES (b,'_t13_young_co','t13young.example') RETURNING id INTO c_young;
   INSERT INTO companies (brand_id, name, domain) VALUES (b,'_t13_run_co','t13run.example') RETURNING id INTO c_run;
@@ -406,6 +416,92 @@ BEGIN
   -- ask for it once the cause is fixed.
   IF (SELECT researched_at FROM companies WHERE id = c_old) IS NOT NULL THEN
     RAISE EXCEPTION 'an abandoned job left researched_at stamped, locking the company for 30 days';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- 3a2. AND IT MUST NOT FAIL A BATCH THAT IS MERELY WAITING ITS TURN.
+--
+-- Regression, found in review round 2. The backstop shipped with age as its
+-- only condition, and request_research inserts a whole batch in ONE transaction
+-- -- so every job in it shares a created_at. The worker drains one job per
+-- minute and research_daily_cap is legal to 100 (0014), so a single legal batch
+-- puts ~40 jobs over a one-hour threshold ON THE SAME TICK. All forty were
+-- failed together, told they had crash-looped, and their daily cap was already
+-- spent (0012 counts rows created today whatever their outcome). Reproduced
+-- against this database before the fix: 40 of 40 failed.
+--
+-- Two conditions now stand between that and a user's afternoon, and both are
+-- asserted here: the queue must not be moving, and the job must be at the head.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  b uuid; c uuid; i int; n_failed int; n_queued int;
+  batch_at timestamptz := now() - interval '61 minutes';
+BEGIN
+  SELECT id INTO b FROM brands WHERE name = 'gpt-trainer';
+  -- Park everything else: this section reasons about which job is at the head
+  -- of the queue, so it has to own the queue. Rolled back with the file.
+  UPDATE research_jobs SET status = 'skipped' WHERE status IN ('queued','running');
+  UPDATE research_jobs SET finished_at = now() - interval '4 hours'
+   WHERE finished_at > now() - interval '1 hour';
+
+  -- CASE 1: a healthy worker, mid-batch. Ten jobs from one request_research
+  -- call, all past the threshold, and one job finished a minute ago -- which is
+  -- what "the worker is draining the queue" looks like from the outside.
+  FOR i IN 1..10 LOOP
+    INSERT INTO companies (brand_id, name, domain)
+      VALUES (b, '_t13_batch_' || i, '_t13-batch-' || i || '.invalid') RETURNING id INTO c;
+    INSERT INTO research_jobs (brand_id, company_id, created_at, attempts)
+      VALUES (b, c, batch_at, 0);
+  END LOOP;
+  INSERT INTO companies (brand_id, name, domain)
+    VALUES (b, '_t13_batch_done', '_t13-batch-done.invalid') RETURNING id INTO c;
+  INSERT INTO research_jobs (brand_id, company_id, status, created_at, finished_at, attempts)
+    VALUES (b, c, 'done', batch_at, now() - interval '1 minute', 1);
+
+  PERFORM requeue_stalled_research_jobs();
+
+  SELECT count(*) FILTER (WHERE j.status = 'failed'), count(*) FILTER (WHERE j.status = 'queued')
+    INTO n_failed, n_queued
+    FROM research_jobs j JOIN companies co ON co.id = j.company_id
+   WHERE co.name LIKE '_t13_batch_%' AND co.name <> '_t13_batch_done';
+  IF n_failed > 0 THEN
+    RAISE EXCEPTION 'the age backstop failed % of 10 jobs from a single batch while the worker was visibly still draining it (one job finished a minute ago) -- this is the round-2 regression: a legal 100-lead request loses its tail and its daily cap', n_failed;
+  END IF;
+  IF n_queued <> 10 THEN
+    RAISE EXCEPTION 'expected all 10 backlogged jobs to be left queued, got % queued', n_queued;
+  END IF;
+
+  -- CASE 2: the same batch, but nothing has finished for an hour -- the worker
+  -- was switched off, or the head job is killing it. Indistinguishable from
+  -- here, so the backstop takes the head and ONLY the head: the loop is bounded
+  -- either way, and the next tick's own finished_at re-opens the gate for the
+  -- rest.
+  UPDATE research_jobs SET finished_at = now() - interval '4 hours'
+   WHERE finished_at > now() - interval '1 hour';
+
+  PERFORM requeue_stalled_research_jobs();
+
+  SELECT count(*) FILTER (WHERE j.status = 'failed'), count(*) FILTER (WHERE j.status = 'queued')
+    INTO n_failed, n_queued
+    FROM research_jobs j JOIN companies co ON co.id = j.company_id
+   WHERE co.name LIKE '_t13_batch_%' AND co.name <> '_t13_batch_done';
+  IF n_failed <> 1 THEN
+    RAISE EXCEPTION 'with no progress in the window the backstop should abandon exactly one job -- the head of the queue -- and got % of 10', n_failed;
+  END IF;
+  IF n_queued <> 9 THEN
+    RAISE EXCEPTION 'the other 9 jobs of the batch should still be queued, got %', n_queued;
+  END IF;
+  -- And it took the head, not an arbitrary member of the tie: (created_at, id)
+  -- is the order claim_research_jobs claims in, so the two agree on "next".
+  IF NOT EXISTS (
+    SELECT 1 FROM research_jobs j JOIN companies co ON co.id = j.company_id
+     WHERE co.name LIKE '_t13_batch_%' AND co.name <> '_t13_batch_done' AND j.status = 'failed'
+       AND NOT EXISTS (SELECT 1 FROM research_jobs o JOIN companies co2 ON co2.id = o.company_id
+                        WHERE co2.name LIKE '_t13_batch_%' AND co2.name <> '_t13_batch_done'
+                          AND (o.created_at, o.id) < (j.created_at, j.id))) THEN
+    RAISE EXCEPTION 'the backstop abandoned a job that was not the (created_at, id) head of the queue -- it and claim_research_jobs no longer agree on which job is next';
   END IF;
 END $$;
 
