@@ -129,6 +129,28 @@ BEGIN
   IF n <> 0 THEN RAISE EXCEPTION 'a cross-brand fit entry produced an event for a person outside the job''s brand'; END IF;
   IF (SELECT status FROM research_jobs WHERE id=j2) <> 'done' THEN RAISE EXCEPTION 'edge-case job not marked done'; END IF;
 
+  -- hooks and sources must be arrays. Blocker B3's server half: they were stored
+  -- verbatim, and a string `hooks` threw `hooks.map is not a function` in the SPA
+  -- and (with no error boundary at the time) blanked the whole app. tech_stack --
+  -- the one field that WAS validated -- is the one the client already guarded.
+  INSERT INTO research_jobs (brand_id, company_id) VALUES (b,c) RETURNING id INTO j2;
+  PERFORM claim_research_jobs(5);
+  BEGIN
+    PERFORM complete_research_job(j2, jsonb_build_object(
+      'summary', 'x', 'fit', '[]'::jsonb, 'hooks', 'none found'));
+    RAISE EXCEPTION 'a string `hooks` was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLSTATE = 'P0001' AND SQLERRM = 'a string `hooks` was accepted' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM complete_research_job(j2, jsonb_build_object(
+      'summary', 'x', 'fit', '[]'::jsonb, 'sources', to_jsonb('https://one.example'::text)));
+    RAISE EXCEPTION 'a string `sources` was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLSTATE = 'P0001' AND SQLERRM = 'a string `sources` was accepted' THEN RAISE; END IF;
+  END;
+
+
   -- fail path: under 3 attempts it goes back to the queue, at 3 it stops
   INSERT INTO research_jobs (brand_id, company_id) VALUES (b,c) RETURNING id INTO j;
   PERFORM claim_research_jobs(5);

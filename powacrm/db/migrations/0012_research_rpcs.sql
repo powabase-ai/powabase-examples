@@ -200,8 +200,21 @@ BEGIN
      OR jsonb_typeof(_payload->'fit') IS DISTINCT FROM 'array'
     THEN RAISE EXCEPTION 'research payload is malformed: need an object with a non-empty summary and a fit array';
   END IF;
+  -- Fixed in review: `tech_stack` was the ONLY optional array checked, and it is
+  -- the one the client already guarded. `hooks` and `sources` were stored
+  -- verbatim and rendered straight -- so `{"hooks":"none found"}`, ordinary model
+  -- output and steerable by the prompt injection this feature anticipates, threw
+  -- `hooks.map is not a function` during render and (with no error boundary in
+  -- the app at the time) blanked the entire SPA. The client is hardened too, but
+  -- the write side is where a malformed payload should die: it is one row that
+  -- every later reader has to cope with otherwise.
   IF _payload ? 'tech_stack' AND jsonb_typeof(_payload->'tech_stack') IS DISTINCT FROM 'array'
     THEN RAISE EXCEPTION 'research payload tech_stack must be an array'; END IF;
+  IF _payload ? 'hooks' AND jsonb_typeof(_payload->'hooks') IS DISTINCT FROM 'array'
+    THEN RAISE EXCEPTION 'research payload hooks must be an array, got %', jsonb_typeof(_payload->'hooks'); END IF;
+  IF _payload ? 'sources' AND jsonb_typeof(_payload->'sources') IS DISTINCT FROM 'array'
+    THEN RAISE EXCEPTION 'research payload sources must be an array, got %', jsonb_typeof(_payload->'sources'); END IF;
+
 
   UPDATE companies SET
     research = _payload->>'summary',

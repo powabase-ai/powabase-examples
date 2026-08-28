@@ -1,7 +1,8 @@
 import type { CSSProperties } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { supabase } from '@/lib/powabase';
 import { useBrand } from './BrandContext';
+import { ErrorBoundary } from './ErrorBoundary';
 
 const linkStyle = ({ isActive }: { isActive: boolean }): CSSProperties => ({
   display: 'block', padding: 'var(--space-1) var(--space-2)', borderRadius: 'var(--radius-md)',
@@ -12,6 +13,11 @@ const linkStyle = ({ isActive }: { isActive: boolean }): CSSProperties => ({
 
 export function Shell() {
   const { brand, brands, setBrandId } = useBrand();
+  // The boundary that matters most is this one, INSIDE the chrome: a page that
+  // throws leaves the nav, the brand picker and sign-out on screen, so the user
+  // clicks their way out instead of reloading into the same broken route. App's
+  // outer boundary is the backstop for a throw in the router or in Shell itself.
+  const location = useLocation();
   return (
     <div style={{ display: 'flex', height: '100vh' }}>
       <nav style={{ width: 240, flexShrink: 0, padding: 'var(--space-4)', display: 'grid', gap: 'var(--space-1)', alignContent: 'start' }}>
@@ -27,7 +33,9 @@ export function Shell() {
       </nav>
       <main style={{ flex: 1, background: 'var(--bg-primary)', borderRadius: 'var(--radius-lg) 0 0 0',
         border: '1px solid var(--border-medium)', overflow: 'auto', padding: 'var(--space-6)' }}>
-        <Outlet />
+        <ErrorBoundary resetKey={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   );
