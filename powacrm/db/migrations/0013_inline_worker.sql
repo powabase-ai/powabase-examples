@@ -394,6 +394,7 @@ DECLARE
   MAX_STARTS constant int := 50;
 
   v_requeued int := 0;
+  v_abandoned int := 0;
   v_job research_jobs;
   v_url text; v_key text; v_agent text;
   v_name text; v_domain text; v_product text; v_icp text;
@@ -431,7 +432,44 @@ BEGIN
   -- and that is the point: the cancel path should never be the one that fires.
   SET LOCAL http.timeout_msec = 180000;
 
-  v_requeued := requeue_stalled_research_jobs();
+  -- --- the sweep, and then STOP if it abandoned anything ------------------
+  -- Found in review (round 3), and it is the hole the round-2 backstop fix
+  -- opened. One tick is one transaction, so the abandonment this sweep writes
+  -- and the agent run below it commit or roll back TOGETHER. The only thing the
+  -- backstop exists to bound is a job that terminates the worker backend
+  -- uncatchably -- and in exactly that case the claim below kills the backend
+  -- and takes the abandonment with it. Nothing is ever recorded, the head is
+  -- re-abandoned and re-rolled-back every minute, and the unbounded paid-run
+  -- loop the backstop was written to stop runs forever.
+  --
+  -- The age-only version was accidentally immune: it failed EVERY old job, so
+  -- the claim found an empty queue and the tick always committed. Abandoning
+  -- only the head is what leaves something behind to claim.
+  --
+  -- So: when the sweep abandoned a job, this tick's only job is to commit that.
+  -- Returning here ends the transaction with the abandonment durable, and the
+  -- next tick -- one minute later -- claims and runs. The cost is one tick of
+  -- throughput, and only on a tick where the queue was already stuck; the
+  -- backstop self-disarms to at most one abandonment per hour project-wide (see
+  -- 0012), so it is bounded at a minute an hour in the worst case.
+  --
+  -- The alternative shape is a second cron.schedule entry running the sweep on
+  -- its own. It commits independently by construction and costs no throughput,
+  -- but it doubles what an operator has to reason about, pause during the test
+  -- suite and unschedule on teardown -- for an example app, and for a minute an
+  -- hour, that is the more expensive side of the trade.
+  --
+  -- A requeue does NOT stop the tick. If a 15-minute stall requeue rolls back,
+  -- the job simply stays `running` and the next sweep finds it again; no agent
+  -- run is spent in the meantime. Only the abandonment must survive.
+  SELECT r.requeued, r.abandoned INTO v_requeued, v_abandoned
+    FROM requeue_stalled_research_jobs() r;
+  IF v_abandoned > 0 THEN
+    -- No job was claimed, so there is nothing to record this against with
+    -- record_research_tick -- same reason as the empty-queue return below.
+    RETURN jsonb_build_object('ok', true, 'requeued', v_requeued, 'abandoned', v_abandoned,
+      'claimed', 0, 'note', 'the age backstop abandoned a job; committing that before anything else runs in this transaction');
+  END IF;
 
   SELECT * INTO v_job FROM claim_research_jobs(1);
   IF v_job.id IS NULL THEN

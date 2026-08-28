@@ -317,8 +317,14 @@ BEGIN
   -- removed with the test still green -- which is precisely the failure mode
   -- being guarded, since the path that loses its diagnostics is always the one
   -- nobody expected to take. Counted instead: every RETURN in the body must go
-  -- through record_research_tick, with exactly one documented exception -- the
-  -- empty-queue return, which has claimed no job to record anything against.
+  -- through record_research_tick, with exactly TWO documented exceptions, and
+  -- both are exceptions for the same reason -- they claimed no job, so there is
+  -- no row to record anything against:
+  --
+  --   1. the empty queue;
+  --   2. the abandonment return added in review round 3, where the sweep
+  --      abandoned a job and the tick stops so that abandonment commits on its
+  --      own rather than sharing a transaction with an agent run (see 3d).
   --
   -- `RETURN ` with the trailing space does not match the `RETURNS jsonb` in the
   -- signature. Comments in the body use lower case for the word.
@@ -327,9 +333,9 @@ BEGIN
   IF n_rec = 0 THEN
     RAISE EXCEPTION 'run_research_tick() no longer records its result on the job row';
   END IF;
-  IF n_ret - n_rec <> 1 THEN
-    RAISE EXCEPTION 'run_research_tick() has % RETURN statements but only % of them record the tick on the job row -- exactly one (the empty queue, which claimed nothing) may skip it, so % path(s) now discard their diagnostics into pg_cron',
-      n_ret, n_rec, n_ret - n_rec - 1;
+  IF n_ret - n_rec <> 2 THEN
+    RAISE EXCEPTION 'run_research_tick() has % RETURN statements but only % of them record the tick on the job row -- exactly two (the empty queue and the post-abandonment stop, neither of which claimed a job) may skip it, so % path(s) now discard their diagnostics into pg_cron',
+      n_ret, n_rec, n_ret - n_rec - 2;
   END IF;
 
   -- And the recorder actually writes. Rolled back with the rest of the file.
@@ -518,6 +524,105 @@ BEGIN
                         WHERE co2.name LIKE '_t13_batch_%' AND co2.name <> '_t13_batch_done'
                           AND (o.created_at, o.id) < (j.created_at, j.id))) THEN
     RAISE EXCEPTION 'the backstop abandoned a job that was not the (created_at, id) head of the queue -- it and claim_research_jobs no longer agree on which job is next';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- 3d. AN ABANDONMENT MUST COMMIT ON ITS OWN, NOT SHARE A TRANSACTION WITH A RUN.
+--
+-- Found in review round 3, and it is a hole the round-2 fix opened rather than
+-- one that was always there. One tick is one transaction. The tick swept, then
+-- claimed and ran a job in the same transaction -- so if the job it claimed
+-- killed the backend (an uncatchable termination, which is the ONLY thing the
+-- backstop exists for), the abandonment written microseconds earlier rolled
+-- back with it. Nothing was ever recorded, the head was re-abandoned and
+-- re-rolled-back every minute, and the unbounded paid-run loop the backstop was
+-- written to stop ran forever.
+--
+-- The age-only version was accidentally immune: it failed EVERY old job, so the
+-- claim that followed found an empty queue and the tick always committed.
+-- Abandoning only the head deliberately leaves work behind to claim, which is
+-- what makes the shared transaction reachable.
+--
+-- A backend kill cannot be staged from inside a transaction, so this drives the
+-- OBSERVABLE half of the fix, which is the same thing: a tick that abandoned
+-- something must claim NOTHING and return, leaving the run to the next tick.
+-- Against the pre-fix worker this section is red twice over -- `claimed` comes
+-- back 1, and the second job carries an attempt it should not have.
+--
+-- Costs no agent run: the job left behind belongs to a company with no domain,
+-- so even the pre-fix worker fails it in words long before the HTTP call.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  b uuid; c_head uuid; c_next uuid; j_head uuid; j_next uuid; r jsonb;
+  st text; err text; att int;
+BEGIN
+  SELECT id INTO b FROM brands WHERE name = 'gpt-trainer';
+
+  -- Own the queue and the finished-at window: this section reasons about which
+  -- job is at the head and about condition 3 of the backstop. Rolled back with
+  -- the file, like every other fixture here.
+  UPDATE research_jobs SET status = 'skipped' WHERE status IN ('queued','running');
+  UPDATE research_jobs SET finished_at = now() - interval '4 hours'
+   WHERE finished_at > now() - interval '1 hour';
+
+  -- The head: old enough for the backstop, and the only job it can reach in one
+  -- statement (the head-of-queue probe is evaluated against the pre-UPDATE
+  -- snapshot, so the job behind it is not a candidate on this pass).
+  INSERT INTO companies (brand_id, name, domain)
+    VALUES (b, '_t13_n1_head', '_t13-n1-head.invalid') RETURNING id INTO c_head;
+  INSERT INTO research_jobs (brand_id, company_id, created_at, attempts)
+    VALUES (b, c_head, now() - interval '90 minutes', 0) RETURNING id INTO j_head;
+
+  -- The job behind it. Deliberately DOMAINLESS: it is the one the pre-fix tick
+  -- would go on to claim in the same transaction, and this keeps that mistake
+  -- free rather than a paid agent run. Well inside the age window, so the
+  -- backstop has no claim on it either way.
+  INSERT INTO companies (brand_id, name) VALUES (b, '_t13_n1_next') RETURNING id INTO c_next;
+  INSERT INTO research_jobs (brand_id, company_id, created_at, attempts)
+    VALUES (b, c_next, now() - interval '10 minutes', 0) RETURNING id INTO j_next;
+
+  r := run_research_tick();
+
+  -- THE ASSERTION. The tick abandoned the head, so it must have stopped there.
+  IF coalesce((r->>'claimed')::int, -1) <> 0 THEN
+    RAISE EXCEPTION 'a tick that abandoned a job went on to claim and run another one in the SAME transaction (claimed=%). An uncatchable termination in that run rolls the abandonment back with it, so nothing is ever abandoned and the queue is retried every minute forever: %',
+      coalesce(r->>'claimed', 'null'), r;
+  END IF;
+  IF coalesce((r->>'abandoned')::int, 0) <> 1 THEN
+    RAISE EXCEPTION 'the tick did not report the abandonment it performed, so nothing at the call site can know the transaction now holds something that must commit: %', r;
+  END IF;
+  IF (r->>'ok')::boolean IS NOT TRUE THEN
+    RAISE EXCEPTION 'a tick that swept cleanly and stopped is not an error: %', r;
+  END IF;
+
+  -- The head really was abandoned...
+  SELECT status, error INTO st, err FROM research_jobs WHERE id = j_head;
+  IF st <> 'failed' THEN
+    RAISE EXCEPTION 'the head of a stuck queue was left as % instead of being abandoned', st;
+  END IF;
+  IF coalesce(err, '') NOT LIKE 'abandoned by the age backstop%' THEN
+    RAISE EXCEPTION 'the abandoned head does not say why: %', coalesce(err, '(null)');
+  END IF;
+
+  -- ...and the job behind it was not touched. An attempt recorded here is the
+  -- pre-fix worker having claimed and run it inside the very transaction that
+  -- holds the abandonment.
+  SELECT status, attempts INTO st, att FROM research_jobs WHERE id = j_next;
+  IF st <> 'queued' OR att <> 0 THEN
+    RAISE EXCEPTION 'the job behind the abandoned head was claimed by the same tick (status=%, attempts=%) -- the abandonment and the run share a transaction', st, att;
+  END IF;
+
+  -- And the next tick does the running, so nothing is lost by stopping: the
+  -- backstop has already stamped a finished_at, which disarms condition 3, so
+  -- this second tick sweeps nothing and claims normally.
+  r := run_research_tick();
+  IF coalesce((r->>'claimed')::int, -1) <> 1 THEN
+    RAISE EXCEPTION 'the tick after an abandonment must go back to claiming work, got %', r;
+  END IF;
+  IF (r->>'job_id') IS DISTINCT FROM j_next::text THEN
+    RAISE EXCEPTION 'the tick after an abandonment claimed a different job than the one left behind: %', r;
   END IF;
 END $$;
 

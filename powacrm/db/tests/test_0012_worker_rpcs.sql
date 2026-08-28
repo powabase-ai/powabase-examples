@@ -255,7 +255,10 @@ BEGIN
 
   -- stalled jobs are recovered, or nothing would ever free them
   UPDATE research_jobs SET status='running', started_at = now() - interval '20 minutes' WHERE id=j;
-  IF requeue_stalled_research_jobs() < 1 THEN RAISE EXCEPTION 'a 20-minute-old running job was not requeued'; END IF;
+  -- Two OUT columns since review round 3 (`requeued`, `abandoned`), so this
+  -- reads the one it means rather than the whole record.
+  IF (SELECT r.requeued FROM requeue_stalled_research_jobs() r) < 1
+    THEN RAISE EXCEPTION 'a 20-minute-old running job was not requeued'; END IF;
   IF (SELECT status FROM research_jobs WHERE id=j) <> 'queued' THEN RAISE EXCEPTION 'stalled job not returned to queued'; END IF;
 
   DELETE FROM events WHERE person_id IN (p1,p2,p3,p4,p_other);

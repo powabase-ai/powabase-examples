@@ -412,8 +412,16 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION public.fail_research_job(uuid, text) FROM PUBLIC, anon, authenticated;
 
-CREATE OR REPLACE FUNCTION public.requeue_stalled_research_jobs()
-RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+-- TWO COUNTS OUT, NOT ONE, AND THE SECOND ONE IS LOAD-BEARING. `abandoned` is
+-- what lets run_research_tick() commit this sweep before it runs anything --
+-- see the transaction note on the backstop below, and 0013's call site. The
+-- DROP is what makes the change of return type possible at all: CREATE OR
+-- REPLACE cannot turn `RETURNS int` into a record, and this migration is
+-- re-runnable, so it has to cope with the int version already being there.
+-- Nothing outside this repo calls it -- it is revoked from every client role.
+DROP FUNCTION IF EXISTS public.requeue_stalled_research_jobs();
+CREATE FUNCTION public.requeue_stalled_research_jobs(OUT requeued int, OUT abandoned int)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   -- Old enough to be a candidate for abandonment, and also the window over
   -- which "has anything finished?" is judged. See the note below.
@@ -495,6 +503,36 @@ BEGIN
   -- properly means reading cron.job_run_details (guarded on to_regnamespace('cron'),
   -- as 0013 does elsewhere), which a CRM-only install would not have.
   --
+  -- THE ABANDONMENT HAS TO COMMIT ON ITS OWN, and that is why this function
+  -- reports `abandoned` instead of keeping the number to itself. Found in
+  -- review (round 3), and it is a hole the round-2 fix opened rather than one
+  -- that was always there.
+  --
+  -- One tick is one transaction: run_research_tick() calls this sweep and then
+  -- claims and runs a job in the SAME transaction. The only failure this
+  -- backstop exists for is an UNCATCHABLE termination of the worker backend --
+  -- so if the job claimed microseconds after this UPDATE kills the backend, the
+  -- abandonment written here rolls back with it. Nothing is ever recorded, and
+  -- the queue is retried every minute forever: precisely the unbounded paid-run
+  -- loop the backstop was written to stop.
+  --
+  -- The age-only version was accidentally immune, which is why this only shows
+  -- up now. It failed EVERY old job, so the claim that followed found an empty
+  -- queue and the tick always committed. Abandoning only the head deliberately
+  -- leaves work behind to claim, and that is what makes the shared transaction
+  -- reachable.
+  --
+  -- The fix is at the call site, not here: 0013's tick returns as soon as this
+  -- reports a non-zero `abandoned`, so the abandonment commits by itself and
+  -- the next tick, a minute later, does the running. The alternative -- a second
+  -- cron.schedule entry for the sweep -- buys back that one tick of throughput
+  -- at the price of a second scheduled job to reason about, to pause during the
+  -- tests, and to tear down. A tick is a minute, abandonment is capped at one
+  -- per hour project-wide (see the self-disarm note above), and the tick being
+  -- skipped is one that was about to run a job in a transaction we have just
+  -- used to record something that must survive. It is the cheap side of the
+  -- trade.
+  --
   -- FOR UPDATE SKIP LOCKED is load-bearing, not decoration. One tick is one
   -- transaction, so a job another worker is CURRENTLY running still reads as
   -- `queued` to this session -- its claim is uncommitted -- and it is old enough
@@ -505,7 +543,10 @@ BEGIN
   -- locked rows: an in-flight job still reads as queued here, so its successor
   -- correctly does not count as the head.
   -- ---------------------------------------------------------------------
-  WITH abandoned AS MATERIALIZED (
+  -- The CTE is `to_abandon`, not `abandoned`: `abandoned` is now an OUT
+  -- parameter of this function, and a plpgsql variable sharing a name with a
+  -- range table entry is an ambiguity error, not a silent shadow.
+  WITH to_abandon AS MATERIALIZED (
     SELECT j.id, j.attempts, j.created_at
       FROM research_jobs j
      WHERE j.status IN ('queued','running')
@@ -529,8 +570,9 @@ BEGIN
          error = format(
            'abandoned by the age backstop: still unfinished %s after it was queued, at the head of the queue, and no research job in this project has finished in the last hour. Two situations look like this from the outside and this job is one of them: (a) it kills the worker mid-tick, which rolls back its own claim AND the attempts counter -- %s recorded attempt(s) here -- so it never reaches the three-strike ceiling and would otherwise be retried every minute forever; or (b) the worker has not been running at all. Look at cron.job_run_details and the server log around %s. Nothing was written for this company and researched_at was not stamped, so it can be requested again.',
            justify_interval(date_trunc('second', now() - a.created_at)), a.attempts, a.created_at)
-    FROM abandoned a
+    FROM to_abandon a
    WHERE j.id = a.id;
+  GET DIAGNOSTICS abandoned = ROW_COUNT;
 
   -- A worker can die mid-run. Without this the job sits in `running` forever and
   -- the partial unique index blocks the company from ever being researched again.
@@ -540,11 +582,18 @@ BEGIN
    WHERE status='running' AND started_at < now() - interval '15 minutes';
   GET DIAGNOSTICS n = ROW_COUNT;
 
-  -- Still the requeued count, and deliberately not a sum of the two: the worker
-  -- reports this as `requeued` in its tick result, and an abandonment is not a
-  -- requeue. Abandonment is observable where it belongs -- on the job row, in
-  -- `error`, readable by the brand's owner.
-  RETURN n;
+  -- Two separate counts, deliberately not summed: the worker reports `requeued`
+  -- in its tick result, and an abandonment is not a requeue. `abandoned` is not
+  -- a report -- it is the signal that this transaction now holds something that
+  -- must commit before anything else runs in it. The abandonment stays
+  -- observable where it belongs as well: on the job row, in `error`, readable by
+  -- the brand's owner.
+  --
+  -- Only the abandonment forces the early return. A requeue that rolls back is
+  -- harmless: the job stays `running`, the next sweep finds it again fifteen
+  -- minutes later, and no agent run is spent in between.
+  requeued := n;
+  RETURN;
 END $$;
 REVOKE ALL ON FUNCTION public.requeue_stalled_research_jobs() FROM PUBLIC, anon, authenticated;
 
