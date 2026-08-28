@@ -1,6 +1,10 @@
 import { groupEventsByMonth, type TimelineEvent } from './groupEventsByMonth';
 
-const ICONS: Record<string, string> = { note: '📝', stage_changed: '→', field_updated: '✏️', import: '⬆', error: '⚠' };
+// `researched` is this phase's own event type and it was missing here, so the
+// feature the release is about rendered with the generic bullet. Nothing in
+// the type system catches that: ICONS is a Record<string, string>, so every
+// lookup type-checks and a missing key is only visible on screen.
+const ICONS: Record<string, string> = { note: '📝', stage_changed: '→', field_updated: '✏️', import: '⬆', researched: '🔍', error: '⚠' };
 
 function rel(iso: string): string {
   const s = (Date.now() - new Date(iso).getTime()) / 1000;

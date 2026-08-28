@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# Checked HERE, before anything runs, because of what happens otherwise: the
+# HTTP suites open with `: "${PB_SERVICE_KEY:?}"`, which exits 1 -- a hard
+# failure, not the 77 this runner collects -- so the skip summary at the bottom
+# could tell an operator to "set PB_SERVICE_KEY" in a run that could never have
+# reached it. One message, at the point where the fix is still cheap.
+: "${PB_DB_URL:?Set PB_DB_URL (Studio -> Connect -> Database URL)}"
+: "${VITE_POWABASE_URL:?Set VITE_POWABASE_URL to the project URL}"
+: "${VITE_POWABASE_ANON_KEY:?Set VITE_POWABASE_ANON_KEY to the project Anon key}"
+: "${PB_SERVICE_KEY:?Set PB_SERVICE_KEY: the isolation suites create their second account through the GoTrue admin API, and test_0012_injection needs it to run the agent}"
+: "${PB_TEST_EMAIL:?Set PB_TEST_EMAIL to the login created by db/setup/create_user.sh}"
+: "${PB_TEST_PASSWORD:?Set PB_TEST_PASSWORD to that login password}"
 for f in tests/test_0001_helpers.sql tests/test_0002_core_tables.sql tests/test_0003_events.sql \
          tests/test_0006_import_rpc.sql tests/test_0007_import_company_by_name.sql \
          tests/test_0011_research_schema.sql tests/test_0012_worker_rpcs.sql \
@@ -111,9 +123,14 @@ run_http_suite ./tests/test_0012_request_research.sh
 run_http_suite ./tests/test_0012_injection.sh
 
 if [ ${#SKIPPED[@]} -gt 0 ]; then
-  echo "DB TESTS OK -- ${#SKIPPED[@]} SUITE(S) SKIPPED (isolation NOT verified): ${SKIPPED[*]}"
-  echo "  Those suites need a second account. Set PB_SERVICE_KEY so they can use the"
-  echo "  GoTrue admin API, or enable signups, then run this again."
+  # Never the substring "OK" on this line. A CI step is as likely to be
+  # `run_all.sh | grep -q OK` as it is to read the words, and "DB TESTS OK -- 3
+  # SUITE(S) SKIPPED" passes that grep -- which is the same green-on-skip failure
+  # this whole mechanism exists to end, one layer further out.
+  echo "DB TESTS INCOMPLETE -- ${#SKIPPED[@]} SUITE(S) SKIPPED, ISOLATION NOT VERIFIED: ${SKIPPED[*]}"
+  echo "  Those suites need a second account, and this build has neither the GoTrue"
+  echo "  admin API nor open signups. Enable one of the two and run this again."
+  echo "  Nothing here proves that one account cannot read another's leads."
 else
   echo "ALL DB TESTS OK"
 fi

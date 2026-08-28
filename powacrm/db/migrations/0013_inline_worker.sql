@@ -531,8 +531,18 @@ BEGIN
     END;
 
     IF v_http_status IS NULL OR v_http_status >= 300 THEN
+      -- The upstream body goes to the SERVER LOG, not onto the job row. Fixed in
+      -- review (round 2): research_jobs.error is readable by the brand's owner
+      -- (0011's SELECT policy), and this is the one place a verbatim response
+      -- from another service was copied into it. Nothing secret can reach that
+      -- body today -- but "today" is doing the work in that sentence, and the
+      -- audience for an upstream 5xx body is the operator, who has the log.
+      -- diagnostics keeps the status code, which is the part the owner needs to
+      -- tell "the agent is down" from "my company has no domain".
+      RAISE WARNING 'powacrm worker: agent stream returned HTTP % for job %; first 300 bytes of the body: %',
+        v_http_status, v_job.id, left(coalesce(v_content, ''), 300);
       PERFORM fail_research_job(v_job.id,
-        format('agent stream HTTP %s: %s', v_http_status, left(coalesce(v_content, ''), 300)));
+        format('agent stream HTTP %s. The response body is in the Postgres server log for this tick (cron.job_run_details names the run), not here.', v_http_status));
       RETURN record_research_tick(v_job.id, jsonb_build_object('ok', false, 'requeued', v_requeued, 'claimed', 1,
         'job_id', v_job.id, 'http_status', v_http_status, 'note', 'agent stream returned an error status'));
     END IF;
@@ -580,8 +590,15 @@ BEGIN
     -- Tool names only -- the full tool_calls carry every scrape verbatim, tens
     -- of KB each. An ungrounded run shows up here as an empty list, which is
     -- the one thing worth being able to see from outside.
+    --
+    -- The FILTER is load-bearing, and it was missing. jsonb_agg over elements
+    -- that carry no `tool_name` produces `[null]` -- length 1, not 0 -- which
+    -- sails through the grounding gate immediately below and lets exactly the
+    -- ungrounded run this file exists to stop be written as research. Elements
+    -- without a usable name are not evidence that a tool ran.
     IF jsonb_typeof(v_final->'tool_calls') = 'array' THEN
-      SELECT coalesce(jsonb_agg(t->>'tool_name'), '[]'::jsonb) INTO v_tools
+      SELECT coalesce(jsonb_agg(t->>'tool_name') FILTER (WHERE nullif(t->>'tool_name', '') IS NOT NULL), '[]'::jsonb)
+        INTO v_tools
         FROM jsonb_array_elements(v_final->'tool_calls') t;
     END IF;
 

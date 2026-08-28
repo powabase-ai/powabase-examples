@@ -168,8 +168,12 @@ export function ResearchPanel({ company }: { company: ResearchCompany | null | u
         <div>
           <div style={sectionLabel}>Tech stack</div>
           <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-            {tags.map(t => (
-              <span key={t} style={{ background: 'var(--tag-gray-bg)', color: 'var(--tag-gray-fg)',
+            {tags.map((t, i) => (
+              /* `${i}-${t}`, not `t`: tech_stack is agent-authored and
+                 ["React","React"] is ordinary model output, which duplicates the
+                 key and makes React drop a sibling. `sources` below already
+                 keys this way. */
+              <span key={`${i}-${t}`} style={{ background: 'var(--tag-gray-bg)', color: 'var(--tag-gray-fg)',
                 padding: '1px var(--space-2)', borderRadius: 'var(--radius-sm)', fontSize: 'var(--font-xs)', fontWeight: 500 }}>
                 {t}
               </span>

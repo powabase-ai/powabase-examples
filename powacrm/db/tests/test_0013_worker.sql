@@ -301,7 +301,7 @@ RESET statement_timeout;
 -- other than fabricated research being stored as fact.
 -- ---------------------------------------------------------------------------
 DO $$
-DECLARE b uuid; c uuid; j uuid; src text; d jsonb;
+DECLARE b uuid; c uuid; j uuid; src text; d jsonb; n_ret int; n_rec int;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                   WHERE table_schema='public' AND table_name='research_jobs' AND column_name='diagnostics') THEN
@@ -312,8 +312,24 @@ BEGIN
   IF src NOT LIKE '%jsonb_array_length(v_tools) = 0%' THEN
     RAISE EXCEPTION 'run_research_tick() no longer refuses a run that called no tools -- an ungrounded report would be written as research and would lock the company for 30 days';
   END IF;
-  IF src NOT LIKE '%record_research_tick(v_job.id%' THEN
+  -- EVERY exit path, not "at least one". Fixed in review (round 2): this used to
+  -- be a single LIKE for one call site, and ten of the eleven could have been
+  -- removed with the test still green -- which is precisely the failure mode
+  -- being guarded, since the path that loses its diagnostics is always the one
+  -- nobody expected to take. Counted instead: every RETURN in the body must go
+  -- through record_research_tick, with exactly one documented exception -- the
+  -- empty-queue return, which has claimed no job to record anything against.
+  --
+  -- `RETURN ` with the trailing space does not match the `RETURNS jsonb` in the
+  -- signature. Comments in the body use lower case for the word.
+  n_ret := coalesce(array_length(string_to_array(src, 'RETURN '), 1), 1) - 1;
+  n_rec := coalesce(array_length(string_to_array(src, 'RETURN record_research_tick('), 1), 1) - 1;
+  IF n_rec = 0 THEN
     RAISE EXCEPTION 'run_research_tick() no longer records its result on the job row';
+  END IF;
+  IF n_ret - n_rec <> 1 THEN
+    RAISE EXCEPTION 'run_research_tick() has % RETURN statements but only % of them record the tick on the job row -- exactly one (the empty queue, which claimed nothing) may skip it, so % path(s) now discard their diagnostics into pg_cron',
+      n_ret, n_rec, n_ret - n_rec - 1;
   END IF;
 
   -- And the recorder actually writes. Rolled back with the rest of the file.

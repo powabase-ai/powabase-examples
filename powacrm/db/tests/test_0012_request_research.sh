@@ -36,7 +36,10 @@ detail() { printf '%s' "$1" | python3 -c "import json,sys; print(json.load(sys.s
 # project database, so the escape is a safety requirement, not style.
 B_ID=""; A_CO=""; A_CO2=""; A_PER=""; A_PER2=""; NODOM_CO=""; NODOM_PER=""
 cleanup() {
-  run_sql "DELETE FROM research_jobs WHERE company_id IN ('${A_CO:-00000000-0000-0000-0000-000000000000}','${A_CO2:-00000000-0000-0000-0000-000000000000}','${NODOM_CO:-00000000-0000-0000-0000-000000000000}')" >/dev/null 2>&1
+  # By name, not by the handful of ids this suite happens to hold in variables:
+  # a company whose job outlives it makes the companies DELETE below fail on the
+  # foreign key and leaves fixtures behind in the real project database.
+  run_sql "DELETE FROM research_jobs WHERE company_id IN (SELECT id FROM companies WHERE name LIKE '\_t12\_%')" >/dev/null 2>&1
   run_sql "DELETE FROM people WHERE lower(email) LIKE '\_t12\_%'" >/dev/null 2>&1
   run_sql "DELETE FROM companies WHERE name LIKE '\_t12\_%'" >/dev/null 2>&1
   run_sql "UPDATE brands SET research_daily_cap = 25 WHERE name = 'gpt-trainer'" >/dev/null 2>&1
@@ -102,6 +105,25 @@ run_sql "UPDATE companies SET researched_at = now() - interval '1 day' WHERE id=
 FRESH_PER=$(post_a people "{\"brand_id\":\"$A_BRAND\",\"company_id\":\"$FRESH_CO\",\"first_name\":\"Fresh\",\"email\":\"_t12_fresh@example.com\"}")
 V=$(verdict "$(rpc_a "$FRESH_PER")")
 [ "$V" = "skipped" ] || fail "expected skipped for a company researched within 30 days, got $V"
+
+# 3d. a run that scored NOBODY does not stamp researched_at (that is deliberate:
+# an empty `fit` should not lock the company for a month), which used to leave it
+# re-requestable every minute forever -- a paid agent run each time, all finding
+# the same nobody. A completed job inside the last 24 hours is the cooldown.
+EMPTY_CO=$(post_a companies "{\"brand_id\":\"$A_BRAND\",\"name\":\"_t12_empty\",\"domain\":\"t12empty.example\"}")
+EMPTY_PER=$(post_a people "{\"brand_id\":\"$A_BRAND\",\"company_id\":\"$EMPTY_CO\",\"first_name\":\"Empty\",\"email\":\"_t12_empty@example.com\"}")
+run_sql "INSERT INTO research_jobs (brand_id, company_id, status, created_at, started_at, finished_at, attempts)
+         VALUES ('$A_BRAND','$EMPTY_CO','done', now() - interval '2 hours', now() - interval '2 hours', now() - interval '2 hours', 1)" >/dev/null
+OUT=$(rpc_a "$EMPTY_PER")
+V=$(verdict "$OUT")
+[ "$V" = "skipped" ] || fail "expected skipped for a company whose research finished 2 hours ago with no scores, got $V"
+D=$(detail "$OUT")
+case "$D" in *"24 hours"*) ;; *) fail "expected the 24-hour cooldown detail, got '$D'" ;; esac
+# ...and the cooldown really is short: the same company is requestable again once
+# that job is older than a day.
+run_sql "UPDATE research_jobs SET finished_at = now() - interval '25 hours' WHERE company_id='$EMPTY_CO'" >/dev/null
+V=$(verdict "$(rpc_a "$EMPTY_PER")")
+[ "$V" = "queued" ] || fail "a company whose only completed job is 25 hours old should be requestable again, got $V"
 
 # 4. the daily cap holds, and it is enforced inside the function
 run_sql "UPDATE brands SET research_daily_cap = 1 WHERE id='$A_BRAND'" >/dev/null

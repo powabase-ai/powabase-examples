@@ -37,11 +37,20 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        {!session ? <LoginPage /> : (
-          <BrandProvider>
-            <RoutedApp />
-          </BrandProvider>
-        )}
+        {/* The outermost boundary, and it is not the same one as RoutedApp's.
+            LoginPage and BrandProvider render OUTSIDE the routed tree, so a
+            throw from either -- a malformed session, a brands query that returns
+            something unexpected -- had no boundary above it at all and took the
+            document with it. No resetKey here on purpose: there is no route
+            change to key on at this level, and the fallback's reload is the
+            honest recovery for a provider that cannot mount. */}
+        <ErrorBoundary>
+          {!session ? <LoginPage /> : (
+            <BrandProvider>
+              <RoutedApp />
+            </BrandProvider>
+          )}
+        </ErrorBoundary>
       </BrowserRouter>
     </QueryClientProvider>
   );

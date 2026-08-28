@@ -107,6 +107,29 @@ BEGIN
       CONTINUE;
     END IF;
 
+    -- The short cooldown, and it exists because of the asymmetry the 30-day
+    -- lock leaves behind. complete_research_job stamps researched_at only when
+    -- a run actually scored somebody (see its note): a run whose `fit` came back
+    -- empty -- the agent read the company and honestly found nobody worth
+    -- scoring -- deliberately does NOT lock the company for a month, because the
+    -- write-up is worth keeping but is not worth blocking a retry over. Without
+    -- something here, though, that company can be re-requested every minute
+    -- forever, each request a paid agent run that will find the same nobody.
+    -- Fixed in review (round 2).
+    --
+    -- Keyed on a COMPLETED job rather than on researched_at precisely because
+    -- researched_at is the field the empty run declines to set. An ordinary
+    -- successful run is caught by the 30-day check above long before this one,
+    -- so in practice this only ever bites the empty-fit case. The daily cap
+    -- remains the real spend control; this is the per-company one.
+    IF EXISTS (SELECT 1 FROM research_jobs rj
+                WHERE rj.company_id = v_company AND rj.status = 'done'
+                  AND rj.finished_at > now() - interval '24 hours') THEN
+      results := results || jsonb_build_object('person_id', pid, 'verdict', 'skipped',
+        'job_id', NULL, 'detail', 'a research run finished for this company within the last 24 hours and scored nobody; it can be requested again after that');
+      CONTINUE;
+    END IF;
+
     SELECT research_daily_cap INTO v_cap FROM brands WHERE id = v_brand;
     SELECT count(*) INTO v_used FROM research_jobs
      WHERE brand_id = v_brand AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC');
@@ -346,7 +369,10 @@ BEGIN
   -- researched_at is the 30-day freshness lock, so it is stamped only when the
   -- run actually scored someone. An empty `fit` is not a failure -- the company
   -- write-up is still worth keeping -- but it is not worth blocking a retry for
-  -- a month either, and the daily cap remains the real spend control.
+  -- a month either. That leaves an asymmetry: with researched_at unset the
+  -- company is re-requestable immediately. request_research therefore applies a
+  -- 24-hour cooldown keyed on the completed job itself (see its note), so an
+  -- empty run costs a day rather than a month or nothing at all.
   UPDATE companies SET
     research = _payload->>'summary',
     research_data = _payload,

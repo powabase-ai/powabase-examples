@@ -22,6 +22,7 @@ DECLARE
   v_missing text[] := '{}';
   v_http_schema text;
   v_http_open int;
+  v_client_roles text[];
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')
      AND NOT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_cron') THEN
@@ -74,15 +75,28 @@ BEGIN
   -- granted in `extensions` too, since CREATE EXTENSION grants EXECUTE to
   -- PUBLIC wherever it lands. Reported here so an installer sees it before the
   -- migration, and asserted for good in db/tests/test_0013_worker.sql section 4.
-  SELECT count(*) INTO v_http_open
-    FROM pg_proc p
-    JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
-    JOIN pg_extension e ON e.oid = d.refobjid
-   WHERE e.extname = 'http'
-     AND (has_function_privilege('authenticated', p.oid, 'EXECUTE')
-       OR has_function_privilege('anon', p.oid, 'EXECUTE'));
-  IF v_http_open > 0 THEN
-    RAISE NOTICE 'powacrm preflight: % http extension function(s) are currently executable by anon or authenticated. 0013 revokes them.', v_http_open;
+  --
+  -- The roles are looked up before they are asked about: has_function_privilege
+  -- raises `role "anon" does not exist` on a database that has no PostgREST
+  -- client roles, and a preflight whose job is to explain what is missing must
+  -- not itself die with a raw catalogue error. Fixed in review (round 2).
+  SELECT coalesce(array_agg(rolname ORDER BY rolname), '{}')
+    INTO v_client_roles
+    FROM pg_roles WHERE rolname IN ('anon', 'authenticated');
+
+  IF cardinality(v_client_roles) = 0 THEN
+    RAISE NOTICE 'powacrm preflight: neither `anon` nor `authenticated` exists here, so there is nothing to check the http grants against. On a Powabase project both exist; if this is a plain PostgreSQL, PostgREST is not in front of it and the SSRF exposure below does not apply.';
+  ELSE
+    SELECT count(*) INTO v_http_open
+      FROM pg_proc p
+      JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
+      JOIN pg_extension e ON e.oid = d.refobjid
+     WHERE e.extname = 'http'
+       AND EXISTS (SELECT 1 FROM unnest(v_client_roles) r
+                    WHERE has_function_privilege(r, p.oid, 'EXECUTE'));
+    IF v_http_open > 0 THEN
+      RAISE NOTICE 'powacrm preflight: % http extension function(s) are currently executable by % . 0013 revokes them.', v_http_open, array_to_string(v_client_roles, ' or ');
+    END IF;
   END IF;
 
   RAISE NOTICE 'powacrm preflight OK: pg_cron, http and unaccent are all installed or available.';

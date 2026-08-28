@@ -18,10 +18,16 @@
 # login. Using it here decouples what the tests prove from how the project is
 # configured.
 #
-# Public signup is still exercised -- it is a supported feature and worth a
-# regression test -- but only as a FALLBACK for builds whose admin API 404s, and
-# a refusal there is now a loud exit 77 that run_all.sh reports, never a green
-# `exit 0`.
+# WHAT THIS GAVE UP, said plainly: on any build with a working admin API --
+# every current one -- /auth/v1/signup is never called, so these suites no longer
+# exercise public signup at all. The old assertion that a project with signups
+# open can create an account went with it. That is a deliberate trade: signup is
+# a platform feature with its own tests, while per-owner isolation is this app's
+# security model and had been silently unverified. The signup path below is a
+# compatibility fallback for builds whose admin API 404s, not coverage.
+#
+# A refusal on that fallback is a loud exit 77 that run_all.sh reports as a
+# SKIPPED, ISOLATION NOT VERIFIED run, never a green `exit 0`.
 #
 # Usage, after PB_SERVICE_KEY / VITE_POWABASE_URL / VITE_POWABASE_ANON_KEY are
 # checked and BASE is set:
