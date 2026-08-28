@@ -162,6 +162,28 @@ BEGIN
     IF SQLSTATE = 'P0001' AND SQLERRM = 'a string `sources` was accepted' THEN RAISE; END IF;
   END;
 
+  -- And `summary` must be a STRING, not merely non-empty. Found in review round
+  -- 2: the check was `nullif(trim(coalesce(_payload->>'summary','')),'')`, and
+  -- `->>` on a JSON object hands back that object's text, which is not empty --
+  -- so an object summary was accepted and stored. This exact payload then threw
+  -- in the browser: JavaScript's String() runs ToPrimitive, and an object with a
+  -- non-function `toString` key raises `TypeError: Cannot convert object to
+  -- primitive value` -- the one thing ResearchPanel names as its defence.
+  BEGIN
+    PERFORM complete_research_job(j2, jsonb_build_object(
+      'summary', jsonb_build_object('toString', 'x'), 'fit', '[]'::jsonb));
+    RAISE EXCEPTION 'an object `summary` was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLSTATE = 'P0001' AND SQLERRM = 'an object `summary` was accepted' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM complete_research_job(j2, jsonb_build_object(
+      'summary', 42, 'fit', '[]'::jsonb));
+    RAISE EXCEPTION 'a numeric `summary` was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLSTATE = 'P0001' AND SQLERRM = 'a numeric `summary` was accepted' THEN RAISE; END IF;
+  END;
+
   -- A RUN THAT SCORED NOBODY IS A FAILED RUN, not a silent success that locks
   -- the company out of research for thirty days. Every person_id below is a
   -- fresh uuid that matches nothing, which is what a hallucinating agent

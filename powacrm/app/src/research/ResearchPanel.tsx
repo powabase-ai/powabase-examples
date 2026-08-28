@@ -16,7 +16,7 @@
 // its own data is still broken.)
 //
 // The types below therefore describe what the payload is SUPPOSED to look like,
-// and `asArray` below decides what is actually rendered. 0012 rejects a
+// and `asArray`/`asText` below decide what is actually rendered. 0012 rejects a
 // non-array `hooks`/`sources` at write time as well; this is the second of the
 // two layers, because research_data rows written before that check exists are
 // still in the table.
@@ -33,12 +33,38 @@ export type ResearchData = {
 // Any non-array becomes empty, and the caller is told it happened so the panel
 // can say the payload was malformed rather than quietly rendering a section
 // short. An array with the wrong element shape is still an array: the elements
-// are read defensively below (String(...) on anything rendered) rather than
-// dropped, since a hook missing `evidence` is still worth showing.
+// are read defensively below (asText on anything rendered) rather than dropped,
+// since a hook missing `evidence` is still worth showing.
 function asArray(v: unknown): { items: unknown[]; malformed: boolean } {
   if (v === null || v === undefined) return { items: [], malformed: false };
   if (Array.isArray(v)) return { items: v, malformed: false };
   return { items: [], malformed: true };
+}
+
+// STRING() IS NOT TOTAL, which is the hole this closes. It was the defence this
+// file claimed for every rendered field, and it throws on the one input class
+// this panel exists to survive: `String(x)` runs ToPrimitive, so an object
+// carrying a non-function `toString` -- `{"toString": "x"}` -- raises
+// `TypeError: Cannot convert object to primitive value` instead of returning
+// text. (Same for a `valueOf` that is not callable, and for an object created
+// with `Object.create(null)`, which has no `toString` at all.)
+//
+// It was reachable: complete_research_job validated `summary` with
+// `_payload->>'summary'`, and `->>` on a JSON object returns that object's text,
+// which is not empty -- so `{"summary":{"toString":"x"},"fit":[]}` was accepted,
+// stored, and threw here at render. 0012 now requires a string summary, but the
+// rows written before that check exists are still in the table, and no
+// server-side check covers a hook's `hook` or `evidence`. Layer two, again.
+export function asText(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  try {
+    return String(v);
+  } catch {
+    // Deliberately not '': an unreadable value is a malformed report, and a
+    // blank line reads as "the agent had nothing to say" instead.
+    return '(unreadable value)';
+  }
 }
 
 // A string is what a model reaches for when it has something to say about a
@@ -96,9 +122,9 @@ export function ResearchPanel({ company }: { company: ResearchCompany | null | u
   const techStack = asArray(data.tech_stack);
   const hooksField = asArray(data.hooks);
   const sourcesField = asArray(data.sources);
-  const tags = techStack.items.map(t => String(t));
+  const tags = techStack.items.map(asText);
   const hooks = hooksField.items as Partial<ResearchHook>[];
-  const sources = sourcesField.items.map(s => String(s));
+  const sources = sourcesField.items.map(asText);
   const malformed = [
     techStack.malformed ? 'tech_stack' : null,
     hooksField.malformed ? 'hooks' : null,
@@ -128,13 +154,13 @@ export function ResearchPanel({ company }: { company: ResearchCompany | null | u
       )}
 
       <div style={{ color: 'var(--fg-secondary)', whiteSpace: 'pre-wrap' }}>
-        {data.summary == null ? '' : String(data.summary)}
+        {asText(data.summary)}
       </div>
 
       {data.why_now != null && data.why_now !== '' && (
         <div>
           <div style={sectionLabel}>Why now</div>
-          <div style={{ color: 'var(--fg-secondary)' }}>{String(data.why_now)}</div>
+          <div style={{ color: 'var(--fg-secondary)' }}>{asText(data.why_now)}</div>
         </div>
       )}
 
@@ -158,13 +184,13 @@ export function ResearchPanel({ company }: { company: ResearchCompany | null | u
           <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', display: 'grid', gap: 'var(--space-2)' }}>
             {hooks.map((h, i) => (
               <li key={i}>
-                {/* String(...) rather than a bare render: a hook whose `hook` is
-                    a number or an object is a bad report, not a crash. React
+                {/* asText rather than a bare render: a hook whose `hook` is a
+                    number or an object is a bad report, not a crash. React
                     throws on an object child, which is the same blank-page
                     failure a string `hooks` used to cause. */}
-                <div style={{ color: 'var(--fg-primary)' }}>{h?.hook == null ? '' : String(h.hook)}</div>
+                <div style={{ color: 'var(--fg-primary)' }}>{asText(h?.hook)}</div>
                 <div style={{ color: 'var(--fg-tertiary)', fontSize: 'var(--font-xs)' }}>
-                  {h?.evidence == null ? '' : String(h.evidence)}
+                  {asText(h?.evidence)}
                   {/* A hook's source_url may be a search-result URL rather than a
                       page the agent actually fetched -- linked, but never labeled
                       "fetched" or "verified". */}

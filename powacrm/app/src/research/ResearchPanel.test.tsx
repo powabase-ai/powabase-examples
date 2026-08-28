@@ -125,4 +125,36 @@ describe('ResearchPanel with an agent-authored payload', () => {
     render(<ResearchPanel company={company('the whole payload is a string')} />);
     expect(screen.getByText('No research yet.')).toBeTruthy();
   });
+
+  it('renders a payload whose fields cannot be converted to text at all', () => {
+    // The exact payload that reached this component through the RPC, and the
+    // one String() cannot survive: `String(x)` runs ToPrimitive, so an object
+    // carrying a non-function `toString` raises
+    // `TypeError: Cannot convert object to primitive value` -- the defence this
+    // file names in its own header. complete_research_job accepted it because
+    // it validated `summary` with `->>`, which returns an OBJECT's text and is
+    // therefore non-empty. 0012 now requires a string summary; this is the
+    // client half, and it also covers `hooks[].hook`, which no server-side
+    // check types.
+    const hostile = JSON.parse('{"toString":"x"}');
+    render(<ResearchPanel company={company({
+      summary: hostile,
+      why_now: null,
+      tech_stack: [hostile],
+      hooks: [{ hook: hostile, evidence: hostile }],
+      sources: [],
+    })} />);
+    // The panel is on screen rather than the boundary's fallback, and it says
+    // the value was unreadable instead of leaving a blank line.
+    expect(screen.getAllByText('(unreadable value)').length).toBeGreaterThan(0);
+    expect(screen.getByText('Hooks')).toBeTruthy();
+  });
+
+  it('renders duplicate tech-stack values instead of dropping one', () => {
+    // `key={t}` collided on ["React","React"] -- ordinary model output.
+    render(<ResearchPanel company={company({
+      summary: 'Summary.', why_now: null, tech_stack: ['React', 'React', 'Postgres'], hooks: [], sources: [],
+    })} />);
+    expect(screen.getAllByText('React').length).toBe(2);
+  });
 });

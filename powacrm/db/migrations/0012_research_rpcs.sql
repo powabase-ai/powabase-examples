@@ -203,10 +203,23 @@ BEGIN
   -- is NULL, the OR chain evaluates to NULL, and `IF NULL THEN` never fires.
   -- A payload with no fit array at all would have sailed through un-rejected.
   -- `IS DISTINCT FROM` is NULL-safe and never itself returns NULL.
+  --
+  -- Fixed in review (round 2): `summary` was validated with
+  -- `nullif(trim(coalesce(_payload->>'summary','')),'')`, and `->>` on a JSON
+  -- OBJECT returns that object's text -- which is not empty. So
+  -- `{"summary":{"toString":"x"},"fit":[]}` passed validation and was stored
+  -- verbatim, and the panel's own defence could not render it: JavaScript's
+  -- `String(x)` runs ToPrimitive, and an object carrying a non-function
+  -- `toString` key throws `TypeError: Cannot convert object to primitive
+  -- value`. The client now try/catches that (ResearchPanel.asText), but the type
+  -- belongs here: `companies.research` is a text column and every reader treats
+  -- summary as a string, so a non-string one is a malformed payload, which is
+  -- the thing this block exists to refuse.
   IF jsonb_typeof(_payload) IS DISTINCT FROM 'object'
+     OR jsonb_typeof(_payload->'summary') IS DISTINCT FROM 'string'
      OR nullif(trim(coalesce(_payload->>'summary','')), '') IS NULL
      OR jsonb_typeof(_payload->'fit') IS DISTINCT FROM 'array'
-    THEN RAISE EXCEPTION 'research payload is malformed: need an object with a non-empty summary and a fit array';
+    THEN RAISE EXCEPTION 'research payload is malformed: need an object with a non-empty string summary and a fit array (summary was %)', coalesce(jsonb_typeof(_payload->'summary'), 'absent');
   END IF;
   -- Fixed in review: `tech_stack` was the ONLY optional array checked, and it is
   -- the one the client already guarded. `hooks` and `sources` were stored
