@@ -89,12 +89,20 @@ never in this repo or the browser bundle. The SPA holds the Anon key only.
   (`CREATE EXTENSION IF NOT EXISTS`), which needs them to be *available* on the
   image and creatable by your database role; `pg_cron` additionally has to be
   in the server's `shared_preload_libraries`. Enable them in Studio →
-  **Database → Extensions**. `http` must land in schema **`public`** —
-  `run_research_tick()` pins `search_path = public, pg_temp`, so an `http`
-  installed into an `extensions` schema fails at run time with `function
-  http(http_request) does not exist`. `db/migrate.sh` checks all of this before
-  it applies anything (`db/setup/preflight.sql`), and `0013` re-checks it
-  itself. Only research needs them; `0001`–`0012` (the whole CRM) do not.
+  **Database → Extensions**. `http` must land in schema **`extensions`**, never
+  in `public`: `public` is the schema PostgREST exposes, Postgres grants
+  `EXECUTE` on new functions to `PUBLIC` by default, and `http_get` /
+  `http_post` / `http_set_curlopt` callable with any signed-up account's JWT is
+  a server-side request forgery primitive against anything routable from the
+  database host. `0013` puts it in `extensions`, moves an existing one there
+  (`ALTER EXTENSION http SET SCHEMA extensions`), revokes every function the
+  extension owns from `PUBLIC`, `anon` and `authenticated`, and gives
+  `run_research_tick()` `search_path = public, extensions, pg_temp` so the
+  worker can still reach it. `db/tests/test_0013_worker.sql` §4 asserts the
+  revoke standing, because a later `CREATE EXTENSION` re-grants.
+  `db/migrate.sh` checks the extensions are available before it applies
+  anything (`db/setup/preflight.sql`). Only research needs them; the rest of
+  the migrations do not.
 - **`psql`**, or **Docker** if you'd rather not install it. `db/apply.sh` uses
   `psql` when it's on your `PATH` and otherwise falls back to
   `docker run --rm -i postgres:16-alpine psql`.

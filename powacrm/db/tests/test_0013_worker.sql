@@ -309,6 +309,53 @@ BEGIN
     RAISE EXCEPTION 'a public table has a service_key column -- worker config belongs in vault';
   END IF;
 
+  -- THE http EXTENSION TRIPWIRE.
+  --
+  -- Standing assertion, not a one-time check. 0013 used to install pgsql-http
+  -- into `public` -- PostgREST's exposed schema -- and Postgres grants EXECUTE
+  -- on new functions to PUBLIC by default, so every signed-up account could
+  -- call http_get, http_post and http_set_curlopt over /rest/v1/rpc/. Verified
+  -- live before the fix: an ordinary user's JWT got HTTP 200 and the response
+  -- body back from
+  --   POST /rest/v1/rpc/http_get {"uri":"https://example.com"}
+  -- which is server-side request forgery reaching anything routable from the
+  -- database host, plus libcurl options mutated on a POOLED backend.
+  --
+  -- 0013 now installs into `extensions`, relocates an existing one, and revokes
+  -- the lot. This assertion exists because none of that is durable on its own:
+  -- one `CREATE EXTENSION http` -- or a `DROP EXTENSION` / re-create during an
+  -- upgrade, or an operator enabling it from Studio -- re-grants EXECUTE to
+  -- PUBLIC and silently reopens the hole. The catalogue is read rather than a
+  -- name list being enumerated, so a pgsql-http release that adds a function
+  -- is covered the day it lands.
+  --
+  -- The schema is asserted too. The revoke is what makes it unreachable, but
+  -- `public` is also where an accidental GRANT does the most damage, so both
+  -- halves of 0013's posture are pinned.
+  SELECT extnamespace::regnamespace::text INTO f FROM pg_extension WHERE extname = 'http';
+  IF f IS DISTINCT FROM 'extensions' THEN
+    RAISE EXCEPTION 'the http extension is in schema % -- 0013 installs it into "extensions" precisely so PostgREST cannot reach it; re-apply db/migrations/0013_inline_worker.sql', coalesce(f, '(not installed)');
+  END IF;
+
+  SELECT count(*) INTO n
+    FROM pg_proc p
+    JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
+    JOIN pg_extension e ON e.oid = d.refobjid
+   WHERE e.extname = 'http'
+     AND (has_function_privilege('authenticated', p.oid, 'EXECUTE')
+       OR has_function_privilege('anon', p.oid, 'EXECUTE'));
+  IF n > 0 THEN
+    SELECT string_agg(p.oid::regprocedure::text, ', ' ORDER BY p.oid::regprocedure::text) INTO f
+      FROM pg_proc p
+      JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
+      JOIN pg_extension e ON e.oid = d.refobjid
+     WHERE e.extname = 'http'
+       AND (has_function_privilege('authenticated', p.oid, 'EXECUTE')
+         OR has_function_privilege('anon', p.oid, 'EXECUTE'));
+    RAISE EXCEPTION '% function(s) owned by the http extension are executable by anon or authenticated -- that is an SSRF grant to every account on this project: %', n, f
+      USING HINT = 'Re-apply db/migrations/0013_inline_worker.sql, which revokes every http function from PUBLIC, anon and authenticated. A CREATE EXTENSION anywhere re-grants EXECUTE to PUBLIC, which is why this test asserts it every run.';
+  END IF;
+
   -- The schedule is part of the migration, so its absence is a real failure.
   SELECT count(*) INTO n FROM cron.job
    WHERE jobname = 'powacrm-research-tick' AND active

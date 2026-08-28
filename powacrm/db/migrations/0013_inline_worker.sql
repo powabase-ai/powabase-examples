@@ -36,7 +36,7 @@
 BEGIN;
 
 -- ---------------------------------------------------------------------------
--- 0. THE EXTENSIONS THIS MIGRATION DEPENDS ON.
+-- 0. THE EXTENSIONS THIS MIGRATION DEPENDS ON, AND WHERE THEY GO.
 --
 -- 0013 is the first migration that needs anything beyond core Postgres and the
 -- `unaccent` 0001 creates: `cron.*` at the bottom of this file, and `http(...)`
@@ -50,15 +50,67 @@ BEGIN;
 -- no claim fix, no vault function, no worker, and a migrate.sh that stopped
 -- with a Postgres error and no explanation.
 --
--- `SCHEMA public` on http is load-bearing. run_research_tick() pins
--- `search_path = public, pg_temp` (0008's hardening rule), so an http living
--- in an `extensions` schema -- a common Supabase-lineage convention, and where
--- this very project keeps pgcrypto, pg_net and uuid-ossp -- is invisible to it
--- and the worker fails at RUN time with `function http(http_request) does not
--- exist`, long after the migration reported success. `IF NOT EXISTS` does NOT
--- verify the schema of an extension that already exists (verified: it emits
--- `extension "http" already exists, skipping` and ignores the SCHEMA clause),
--- so the check below reads pg_extension rather than trusting the statement.
+-- `http` GOES IN `extensions`, NEVER IN `public`. Earlier revisions of this
+-- file installed it into `public` and enforced that placement, and that was a
+-- security hole rather than a detail. `public` is the schema PostgREST exposes;
+-- PostgreSQL grants EXECUTE on new functions to PUBLIC by default; nothing
+-- revoked it. Verified live against this project before the fix: with an
+-- ordinary signed-up user's JWT,
+--
+--   POST /rest/v1/rpc/http_get  {"uri":"https://example.com"}
+--
+-- returned HTTP 200 with the response body. Eleven of the extension's functions
+-- were reachable that way -- http_get/post/put/patch/delete/head, http(),
+-- http_header, and http_set_curlopt, which mutates libcurl options on a POOLED
+-- backend and so persists to whoever lands on that backend next. That is a full
+-- SSRF primitive, held by every account, reaching anything routable from the
+-- database host -- including link-local metadata endpoints and any service
+-- listening on localhost -- on a project whose public signup is a documented
+-- feature. It is strictly worse than the 0004 hole 0009 exists to close, and it
+-- was created by the migration that hardens everything else.
+--
+-- The reason the old comment gave for `public` was real, but it had the wrong
+-- answer. run_research_tick() pins its search_path (0008's hardening rule), so
+-- an http living in `extensions` is invisible to it and the worker dies at RUN
+-- time with `function http(http_request) does not exist`, long after the
+-- migration reported success. The fix is to NAME the schema in the search_path
+-- -- `SET search_path = public, extensions, pg_temp`, with pg_temp still last
+-- -- not to move the extension into client reach.
+--
+-- Two things happen below and BOTH are needed:
+--
+--   * RELOCATE, and it cannot be done the obvious way. `CREATE EXTENSION IF NOT
+--     EXISTS ... SCHEMA extensions` does not move one that already exists
+--     (verified: it emits `extension "http" already exists, skipping` and
+--     ignores the SCHEMA clause), and pgsql-http ships `relocatable = false`, so
+--     ALTER EXTENSION ... SET SCHEMA fails outright -- verified on this project:
+--     `ERROR: extension "http" does not support SET SCHEMA`. The only move
+--     available is DROP + CREATE, which is what runs below, WITHOUT `CASCADE`
+--     and inside this migration's single transaction. No CASCADE is the safety
+--     interlock: if anything in the database genuinely depends on an http object
+--     (a column of type http_response, a function taking http_request, a cast),
+--     Postgres refuses the drop, the whole migration rolls back, and the
+--     installer is told rather than silently losing their objects. Postgres
+--     computes that far better than a hand-written dependency query would.
+--     The cost is real and stated plainly: code elsewhere in this database that
+--     calls `public.http_get(...)` with a bare `public` search_path stops
+--     resolving. That is the same reachability being removed on purpose.
+--
+--   * REVOKE, because relocation alone fixes nothing about privileges. Verified
+--     in a rolled-back transaction on this project: immediately after
+--     `DROP EXTENSION http; CREATE EXTENSION http SCHEMA extensions`, all 19 of
+--     its functions were still executable by `anon` and `authenticated` -- that
+--     is base PostgreSQL behaviour, EXECUTE on a new function is granted to
+--     PUBLIC with no ACL entry needed. `public` is worse still: this project's
+--     default privileges (pg_default_acl, roles postgres and supabase_admin,
+--     schema public) hand `EXECUTE ... TO anon, authenticated` to every function
+--     created there, so in `public` the grant is re-applied by the project's own
+--     policy every time the extension is created. In `extensions` the default
+--     ACL grants to `postgres` only. `anon`/`authenticated` do hold USAGE on
+--     `extensions` here, so the move is PostgREST-exposure defence and the
+--     revoke loop is the privilege one. db/tests/test_0013_worker.sql section 4
+--     asserts the revoke standing rather than trusting this one-time fix,
+--     because any later CREATE EXTENSION re-grants.
 --
 -- Failures here are caught and re-raised with a message that names the
 -- extension and what to do about it, because `permission denied to create
@@ -69,31 +121,73 @@ BEGIN;
 DO $ext$
 DECLARE
   v_schema text;
+  f record;
 BEGIN
   BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_cron;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION 'powacrm 0013 requires the pg_cron extension and could not create it: %', SQLERRM
-      USING HINT = 'Enable pg_cron on the project (Studio -> Database -> Extensions); it also has to be in the server''s shared_preload_libraries, which is not something this migration can do. Everything before 0013 has already been applied, so the CRM works -- only AI research is missing. Re-run just this file afterwards with ./db/apply.sh db/migrations/0013_inline_worker.sql.';
+      USING HINT = 'Enable pg_cron on the project (Studio -> Database -> Extensions); it also has to be in the server''s shared_preload_libraries, which is not something this migration can do. Everything before 0013 has already been applied, so the CRM works -- only AI research is missing. Re-run this file and the ones after it afterwards with ./db/migrate.sh (0014 is the spend ceiling; do not stop at 0013).';
+  END;
+
+  -- `extensions` is the Supabase-lineage convention and already holds pgcrypto,
+  -- pg_net and uuid-ossp on a Powabase project. Created here anyway, so this
+  -- migration also works on an image that has no such schema yet.
+  BEGIN
+    CREATE SCHEMA IF NOT EXISTS extensions;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'powacrm 0013 needs a schema named "extensions" to keep the http extension out of PostgREST''s reach, and could not create it: %', SQLERRM
+      USING HINT = 'Create it as a superuser (CREATE SCHEMA extensions;) and re-run ./db/migrate.sh. Do NOT work around this by installing http into public: public is the schema PostgREST exposes, and every function the extension owns would become callable by any signed-up account.';
   END;
 
   BEGIN
-    CREATE EXTENSION IF NOT EXISTS http SCHEMA public;
+    CREATE EXTENSION IF NOT EXISTS http SCHEMA extensions;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION 'powacrm 0013 requires the http extension (pgsql-http) and could not create it: %', SQLERRM
-      USING HINT = 'Enable "http" on the project (Studio -> Database -> Extensions) with schema `public`, then re-run ./db/apply.sh db/migrations/0013_inline_worker.sql.';
+      USING HINT = 'Enable "http" on the project (Studio -> Database -> Extensions) with schema `extensions`, then re-run ./db/migrate.sh.';
   END;
+
+  -- Relocate an http that predates this migration -- including one an earlier
+  -- revision of this very file put in `public`. See the note above for why this
+  -- is DROP + CREATE and not ALTER EXTENSION ... SET SCHEMA, and why there is
+  -- deliberately no CASCADE.
+  SELECT extnamespace::regnamespace::text INTO v_schema FROM pg_extension WHERE extname = 'http';
+  IF v_schema IS DISTINCT FROM 'extensions' THEN
+    RAISE NOTICE 'powacrm 0013: moving the http extension out of schema "%" into "extensions" (drop and re-create -- pgsql-http does not support SET SCHEMA). Anything in this database that calls http functions with a bare `public` search_path will need `extensions` added to its own search_path.', v_schema;
+    BEGIN
+      DROP EXTENSION http;
+      CREATE EXTENSION http SCHEMA extensions;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION 'powacrm 0013 found the http extension in schema "%" and could not move it to "extensions": %', v_schema, SQLERRM
+        USING HINT = 'http in `public` is callable over PostgREST by every signed-up account, which is an SSRF primitive against anything routable from the database host. If the drop was refused, some object in this database depends on an http type or function -- find it with `DROP EXTENSION http;` in psql, which names the dependents, move or drop those, and re-run ./db/migrate.sh. Do not reach for CASCADE: it would drop them.';
+    END;
+  END IF;
+
+  -- Re-read rather than trust the statement above.
+  SELECT extnamespace::regnamespace::text INTO v_schema FROM pg_extension WHERE extname = 'http';
+  IF v_schema IS DISTINCT FROM 'extensions' THEN
+    RAISE EXCEPTION 'powacrm 0013 requires the http extension in schema "extensions"; it is installed in %', coalesce(v_schema, '(nowhere -- not installed)')
+      USING HINT = 'run_research_tick() pins search_path = public, extensions, pg_temp. Fix it with: ALTER EXTENSION http SET SCHEMA extensions;';
+  END IF;
 
   IF to_regnamespace('cron') IS NULL THEN
     RAISE EXCEPTION 'powacrm 0013 requires pg_cron, but schema "cron" does not exist even after CREATE EXTENSION pg_cron'
       USING HINT = 'pg_cron installs its objects into a `cron` schema. If this fires, pg_cron is present under a name or layout this migration does not understand -- schedule public.run_research_tick() every minute by hand and delete the DO block at the end of this file.';
   END IF;
 
-  SELECT extnamespace::regnamespace::text INTO v_schema FROM pg_extension WHERE extname = 'http';
-  IF v_schema IS DISTINCT FROM 'public' THEN
-    RAISE EXCEPTION 'powacrm 0013 requires the http extension in schema "public"; it is installed in %', coalesce(v_schema, '(nowhere -- not installed)')
-      USING HINT = 'run_research_tick() pins search_path = public, pg_temp, so http anywhere else resolves to "function http(http_request) does not exist" at run time. Fix it with: ALTER EXTENSION http SET SCHEMA public;';
-  END IF;
+  -- Enumerated from the catalogue, not from a hand-written list: pgsql-http
+  -- ships a different set of functions in different versions, and a list is one
+  -- release away from being incomplete. `deptype = 'e'` is the extension
+  -- membership edge, so this covers exactly what CREATE EXTENSION created.
+  FOR f IN
+    SELECT p.oid::regprocedure AS sig
+      FROM pg_proc p
+      JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
+      JOIN pg_extension e ON e.oid = d.refobjid
+     WHERE e.extname = 'http'
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f.sig);
+  END LOOP;
 END $ext$;
 
 -- ---------------------------------------------------------------------------
@@ -244,8 +338,13 @@ REVOKE ALL ON FUNCTION public.set_research_worker_config(text, text, text) FROM 
 -- writes -- all measured in milliseconds, never seconds. Observed real runs
 -- are 28-45 s, so 180 s is already 4x the worst one seen.
 -- ---------------------------------------------------------------------------
+-- `extensions` is in the search_path, and it is why the http extension can live
+-- outside PostgREST's reach (section 0). Order matters twice over: `public`
+-- stays first so this app's own tables and functions resolve to themselves, and
+-- `pg_temp` stays LAST, which is 0008's rule -- a temp object cannot shadow a
+-- real one from a position nothing resolves to first.
 CREATE OR REPLACE FUNCTION public.run_research_tick()
-RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE
   -- A company with more contacts than this gets its first MAX_PEOPLE scored;
   -- the rest keep their stage until a later pass. Reported, never silent.
