@@ -127,7 +127,7 @@ BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_cron;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION 'powacrm 0013 requires the pg_cron extension and could not create it: %', SQLERRM
-      USING HINT = 'Enable pg_cron on the project (Studio -> Database -> Extensions); it also has to be in the server''s shared_preload_libraries, which is not something this migration can do. Everything before 0013 has already been applied, so the CRM works -- only AI research is missing. Re-run this file and the ones after it afterwards with ./db/migrate.sh (0014 is the spend ceiling; do not stop at 0013).';
+      USING HINT = 'Enable pg_cron on the project (Studio -> Database -> Extensions); it also has to be in the server''s shared_preload_libraries, which is not something this migration can do. Everything before 0013 has already been applied, so the CRM works -- only AI research is missing. Afterwards apply this file and the one after it: ./db/apply.sh db/migrations/0013_inline_worker.sql && ./db/apply.sh db/migrations/0014_research_cap_bound.sql (not ./db/migrate.sh: it starts at 0001, and 0002-0004 are bare CREATE TABLEs that abort on a database which already has them -- every database that reaches this message does. Do not stop at 0013 either: 0014 is the spend ceiling.)';
   END;
 
   -- `extensions` is the Supabase-lineage convention and already holds pgcrypto,
@@ -137,14 +137,14 @@ BEGIN
     CREATE SCHEMA IF NOT EXISTS extensions;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION 'powacrm 0013 needs a schema named "extensions" to keep the http extension out of PostgREST''s reach, and could not create it: %', SQLERRM
-      USING HINT = 'Create it as a superuser (CREATE SCHEMA extensions;) and re-run ./db/migrate.sh. Do NOT work around this by installing http into public: public is the schema PostgREST exposes, and every function the extension owns would become callable by any signed-up account.';
+      USING HINT = 'Create it as a superuser (CREATE SCHEMA extensions;) and then re-apply: ./db/apply.sh db/migrations/0013_inline_worker.sql && ./db/apply.sh db/migrations/0014_research_cap_bound.sql (not ./db/migrate.sh: it starts at 0001, and 0002-0004 are bare CREATE TABLEs that abort on a database which already has them -- every database that reaches this message does. Do not stop at 0013 either: 0014 is the spend ceiling.) Do NOT work around this by installing http into public: public is the schema PostgREST exposes, and every function the extension owns would become callable by any signed-up account.';
   END;
 
   BEGIN
     CREATE EXTENSION IF NOT EXISTS http SCHEMA extensions;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION 'powacrm 0013 requires the http extension (pgsql-http) and could not create it: %', SQLERRM
-      USING HINT = 'Enable "http" on the project (Studio -> Database -> Extensions) with schema `extensions`, then re-run ./db/migrate.sh.';
+      USING HINT = 'Enable "http" on the project (Studio -> Database -> Extensions) with schema `extensions`, then re-apply: ./db/apply.sh db/migrations/0013_inline_worker.sql && ./db/apply.sh db/migrations/0014_research_cap_bound.sql (not ./db/migrate.sh: it starts at 0001, and 0002-0004 are bare CREATE TABLEs that abort on a database which already has them -- every database that reaches this message does. Do not stop at 0013 either: 0014 is the spend ceiling.)';
   END;
 
   -- Relocate an http that predates this migration -- including one an earlier
@@ -159,7 +159,7 @@ BEGIN
       CREATE EXTENSION http SCHEMA extensions;
     EXCEPTION WHEN OTHERS THEN
       RAISE EXCEPTION 'powacrm 0013 found the http extension in schema "%" and could not move it to "extensions": %', v_schema, SQLERRM
-        USING HINT = 'http in `public` is callable over PostgREST by every signed-up account, which is an SSRF primitive against anything routable from the database host. If the drop was refused, some object in this database depends on an http type or function -- find it with `DROP EXTENSION http;` in psql, which names the dependents, move or drop those, and re-run ./db/migrate.sh. Do not reach for CASCADE: it would drop them.';
+        USING HINT = 'http in `public` is callable over PostgREST by every signed-up account, which is an SSRF primitive against anything routable from the database host. If the drop was refused, some object in this database depends on an http type or function -- find it with `DROP EXTENSION http;` in psql, which names the dependents, move or drop those, and re-apply: ./db/apply.sh db/migrations/0013_inline_worker.sql && ./db/apply.sh db/migrations/0014_research_cap_bound.sql (not ./db/migrate.sh: it starts at 0001, and 0002-0004 are bare CREATE TABLEs that abort on a database which already has them -- every database that reaches this message does. Do not stop at 0013 either: 0014 is the spend ceiling.) Do not reach for CASCADE: it would drop them.';
     END;
   END IF;
 
@@ -167,7 +167,7 @@ BEGIN
   SELECT extnamespace::regnamespace::text INTO v_schema FROM pg_extension WHERE extname = 'http';
   IF v_schema IS DISTINCT FROM 'extensions' THEN
     RAISE EXCEPTION 'powacrm 0013 requires the http extension in schema "extensions"; it is installed in %', coalesce(v_schema, '(nowhere -- not installed)')
-      USING HINT = 'run_research_tick() pins search_path = public, extensions, pg_temp. pgsql-http is non-relocatable (pg_extension.extrelocatable is false), so ALTER EXTENSION ... SET SCHEMA cannot move it -- it errors with "extension "http" does not support SET SCHEMA". The only move is drop and re-create, as a superuser and with nothing depending on it: DROP EXTENSION http; CREATE EXTENSION http SCHEMA extensions; then re-run ./db/migrate.sh so the grants are revoked again.';
+      USING HINT = 'run_research_tick() pins search_path = public, extensions, pg_temp. pgsql-http is non-relocatable (pg_extension.extrelocatable is false), so ALTER EXTENSION ... SET SCHEMA cannot move it -- it errors with "extension "http" does not support SET SCHEMA". The only move is drop and re-create, as a superuser and with nothing depending on it: DROP EXTENSION http; CREATE EXTENSION http SCHEMA extensions; then re-apply so the grants are revoked again: ./db/apply.sh db/migrations/0013_inline_worker.sql && ./db/apply.sh db/migrations/0014_research_cap_bound.sql (not ./db/migrate.sh: it starts at 0001, and 0002-0004 are bare CREATE TABLEs that abort on a database which already has them -- every database that reaches this message does. Do not stop at 0013 either: 0014 is the spend ceiling.)';
   END IF;
 
   IF to_regnamespace('cron') IS NULL THEN

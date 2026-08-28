@@ -41,7 +41,7 @@ BEGIN
   IF cardinality(v_missing) > 0 THEN
     RAISE EXCEPTION 'powacrm preflight: this database is missing % required extension(s): %',
       cardinality(v_missing), array_to_string(v_missing, '; ')
-      USING HINT = 'Enable them in Studio -> Database -> Extensions and run ./db/migrate.sh again. pg_cron additionally has to be in the server''s shared_preload_libraries. If you only want the CRM and no AI research, apply every migration EXCEPT 0013 individually with ./db/apply.sh: 0001-0010 are the CRM, 0011/0012 add the research schema and its RPCs (harmless with no worker to run them), 0014 bounds the daily spend cap, and 0013 -- the pg_cron worker -- is the only file that needs pg_cron or http.';
+      USING HINT = 'Enable them in Studio -> Database -> Extensions and run ./db/migrate.sh again. That is the right command HERE because migrate.sh runs this file before it applies anything, so nothing has been created yet -- but if you are reading this from a standalone ./db/apply.sh db/setup/preflight.sql on a database that already has 0001-0012, apply the remaining files individually with ./db/apply.sh instead: migrate.sh starts at 0001 and 0002-0004 are bare CREATE TABLEs that abort on a database which already has them. pg_cron additionally has to be in the server''s shared_preload_libraries. If you only want the CRM and no AI research, apply every migration EXCEPT 0013 individually with ./db/apply.sh: 0001-0010 are the CRM, 0011/0012 add the research schema and its RPCs (harmless with no worker to run them), 0014 bounds the daily spend cap, and 0013 -- the pg_cron worker -- is the only file that needs pg_cron or http.';
   END IF;
 
   -- Only meaningful when http is ALREADY installed. 0013 wants it in
