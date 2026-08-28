@@ -94,12 +94,21 @@ never in this repo or the browser bundle. The SPA holds the Anon key only.
   `EXECUTE` on new functions to `PUBLIC` by default, and `http_get` /
   `http_post` / `http_set_curlopt` callable with any signed-up account's JWT is
   a server-side request forgery primitive against anything routable from the
-  database host. `0013` puts it in `extensions`, moves an existing one there
-  (`ALTER EXTENSION http SET SCHEMA extensions`), revokes every function the
-  extension owns from `PUBLIC`, `anon` and `authenticated`, and gives
+  database host. `0013` puts it in `extensions`, moves an existing one there,
+  revokes every function the extension owns from `PUBLIC`, `anon` and
+  `authenticated`, and gives
   `run_research_tick()` `search_path = public, extensions, pg_temp` so the
   worker can still reach it. `db/tests/test_0013_worker.sql` §4 asserts the
   revoke standing, because a later `CREATE EXTENSION` re-grants.
+  The move is a `DROP EXTENSION http; CREATE EXTENSION http SCHEMA extensions`
+  inside `0013`'s transaction, **not** `ALTER EXTENSION … SET SCHEMA`: pgsql-http
+  ships `relocatable = false`, so `SET SCHEMA` always fails with `extension
+  "http" does not support SET SCHEMA`. The drop deliberately omits `CASCADE`, so
+  if anything in your database depends on an `http` type or function the
+  migration stops and tells you instead of dropping your objects. Note the other
+  side of that: code elsewhere in the database calling `public.http_get(...)`
+  with a bare `public` search_path will need `extensions` on its own
+  `search_path` afterwards.
   `db/migrate.sh` checks the extensions are available before it applies
   anything (`db/setup/preflight.sql`). Only research needs them; the rest of
   the migrations do not.
@@ -237,17 +246,25 @@ columns are both optional), and clicking a card opens the lead record.
 
 ```bash
 ./db/tests/run_all.sh    # schema, RLS, per-owner isolation, and RPC assertions
-                         # — ends "ALL DB TESTS OK"
+                         # — ends "ALL DB TESTS OK", or "DB TESTS OK — N
+                         #   SUITE(S) SKIPPED (isolation NOT verified)" if a
+                         #   suite could not create its second account
 cd app && npm test       # vitest unit + jsdom component tests
 cd app && npm run build   # type-check + production build
 ```
 
 `run_all.sh` needs `PB_DB_URL`, `VITE_POWABASE_URL`, `VITE_POWABASE_ANON_KEY`,
-`PB_TEST_EMAIL`/`PB_TEST_PASSWORD` **and** `PB_SERVICE_KEY` — the last one for
-`test_0012_injection.sh`, which makes one real agent run (about 30 seconds, and
-it spends platform credits) against a page carrying a prompt-injection payload
-and asserts the researcher holds no write-capable tool, still returns a valid
-report, and flags the attempt.
+`PB_TEST_EMAIL`/`PB_TEST_PASSWORD` **and** `PB_SERVICE_KEY`. Four suites need
+that last one:
+
+- `test_0009`, `test_0010` and `test_0012` create their second account through
+  GoTrue's admin API (`db/tests/lib_second_account.sh`), so what they prove
+  about per-owner isolation does not depend on whether the project accepts
+  signups. Without the key they cannot run at all.
+- `test_0012_injection.sh` makes one real agent run (about 30 seconds, and it
+  spends platform credits) against a page carrying a prompt-injection payload,
+  and asserts the researcher holds no write-capable tool, still returns a valid
+  report, and flags the attempt.
 
 ## Research
 

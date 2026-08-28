@@ -52,14 +52,20 @@ BEGIN
   -- live on the project this app was developed against; see 0013 section 0.
   --
   -- This is a NOTICE, not an exception, because 0013 fixes it: it relocates an
-  -- existing http with ALTER EXTENSION ... SET SCHEMA and then revokes every
-  -- function the extension owns from PUBLIC, anon and authenticated. Failing
-  -- here would block the migration that performs the repair. If 0013 cannot do
-  -- the move (not superuser, not the extension's owner) it raises there, with
-  -- the command to run by hand.
+  -- existing http and then revokes every function the extension owns from
+  -- PUBLIC, anon and authenticated. Failing here would block the migration that
+  -- performs the repair. If 0013 cannot do the move (not superuser, not the
+  -- extension's owner, or something in the database depends on an http object)
+  -- it raises there, with the command to run by hand.
+  --
+  -- The relocation is DROP + CREATE, not ALTER EXTENSION ... SET SCHEMA:
+  -- pgsql-http ships relocatable = false, so SET SCHEMA always errors with
+  -- `extension "http" does not support SET SCHEMA`. Do not suggest it here or
+  -- anywhere else -- an operator who follows that advice gets nothing but the
+  -- error, and concludes the instructions are wrong rather than the command.
   SELECT extnamespace::regnamespace::text INTO v_http_schema FROM pg_extension WHERE extname = 'http';
   IF v_http_schema IS NOT NULL AND v_http_schema <> 'extensions' THEN
-    RAISE NOTICE 'powacrm preflight: the http extension is installed in schema "%". 0013 will move it to "extensions" and revoke its functions from PUBLIC, anon and authenticated -- in "public" they are callable over PostgREST by every signed-up account (SSRF). If 0013 cannot move it, run: ALTER EXTENSION http SET SCHEMA extensions;', v_http_schema;
+    RAISE NOTICE 'powacrm preflight: the http extension is installed in schema "%". 0013 will move it to "extensions" (by dropping and re-creating it -- pgsql-http does not support ALTER EXTENSION ... SET SCHEMA) and revoke its functions from PUBLIC, anon and authenticated; in "public" they are callable over PostgREST by every signed-up account (SSRF). If 0013 cannot move it, do it by hand as a superuser: DROP EXTENSION http; CREATE EXTENSION http SCHEMA extensions;', v_http_schema;
   END IF;
 
   -- Independent of placement: are the extension's functions client-callable

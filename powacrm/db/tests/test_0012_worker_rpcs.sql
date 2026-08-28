@@ -201,6 +201,25 @@ BEGIN
   IF (SELECT researched_at FROM companies WHERE id=c) IS NOT NULL
     THEN RAISE EXCEPTION 'researched_at was stamped although nobody was scored'; END IF;
 
+  -- The one value where the client and the server used to disagree. `''::boolean`
+  -- raises in Postgres, so an empty string landed in the fail-toward-true branch
+  -- and stored `injection_observed: true`, while the panel's own check read the
+  -- same empty string as false and showed no banner. An empty string carries no
+  -- claim -- a model that spotted an injection does not report it by writing ""
+  -- -- so both sides now treat it as absent.
+  DELETE FROM events WHERE person_id = p3 AND event_type = 'researched';
+  INSERT INTO research_jobs (brand_id, company_id) VALUES (b,c) RETURNING id INTO j2;
+  PERFORM claim_research_jobs(5);
+  r := complete_research_job(j2, jsonb_build_object(
+    'summary', 'Empty injection flag.',
+    'injection_observed', '',
+    'fit', jsonb_build_array(jsonb_build_object('person_id', p3, 'score', 10, 'rationale', 'x'))));
+  SELECT count(*) INTO n FROM events
+   WHERE person_id = p3 AND event_type = 'researched'
+     AND (properties->>'injection_observed')::boolean IS FALSE;
+  IF n <> 1 THEN RAISE EXCEPTION 'an empty-string injection_observed did not resolve to false, so the server and ResearchPanel disagree about the same payload: %',
+    (SELECT properties FROM events WHERE person_id=p3 AND event_type='researched' LIMIT 1); END IF;
+
   -- fail path: under 3 attempts it goes back to the queue, at 3 it stops
   INSERT INTO research_jobs (brand_id, company_id) VALUES (b,c) RETURNING id INTO j;
   PERFORM claim_research_jobs(5);

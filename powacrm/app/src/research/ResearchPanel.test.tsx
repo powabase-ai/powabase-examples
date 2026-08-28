@@ -83,19 +83,42 @@ describe('ResearchPanel with an agent-authored payload', () => {
     expect(screen.queryByText(/unexpected shape/i)).toBeNull();
   });
 
-  it('shows the injection banner for a prose value, not just boolean true', () => {
-    render(<ResearchPanel company={company({
-      summary: 'Summary.',
-      why_now: null,
-      hooks: [],
-      sources: [],
-      // A model that DETECTED an injection and described it is the one input
-      // guaranteed to be mishandled by a plain boolean cast. Fail toward the
-      // warning: the cost of a spurious banner is far below the cost of a
-      // missing one.
-      injection_observed: 'detected on the pricing page',
-    })} />);
-    expect(screen.getByText(/attempted to instruct it/i)).toBeTruthy();
+  // injectionObserved() has to agree with complete_research_job byte for byte,
+  // or the banner and the stored flag say different things about the same run.
+  // The rule both sides implement: explicit false (boolean, or the string
+  // "false") is false; absent, null and an empty string carry no claim and are
+  // false; everything else is true.
+  describe('injection_observed', () => {
+    const withFlag = (injection_observed: unknown) =>
+      company({ summary: 'Summary.', why_now: null, hooks: [], sources: [], injection_observed });
+
+    it('shows the banner for a prose value, not just boolean true', () => {
+      // A model that DETECTED an injection and described it in words is the one
+      // input guaranteed to be mishandled by a plain boolean cast, and it is the
+      // server-side half of this fix (complete_research_job used to coerce it to
+      // FALSE). Note for anyone auditing this file: this case ALSO passes
+      // against the old panel, because a non-empty string was already truthy.
+      // It is a regression guard. The falsifying case is the next one.
+      render(<ResearchPanel company={withFlag('detected on the pricing page')} />);
+      expect(screen.getByText(/attempted to instruct it/i)).toBeTruthy();
+    });
+
+    it('does NOT show the banner for the string "false"', () => {
+      // This is the case that fails against the old `data.injection_observed &&`
+      // truthiness check: "false" is a non-empty string, so the old panel
+      // rendered the warning for a payload that explicitly said there was
+      // nothing to warn about -- while the server, which casts it, stored false.
+      render(<ResearchPanel company={withFlag('false')} />);
+      expect(screen.queryByText(/attempted to instruct it/i)).toBeNull();
+    });
+
+    it('treats an empty string as absent, the same as the server does', () => {
+      // `''::boolean` raises in Postgres, so this used to be the one value where
+      // the two sides disagreed: the server coerced it to true, the client read
+      // it as false. Both now treat it as no claim at all.
+      render(<ResearchPanel company={withFlag('   ')} />);
+      expect(screen.queryByText(/attempted to instruct it/i)).toBeNull();
+    });
   });
 
   it('treats a research_data that is not an object at all as no research', () => {

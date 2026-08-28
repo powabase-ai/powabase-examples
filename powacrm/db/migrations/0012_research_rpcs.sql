@@ -232,10 +232,21 @@ BEGIN
   -- The raw value is kept alongside the boolean, because "true" and "the model
   -- wrote a sentence we could not parse" are different facts and the second one
   -- is the one a human wants to read.
+  --
+  -- One carve-out, and it exists so the client and the server cannot disagree:
+  -- an empty or whitespace-only string is treated as ABSENT, not as a detection.
+  -- It carries no claim -- a model that spotted an injection does not report it
+  -- by writing "" -- and without this the two sides diverged, since
+  -- `''::boolean` raises here (so it read as true) while the panel's
+  -- `v.trim() !== ''` read it as false. ResearchPanel.injectionObserved()
+  -- implements the identical rule: explicit false is false, absent or empty is
+  -- false, everything else is true.
   v_injection_raw := _payload->'injection_observed';
   BEGIN
     v_injection := CASE
       WHEN v_injection_raw IS NULL OR jsonb_typeof(v_injection_raw) = 'null' THEN false
+      WHEN jsonb_typeof(v_injection_raw) = 'string'
+           AND nullif(trim(_payload->>'injection_observed'), '') IS NULL THEN false
       ELSE coalesce((_payload->>'injection_observed')::boolean, true)
     END;
   EXCEPTION WHEN invalid_text_representation THEN

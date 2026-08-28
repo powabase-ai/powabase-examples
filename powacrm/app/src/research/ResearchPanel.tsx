@@ -44,8 +44,13 @@ function asArray(v: unknown): { items: unknown[]; malformed: boolean } {
 // A string is what a model reaches for when it has something to say about a
 // boolean field ("maybe", "detected on the pricing page"). Anything that is not
 // an explicit false/null/undefined counts as observed: this banner is a warning,
-// and the failure that matters is not showing it. Matches how
-// complete_research_job resolves the same value server-side.
+// and the failure that matters is not showing it.
+//
+// The rule is byte-for-byte the one complete_research_job applies server-side,
+// deliberately, so the banner and the stored flag never disagree: an explicit
+// false (boolean or the string "false") is false; null, undefined, absent, and
+// an empty or whitespace-only string are false because they carry no claim;
+// everything else -- prose, "maybe", a number, an object -- is true.
 function injectionObserved(v: unknown): boolean {
   if (v === null || v === undefined || v === false) return false;
   if (typeof v === 'string') return v.trim().toLowerCase() !== 'false' && v.trim() !== '';

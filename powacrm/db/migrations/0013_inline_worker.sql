@@ -167,7 +167,7 @@ BEGIN
   SELECT extnamespace::regnamespace::text INTO v_schema FROM pg_extension WHERE extname = 'http';
   IF v_schema IS DISTINCT FROM 'extensions' THEN
     RAISE EXCEPTION 'powacrm 0013 requires the http extension in schema "extensions"; it is installed in %', coalesce(v_schema, '(nowhere -- not installed)')
-      USING HINT = 'run_research_tick() pins search_path = public, extensions, pg_temp. Fix it with: ALTER EXTENSION http SET SCHEMA extensions;';
+      USING HINT = 'run_research_tick() pins search_path = public, extensions, pg_temp. pgsql-http is non-relocatable (pg_extension.extrelocatable is false), so ALTER EXTENSION ... SET SCHEMA cannot move it -- it errors with "extension "http" does not support SET SCHEMA". The only move is drop and re-create, as a superuser and with nothing depending on it: DROP EXTENSION http; CREATE EXTENSION http SCHEMA extensions; then re-run ./db/migrate.sh so the grants are revoked again.';
   END IF;
 
   IF to_regnamespace('cron') IS NULL THEN
