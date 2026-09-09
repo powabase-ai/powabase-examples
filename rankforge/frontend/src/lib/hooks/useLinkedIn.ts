@@ -37,6 +37,14 @@ export function useUpdateLinkedInPost(articleId: string) {
   });
 }
 
+export function useHumanizeLinkedInPost(articleId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (postId: string) => linkedInApi.humanize(articleId, postId),
+    onSuccess: () => invalidateBrandLinkedIn(qc),
+  });
+}
+
 export function useDeleteLinkedInPost(articleId: string) {
   const qc = useQueryClient();
   return useMutation({

@@ -19,7 +19,16 @@ from rankforge_backend.powabase import PowabaseError
 from rankforge_backend.routes.deps import get_db, get_powabase
 from rankforge_backend.services import generation as gen_svc
 from rankforge_backend.services import linkedin_gen as li_gen
+from rankforge_backend.services import linkedin_humanize as li_humanize
 from rankforge_backend.services import linkedin_posts as li_svc
+
+
+def _humanize_passthrough(monkeypatch):
+    """Stub the humanize pass to return the draft unchanged — the generator's own logic
+    (draft, char-cap, truncation warning) is what these tests exercise."""
+    monkeypatch.setattr(
+        li_humanize, "humanize_post", AsyncMock(side_effect=lambda client, text, **kw: text)
+    )
 
 
 def test_angle_slugs_are_the_five_presets():
@@ -122,6 +131,7 @@ async def test_generate_post_returns_agent_text(monkeypatch):
     monkeypatch.setattr(li_gen.gen, "get_article", lambda db, aid: article)
     monkeypatch.setattr(li_gen.brands, "get_profile", lambda db, bid: {"name": "Acme"})
     monkeypatch.setattr(li_gen, "ensure_linkedin_agent", AsyncMock(return_value="agent1"))
+    _humanize_passthrough(monkeypatch)
     client = MagicMock()
     client.run_agent = AsyncMock(return_value={"content": "  A great hook.\n\n#Dev  "})
     out = await li_gen.generate_post(client, MagicMock(), AID, "key_insight")
@@ -157,6 +167,7 @@ async def test_generate_post_caps_body_at_linkedin_limit(monkeypatch):
     )
     monkeypatch.setattr(li_gen.brands, "get_profile", lambda db, bid: {})
     monkeypatch.setattr(li_gen, "ensure_linkedin_agent", AsyncMock(return_value="a"))
+    _humanize_passthrough(monkeypatch)
     client = MagicMock()
     long_text = "line one\n" + ("x" * 4000)
     client.run_agent = AsyncMock(return_value={"content": long_text})
@@ -172,6 +183,7 @@ async def test_generate_post_warns_on_token_ceiling(monkeypatch, caplog):
     )
     monkeypatch.setattr(li_gen.brands, "get_profile", lambda db, bid: {})
     monkeypatch.setattr(li_gen, "ensure_linkedin_agent", AsyncMock(return_value="a"))
+    _humanize_passthrough(monkeypatch)
     client = MagicMock()
     client.run_agent = AsyncMock(
         return_value={"content": "a short post", "stop_reason": "max_tokens"}
@@ -179,6 +191,27 @@ async def test_generate_post_warns_on_token_ceiling(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         await li_gen.generate_post(client, MagicMock(), AID, "key_insight")
     assert any("token ceiling" in r.getMessage() for r in caplog.records)
+
+
+async def test_generate_post_runs_humanize_on_the_draft(monkeypatch):
+    # Pin the headline wiring: the draft goes THROUGH humanize (not around it). With an
+    # identity stub the two are indistinguishable, so stub a distinct return + assert both
+    # the value returned and that it was handed the drafted text.
+    monkeypatch.setattr(
+        li_gen.gen, "get_article",
+        lambda db, aid: {"id": AID, "business_id": BID, "content_md": "real", "status": "draft"},
+    )
+    monkeypatch.setattr(li_gen.brands, "get_profile", lambda db, bid: {})
+    monkeypatch.setattr(li_gen, "ensure_linkedin_agent", AsyncMock(return_value="a"))
+    humanize = AsyncMock(return_value="HUMANIZED")
+    monkeypatch.setattr(li_humanize, "humanize_post", humanize)
+    client = MagicMock()
+    client.run_agent = AsyncMock(return_value={"content": "raw draft"})
+
+    out = await li_gen.generate_post(client, MagicMock(), AID, "key_insight")
+
+    assert out == "HUMANIZED"                          # humanized text is what's saved
+    assert humanize.await_args.args[1] == "raw draft"  # ...and it was given the draft
 
 
 # --- _resolve_article_url (published-only link rule) ---
@@ -320,6 +353,49 @@ def test_update_404_when_post_deleted_midflight(monkeypatch):
     monkeypatch.setattr(li_svc, "update_post", lambda db, pid, body: None)
     resp = _client().patch(f"/api/articles/{AID}/linkedin-posts/{PID}", json={"body": "edited"})
     assert resp.status_code == 404
+
+
+def test_humanize_linkedin_post_route(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    monkeypatch.setattr(
+        li_svc, "get_post",
+        lambda db, pid: {"id": PID, "article_id": AID, "body": "delve into the tapestry"},
+    )
+    monkeypatch.setattr(
+        li_humanize, "humanize_post", AsyncMock(return_value="A sharp, human post.")
+    )
+    monkeypatch.setattr(li_svc, "update_post", lambda db, pid, body: {
+        "id": PID, "article_id": AID, "angle": "story", "body": body,
+        "created_by": None, "created_at": "2026-07-16T00:00:00Z",
+        "updated_at": "2026-07-16T00:00:00Z"})
+    resp = _client().post(f"/api/articles/{AID}/linkedin-posts/{PID}/humanize")
+    assert resp.status_code == 200
+    assert resp.json()["body"] == "A sharp, human post."  # humanized body saved
+
+
+def test_humanize_404_when_post_not_on_article(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    monkeypatch.setattr(
+        li_svc, "get_post",
+        lambda db, pid: {"id": PID, "article_id": "99999999-9999-9999-9999-999999999999",
+                         "body": "x"},
+    )
+    humanize = AsyncMock()
+    monkeypatch.setattr(li_humanize, "humanize_post", humanize)
+    resp = _client().post(f"/api/articles/{AID}/linkedin-posts/{PID}/humanize")
+    assert resp.status_code == 404
+    humanize.assert_not_awaited()  # guarded before any LLM work
+
+
+def test_humanize_cross_org_404(monkeypatch):
+    monkeypatch.setattr(gen_svc, "get_article", lambda db, aid: {"id": AID, "business_id": BID})
+    humanize = AsyncMock()
+    monkeypatch.setattr(li_humanize, "humanize_post", humanize)
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": __import__("uuid").UUID("77777777-7777-7777-7777-777777777777")}
+    resp = _client(db).post(f"/api/articles/{AID}/linkedin-posts/{PID}/humanize")
+    assert resp.status_code == 404
+    humanize.assert_not_awaited()  # org guard runs before any LLM work
 
 
 def test_delete_linkedin_post_route(monkeypatch):
