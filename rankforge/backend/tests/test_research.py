@@ -976,3 +976,106 @@ def test_retry_sources_route_no_claimed_rows_no_spawn(monkeypatch):
     assert resp.status_code == 202
     assert resp.json() == {"queued": 0}
     assert not spawned
+
+
+# --- slow-source recovery: poll budget + reconcile ---
+async def test_scrape_attempt_polls_until_extracted(monkeypatch):
+    # Still 'extracting' on the first checks, then finishes → adopted with real content.
+    monkeypatch.setattr(svc, "SOURCE_POLL_INTERVAL", 0)
+    monkeypatch.setattr(svc._scrape_pacer, "wait", AsyncMock())
+    client = MagicMock()
+    client.import_url = AsyncMock(return_value={"sources": [{"id": "s9"}]})
+    client.get_source = AsyncMock(side_effect=[
+        {"extraction_status": "extracting", "error_message": None},
+        {"extraction_status": "extracting", "error_message": None},
+        {"extraction_status": "extracted", "error_message": None},
+    ])
+    client.get_source_markdown = AsyncMock(return_value="word " * 300)
+
+    sid, status, md, err = await svc._scrape_attempt(client, "https://x.com/a")
+
+    assert sid == "s9" and status == "extracted"
+    assert len(md.split()) == 300
+    assert client.get_source.await_count == 3
+
+
+async def test_scrape_attempt_budget_exhausted_returns_nonterminal(monkeypatch):
+    # THE FIX: a page still extracting past the budget is returned NON-terminal (not
+    # 'failed'), so it isn't dropped — the reconcile pass can adopt it once it lands.
+    monkeypatch.setattr(svc, "SOURCE_POLL_INTERVAL", 0)
+    monkeypatch.setattr(svc, "SOURCE_POLL_ATTEMPTS", 3)
+    monkeypatch.setattr(svc._scrape_pacer, "wait", AsyncMock())
+    client = MagicMock()
+    client.import_url = AsyncMock(return_value={"sources": [{"id": "s7"}]})
+    client.get_source = AsyncMock(
+        return_value={"extraction_status": "extracting", "error_message": None}
+    )
+
+    sid, status, md, err = await svc._scrape_attempt(client, "https://x.com/a")
+
+    assert sid == "s7"
+    assert status == "extracting"          # NOT 'failed'
+    assert err == "poll budget exhausted"
+    assert client.get_source.await_count == 3
+
+
+async def test_reconcile_adopts_late_extracted_source():
+    # A source still extracting when the run's scrape gave up finishes → adopted onto its
+    # research_sources row with real content, re-polling the EXISTING Source (no re-import).
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    client = MagicMock()
+    client.import_url = AsyncMock()  # must never be called
+    client.get_source = AsyncMock(return_value={"extraction_status": "extracted"})
+    client.get_source_markdown = AsyncMock(return_value="word " * 300)
+
+    await svc.reconcile_pending_sources(client, db, UUID(RID), ["s1"])
+
+    client.import_url.assert_not_awaited()      # no re-scrape → no extra scrape credits
+    upd = db.aexecute.await_args_list[-1].args
+    assert "set status = 'extracted'" in upd[0] and "word_count = %s" in upd[0]
+    assert "status <> 'extracted'" in upd[0]    # never clobber an already-adopted row
+    assert upd[1] == (300, UUID(RID), "s1")
+
+
+async def test_reconcile_marks_stuck_source_failed(monkeypatch):
+    # Never reaches a terminal state within the window → honestly marked 'failed'.
+    monkeypatch.setattr(svc, "SOURCE_RECONCILE_INTERVAL", 0)
+    monkeypatch.setattr(svc, "SOURCE_RECONCILE_ATTEMPTS", 2)
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    client = MagicMock()
+    client.import_url = AsyncMock()
+    client.get_source = AsyncMock(return_value={"extraction_status": "extracting"})
+
+    await svc.reconcile_pending_sources(client, db, UUID(RID), ["s2"])
+
+    client.import_url.assert_not_awaited()
+    upd = db.aexecute.await_args_list[-1].args
+    assert "set status = 'failed'" in upd[0]
+    assert upd[1] == (UUID(RID), "s2")
+    assert client.get_source.await_count == 2
+
+
+async def test_reconcile_one_failure_does_not_sink_batch(monkeypatch):
+    monkeypatch.setattr(svc, "SOURCE_RECONCILE_INTERVAL", 0)
+    monkeypatch.setattr(svc, "SOURCE_RECONCILE_ATTEMPTS", 1)
+    db = MagicMock()
+    db.aexecute = AsyncMock()
+    client = MagicMock()
+
+    async def gs(sid):
+        if sid == "boom":
+            raise RuntimeError("api down")
+        return {"extraction_status": "extracted"}
+
+    client.get_source = AsyncMock(side_effect=gs)
+    client.get_source_markdown = AsyncMock(return_value="w " * 250)
+
+    # Must not raise even though one source's poll errors.
+    await svc.reconcile_pending_sources(client, db, UUID(RID), ["boom", "ok"])
+
+    assert any(
+        "set status = 'extracted'" in c.args[0] and c.args[1][-1] == "ok"
+        for c in db.aexecute.await_args_list
+    )

@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # Max concurrent heavy background tasks (generation/research/refine/scout).
     # Kept well under the DB pool size so a burst can't starve the pool.
     max_background_tasks: int = 4
+    # Max concurrent LIGHT background tasks — cheap I/O-bound polling (source-extraction
+    # reconcile) that mostly sleeps. A separate, larger pool so a slow reconcile never
+    # holds a scarce heavy slot and stalls generation/research.
+    max_reconcile_tasks: int = 12
     # Per-user rate limit on expensive AI operations (generate / refine / research
     # / optimize / score / scout-run / opportunity-draft): N requests per window.
     rate_limit_expensive: int = 30

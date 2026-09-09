@@ -15,6 +15,7 @@ from typing import Any
 from .config import get_settings
 
 _sem: asyncio.Semaphore | None = None
+_light_sem: asyncio.Semaphore | None = None
 _tasks: set[asyncio.Task] = set()
 
 
@@ -25,9 +26,20 @@ def _semaphore() -> asyncio.Semaphore:
     return _sem
 
 
-def spawn(coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
-    """Run a coroutine as a capped background task. Over the cap, it queues."""
-    sem = _semaphore()
+def _light_semaphore() -> asyncio.Semaphore:
+    global _light_sem
+    if _light_sem is None:
+        _light_sem = asyncio.Semaphore(get_settings().max_reconcile_tasks)
+    return _light_sem
+
+
+def spawn(coro: Coroutine[Any, Any, Any], *, light: bool = False) -> asyncio.Task:
+    """Run a coroutine as a capped background task. Over the cap, it queues.
+
+    `light=True` uses a separate, larger pool for cheap I/O-bound polling (e.g. the
+    source-extraction reconcile) so a long, mostly-sleeping task never consumes a scarce
+    heavy slot and stalls generation/research."""
+    sem = _light_semaphore() if light else _semaphore()
 
     async def _runner() -> None:
         async with sem:

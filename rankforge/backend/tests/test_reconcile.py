@@ -19,12 +19,12 @@ def test_reconcile_resets_inflight_rows():
     # UI stops disabling the run buttons / polling forever
     assert "update public.scout_runs set status = 'failed'" in sqls
     assert "where status = 'running'" in sqls
-    # a source stranded in a non-terminal status ('retrying', or a legacy 'extracting') is
-    # reset so it's retryable again — otherwise the claim query refuses it and the UI hides
-    # its Retry button forever
+    # a source stranded in ANY non-terminal status ('retrying', 'extracting', …) is reset
+    # so it's honest and retryable — otherwise it's silently excluded from grounding / the
+    # Retry button is hidden forever
     assert (
         "update public.research_sources set status = 'failed' "
-        "where status in ('retrying', 'extracting')"
+        "where status not in ('extracted', 'failed', 'attention_required', 'cancelled')"
         in sqls
     )
     assert "drafting" in sqls and "searching" in sqls
