@@ -11,7 +11,7 @@ from ..db import Database
 from ..models.blog import BlogProfile
 from ..powabase import PowabaseClient
 from ..util import extract_json
-from . import blog_rules
+from . import blog_rules, prose_style
 from . import business_profiles as brands
 from . import clusters as clusters_svc
 from . import generation as gen_svc
@@ -21,9 +21,24 @@ log = logging.getLogger("rankforge.frontmatter")
 
 AGENT_NAME = "rankforge-frontmatter"
 MODEL = "claude-sonnet-4-6"
+# The summary and FAQ are published prose, so they get the article writer's
+# human-voice rules (prose_style is the single source of truth). A change here reaches
+# the running Powabase agent on the next process start: ensure_agent refreshes an
+# existing agent's system prompt the first time it provisions it.
 _SYSTEM = """\
 You write the structured frontmatter a blog post needs for search and AI answer \
 engines: a category, a short answer-first summary, and an FAQ. You return only JSON.
+
+## Write like a human, not an AI
+The summary and every FAQ question and answer are read by people. Editors reject \
+copy that reads as machine-written, so steer clear of all of these:
+
+""" + prose_style.writer_block() + """
+
+- Do not use em-dashes (—); use a comma, period, or parentheses instead.
+- Cut empty transitions: Moreover, Furthermore, Additionally, That said.
+- Use concrete specifics from the post (numbers, names, versions) over smooth \
+generalities, and make confident claims the post supports instead of hedging.
 """
 
 
@@ -147,11 +162,37 @@ def meta_over_limits(article: dict, profile: BlogProfile) -> bool:
     )
 
 
+def _humanize(raw: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic em-dash backstop on the model's summary and FAQ answers (the
+    same one the reviser uses), applied before validation so the word-count and
+    FAQ rules judge the text that is actually written. Leaves anything that isn't
+    a string as-is for validate_frontmatter to reject."""
+    out = dict(raw)
+    if isinstance(out.get("summary"), str):
+        out["summary"] = prose_style.thin_em_dashes(out["summary"])
+    if isinstance(out.get("faq"), list):
+        out["faq"] = [_humanize_item(item) for item in out["faq"]]
+    return out
+
+
+def _humanize_item(item: Any) -> Any:
+    if not isinstance(item, dict):
+        return item
+    # Both answer keys clean_faq accepts.
+    return {
+        k: prose_style.thin_em_dashes(v) if k in ("a", "answer") and isinstance(v, str)
+        else v
+        for k, v in item.items()
+    }
+
+
 async def _attempt(
     client: PowabaseClient, msg: str, profile: BlogProfile,
     cluster_category: str | None, fields: set[str],
 ) -> tuple[dict[str, Any], list[str]]:
     raw = await _ask(client, msg)
+    if raw is not None:
+        raw = _humanize(raw)
     clean, flags = blog_rules.validate_frontmatter(
         raw or {}, profile, cluster_category=cluster_category
     )

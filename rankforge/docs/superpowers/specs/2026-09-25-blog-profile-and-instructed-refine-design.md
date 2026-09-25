@@ -184,6 +184,15 @@ Prompt rules:
 - FAQ questions are phrased as searches, with answers first. At least one is
   "How does {brand} handle X?". Answers are ≤60 words.
 - Under `favor_brand`, no brand limitation appears in the summary or FAQ.
+- Human voice: the agent's system prompt carries the article writer's anti-AI-slop
+  rules (`prose_style.writer_block()`: the overused register and the formulaic
+  constructions), plus no em-dashes, no empty transitions, and concrete
+  specifics over generalities. The prompt is refreshed on the existing
+  Powabase agent the first time a process provisions it (`ensure_agent`).
+- Em-dash backstop: before validation, em-dashes in the model's summary and FAQ
+  answers are replaced deterministically (`prose_style.thin_em_dashes`, the
+  helper the reviser's surgical em-dash fix uses), so the word-count and FAQ
+  checks judge the text that is actually written.
 
 Category: **the cluster's `category` wins** when set (`blog_rules.validate_frontmatter`
 checks it ahead of the model's own answer). Otherwise the agent picks a key from

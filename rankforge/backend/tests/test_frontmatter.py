@@ -754,3 +754,58 @@ async def test_generate_never_flags_a_disabled_field(monkeypatch):
         flags = await fm.generate(_client(GOOD), MagicMock(), "a",
                                   fields={"summary", "faq"})
     assert flags == [] and "summary" not in _written(upd)
+
+
+# --- human voice: the writer's anti-slop rules and the em-dash backstop ---
+
+
+def test_system_prompt_carries_the_writer_rules():
+    from rankforge_backend.services import prose_style
+
+    assert prose_style.writer_block() in fm._SYSTEM
+    assert "em-dash" in fm._SYSTEM
+    assert "return only JSON" in fm._SYSTEM
+
+
+async def test_generate_passes_the_human_voice_prompt_to_the_agent(deps):
+    await fm.generate(_client(GOOD), MagicMock(), "a")
+    assert fm.ensure_agent.await_args.kwargs["system_prompt"] == fm._SYSTEM
+
+
+async def test_generate_writes_summary_and_faq_answers_without_em_dashes(deps):
+    dashy = {
+        "category": "agents",
+        "summary": S45.replace("word word", "word — word", 3),
+        "faq": [
+            {"q": f"Q{i}?", "a": "It works — fast — and well."} for i in range(4)
+        ],
+    }
+    flags = await fm.generate(_client(dashy), MagicMock(), "a")
+    assert flags == []
+    kw = deps.call_args.kwargs
+    assert "—" not in kw["summary"]
+    assert all("—" not in f["a"] for f in kw["faq"])
+    assert kw["faq"][0]["a"] == "It works, fast, and well."
+
+
+async def test_summary_word_count_is_judged_on_the_thinned_text(deps):
+    # 40 real words, 21 of them separated by a spaced em-dash: 61 whitespace tokens
+    # as sent (over the 60 max, so it would be trimmed and flagged), 40 once thinned.
+    words = [f"w{i}" for i in range(40)]
+    summary = " — ".join(words[:22]) + " " + " ".join(words[22:]) + "."
+    assert len(summary.split()) == 61
+    reply = {**GOOD, "summary": summary}
+    c = _client(reply)
+    flags = await fm.generate(c, MagicMock(), "a")
+    assert flags == [] and c.run_agent.await_count == 1  # no retry: it passed
+    written = deps.call_args.kwargs["summary"]
+    assert "—" not in written and len(written.split()) == 40
+
+
+def test_humanize_leaves_malformed_items_for_validation():
+    raw = {"summary": 7, "faq": ["x", {"q": "Q?", "answer": "A — b."}, {"a": None}]}
+    out = fm._humanize(raw)
+    assert out["summary"] == 7
+    assert out["faq"][0] == "x" and out["faq"][2] == {"a": None}
+    assert out["faq"][1] == {"q": "Q?", "answer": "A, b."}
+    assert raw["faq"][1]["answer"] == "A — b."  # the model's reply isn't mutated
