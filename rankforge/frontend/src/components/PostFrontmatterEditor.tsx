@@ -9,7 +9,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useGenerateFrontmatter, useUpdateArticle } from "@/lib/hooks/useArticles";
-import type { Article, ArticleUpdate, BlogProfile, FaqItem } from "@/lib/api";
+import type { Article, BlogProfile, FaqItem } from "@/lib/api";
+import {
+  adoptChanged,
+  buildPatch,
+  fromServer,
+  isDirty,
+  rebase,
+  shouldAdoptSave,
+  type FrontmatterDraft,
+} from "@/lib/frontmatterDraft";
 import { cn } from "@/lib/utils";
 
 function wordCount(s: string): number {
@@ -24,53 +33,43 @@ export function PostFrontmatterEditor({
   article,
   profile,
   busy,
+  runCurrent,
 }: {
   article: Article;
   profile: BlogProfile;
+  /** The parent's refine/generation is running — lock the editor too. */
   busy: boolean;
+  /** The last run's results still describe the article (see useRunCurrent). */
+  runCurrent: boolean;
 }) {
   const update = useUpdateArticle(article.id);
   const generate = useGenerateFrontmatter(article.id);
 
-  const [category, setCategory] = useState(article.category ?? "");
-  const [summary, setSummary] = useState(article.summary ?? "");
-  const [faq, setFaq] = useState<FaqItem[]>(article.faq ?? []);
-  const [metaTitle, setMetaTitle] = useState(article.meta_title ?? "");
+  // Draft = what the inputs show; baseline = the last server values the editor
+  // adopted. Dirty/PATCH are draft-vs-baseline (see lib/frontmatterDraft.ts), so a
+  // server-side change never makes an untouched draft look edited.
+  const [draft, setDraft] = useState<FrontmatterDraft>(() => fromServer(article));
+  const [baseline, setBaseline] = useState<FrontmatterDraft>(() => fromServer(article));
+  const { category, summary, faq, metaTitle } = draft;
+  const setField = <K extends keyof FrontmatterDraft>(k: K, v: FrontmatterDraft[K]) =>
+    setDraft((d) => ({ ...d, [k]: v }));
+  const setFaq = (fn: (prev: FaqItem[]) => FaqItem[]) =>
+    setDraft((d) => ({ ...d, faq: fn(d.faq) }));
 
-  // Normalize before comparing/sending — the backend strips whitespace from FAQ
-  // text (and trims summary/meta title), so comparing the raw draft against the
-  // server's trimmed value would leave the editor "dirty" forever after a save
-  // (e.g. typing "Why? " saves as "Why?", the raw draft never matches again, and
-  // the reset effect below then refuses to ever resync this field again).
-  const trimmedSummary = summary.trim();
-  const trimmedMetaTitle = metaTitle.trim();
-  // Fully empty rows are dropped; a half-filled row is still kept (trimmed) so the
-  // server rejects it rather than silently losing the typed half.
-  const cleanedFaq = faq
-    .map((f) => ({ q: f.q.trim(), a: f.a.trim() }))
-    .filter((f) => f.q || f.a);
+  const dirty = isDirty(draft, baseline);
 
-  const categoryChanged = category !== (article.category ?? "");
-  const summaryChanged = trimmedSummary !== (article.summary ?? "");
-  const faqChanged = JSON.stringify(cleanedFaq) !== JSON.stringify(article.faq ?? []);
-  const metaTitleChanged = trimmedMetaTitle !== (article.meta_title ?? "");
-  const dirty = categoryChanged || summaryChanged || faqChanged || metaTitleChanged;
-
-  // Reset the editor from the server record when a different article lands, or when
-  // this one has no unsaved changes (e.g. a background poll picked up a refine/
-  // generation result). Skipping the reset while dirty keeps in-progress edits from
-  // being wiped out mid-poll. Deliberately narrow deps — re-seeding on every
-  // keystroke-triggered `article` reference change would otherwise clobber the draft
-  // (same reset-on-identity-change pattern as settings/page.tsx and BrandForm).
-  const prevArticleId = useRef(article.id);
+  // A new server record (another article, or this one changed server-side: generate,
+  // refine, revert, a poll, our own save) → rebase: unedited fields take the server
+  // value, edited fields keep the user's text, and the baseline becomes the server
+  // values. Deliberately narrow deps — `article` changes identity on every poll.
+  // Also the article currently shown — a save response for another one is ignored.
+  const currentArticleId = useRef(article.id);
   useEffect(() => {
-    const articleChanged = prevArticleId.current !== article.id;
-    prevArticleId.current = article.id;
-    if (!articleChanged && dirty) return;
-    setCategory(article.category ?? "");
-    setSummary(article.summary ?? "");
-    setFaq(article.faq ?? []);
-    setMetaTitle(article.meta_title ?? "");
+    const idChanged = currentArticleId.current !== article.id;
+    currentArticleId.current = article.id;
+    const next = rebase(draft, baseline, fromServer(article), idChanged);
+    setDraft(next.draft);
+    setBaseline(next.baseline);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [article.id, article.updated_at]);
 
@@ -81,24 +80,18 @@ export function PostFrontmatterEditor({
   const titleTooLong = metaTitle.length > profile.meta.title_max;
 
   function save() {
-    // Only send fields the user actually changed — an omitted key is left alone
-    // server-side, and an explicit null clears it (so a cleared category/summary/
-    // FAQ/meta title isn't silently dropped as a no-op).
-    const payload: ArticleUpdate = {};
-    if (categoryChanged) payload.category = category || null;
-    if (summaryChanged) payload.summary = trimmedSummary || null;
-    if (faqChanged) payload.faq = cleanedFaq.length ? cleanedFaq : null;
-    if (metaTitleChanged) payload.meta_title = trimmedMetaTitle || null;
-
-    update.mutate(payload, {
+    // Only the fields that differ from the baseline — an omitted key is left alone
+    // server-side, and an explicit null clears it.
+    update.mutate(buildPatch(draft, baseline), {
       onSuccess: (updated) => {
-        // The server's response is the new baseline — adopt it exactly (rather than
-        // relying on the next poll) so the editor can't stay "dirty" comparing our
-        // pre-save draft against the server's normalized values.
-        setCategory(updated.category ?? "");
-        setSummary(updated.summary ?? "");
-        setFaq(updated.faq ?? []);
-        setMetaTitle(updated.meta_title ?? "");
+        // Navigated to another article meanwhile — don't write this one's values
+        // into that article's editor.
+        if (!shouldAdoptSave(updated.id, currentArticleId.current)) return;
+        // The server's response is the new baseline — adopt it exactly so the
+        // editor can't stay "dirty" against the server's normalized values.
+        const saved = fromServer(updated);
+        setDraft(saved);
+        setBaseline(saved);
         toast.success("Frontmatter saved");
       },
       onError: (e) => toast.error(e instanceof Error ? e.message : "Save failed"),
@@ -106,20 +99,41 @@ export function PostFrontmatterEditor({
   }
 
   function generateFrontmatter() {
-    generate.mutate(undefined, {
-      onSuccess: ({ export_issues }) => {
-        if (export_issues.length > 0) {
-          toast.warning(
-            `Generated — ${export_issues.length} issue${
-              export_issues.length === 1 ? "" : "s"
-            } remain`
-          );
-        } else {
-          toast.success("Summary & FAQ generated");
-        }
-      },
-      onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
-    });
+    // Explicit request: regenerate summary & FAQ even when the stored ones pass.
+    generate.mutate(
+      { force: true },
+      {
+        onSuccess: ({ article: updated, export_issues, changed }) => {
+          // Explicit request: the written fields replace any unsaved edit to them
+          // (draft and baseline), so Save can't write the edit back over them.
+          if (shouldAdoptSave(updated.id, currentArticleId.current)) {
+            // Functional updates: the cache echo of this response may already
+            // have rebased draft/baseline since this closure was created.
+            setDraft((d) => adoptChanged(d, d, updated, changed).draft);
+            setBaseline((b) => adoptChanged(b, b, updated, changed).baseline);
+          }
+          if (changed.length === 0) {
+            toast.info(
+              export_issues.length > 0
+                ? `Nothing changed — ${export_issues.length} issue${
+                    export_issues.length === 1 ? "" : "s"
+                  } remain`
+                : "Nothing changed"
+            );
+          } else if (export_issues.length > 0) {
+            toast.warning(
+              `Generated — ${export_issues.length} issue${
+                export_issues.length === 1 ? "" : "s"
+              } remain`
+            );
+          } else {
+            toast.success("Summary & FAQ generated");
+          }
+        },
+        // A 409 detail (e.g. "blog profile is invalid: …") is shown as-is.
+        onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+      }
+    );
   }
 
   function updateFaq(i: number, patch: Partial<FaqItem>) {
@@ -139,8 +153,10 @@ export function PostFrontmatterEditor({
   }
 
   // Flags the server's frontmatter step left unresolved on the last generation or
-  // instructed refine (e.g. a field it couldn't safely regenerate).
-  const frontmatterFlags = article.progress?.frontmatter_flags ?? [];
+  // instructed refine (e.g. a field it couldn't safely regenerate). They describe
+  // that run's output, so they're hidden once the article has been written since
+  // (e.g. the user saved a fix here) — the live export check below takes over.
+  const frontmatterFlags = runCurrent ? article.progress?.frontmatter_flags ?? [] : [];
 
   // Length/count rules only, mirroring blog_rules.export_issues on the server —
   // the regex-based body-FAQ check is left to the server's authoritative 422.
@@ -181,8 +197,9 @@ export function PostFrontmatterEditor({
   // The onSuccess handlers above adopt the server's response as the new local
   // state — so while either mutation is in flight, every editable control must be
   // disabled, or a keystroke landing between "request sent" and "response applied"
-  // would get silently overwritten.
-  const formBusy = update.isPending || generate.isPending;
+  // would get silently overwritten. A parent refine/generation (`busy`) locks it
+  // too: its result replaces these fields.
+  const formBusy = busy || update.isPending || generate.isPending;
 
   return (
     <div className="space-y-4 border-t border-border pt-4">
@@ -194,7 +211,7 @@ export function PostFrontmatterEditor({
           size="sm"
           variant="outline"
           onClick={generateFrontmatter}
-          disabled={busy || formBusy}
+          disabled={formBusy}
         >
           {generate.isPending ? <Loader2 className="animate-spin" /> : <Wand2 />}
           Generate summary &amp; FAQ
@@ -209,7 +226,7 @@ export function PostFrontmatterEditor({
         <select
           id="fm-category"
           value={category}
-          onChange={(e) => setCategory(e.target.value)}
+          onChange={(e) => setField("category", e.target.value)}
           className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm outline-none focus:ring-1 focus:ring-[rgb(var(--ember))] disabled:cursor-not-allowed disabled:opacity-50"
         >
           <option value="">— none —</option>
@@ -230,7 +247,7 @@ export function PostFrontmatterEditor({
             id="fm-summary"
             rows={3}
             value={summary}
-            onChange={(e) => setSummary(e.target.value)}
+            onChange={(e) => setField("summary", e.target.value)}
           />
           <p
             className={cn(
@@ -312,7 +329,7 @@ export function PostFrontmatterEditor({
         <Input
           id="fm-meta-title"
           value={metaTitle}
-          onChange={(e) => setMetaTitle(e.target.value)}
+          onChange={(e) => setField("metaTitle", e.target.value)}
           className="h-8 text-sm"
         />
         <p
@@ -350,7 +367,7 @@ export function PostFrontmatterEditor({
 
       {frontmatterFlags.length > 0 && (
         <div className="rounded-md border border-[rgb(var(--ember))]/40 bg-[rgb(var(--ember))]/5 p-2 text-xs">
-          <p className="mb-1 font-medium">Flagged by the last generation</p>
+          <p className="mb-1 font-medium">Flagged by the last run</p>
           <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground">
             {frontmatterFlags.map((f, i) => (
               <li key={i}>{f}</li>

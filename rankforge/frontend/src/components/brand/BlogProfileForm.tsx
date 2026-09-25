@@ -6,15 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { BlogProfile } from "@/lib/api";
+import { DEFAULT_BLOG_PROFILE } from "@/lib/blogProfile";
 
-export const DEFAULT_BLOG_PROFILE: BlogProfile = {
-  categories: [{ key: "general", label: "General", description: "", technical: true }],
-  summary: { enabled: true, min_words: 40, max_words: 60 },
-  faq: { enabled: true, min: 3, max: 6 },
-  meta: { title_max: 60, description_max: 160 },
-  links: { min: 3, max: 5, trailing_slash: true, hub_pages: [] },
-  stance: "neutral",
-};
+export { DEFAULT_BLOG_PROFILE };
 
 function Num({ label, value, onChange }: { label: string; value: number; onChange: (n: number) => void }) {
   return (
@@ -26,6 +20,8 @@ function Num({ label, value, onChange }: { label: string; value: number; onChang
   );
 }
 
+/** Edits a conforming profile only — callers must pass `asBlogProfile(...)` output
+ *  (or null), never a raw stored value. */
 export function BlogProfileForm({
   value, onChange,
 }: { value: BlogProfile | null; onChange: (v: BlogProfile | null) => void }) {

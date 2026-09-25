@@ -120,9 +120,13 @@ export function PublishDialog({
   }
 
   function fixAutomatically() {
+    // No body: only fields failing the rules are regenerated.
     generateFrontmatter.mutate(undefined, {
-      onSuccess: ({ export_issues }) => {
-        if (export_issues.length > 0) {
+      onSuccess: ({ export_issues, changed }) => {
+        if (changed.length === 0) {
+          setIssues(export_issues.length > 0 ? export_issues : null);
+          toast.info("Nothing changed");
+        } else if (export_issues.length > 0) {
           setIssues(export_issues);
           toast.warning("Some issues remain");
         } else {
@@ -130,6 +134,7 @@ export function PublishDialog({
           toast.success("Fixed — try again");
         }
       },
+      // A 409 detail (e.g. "blog profile is invalid: …") is shown as-is.
       onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
     });
   }

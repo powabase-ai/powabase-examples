@@ -47,13 +47,15 @@ import {
   useUpdateArticle,
 } from "@/lib/hooks/useArticles";
 import { useBrands } from "@/lib/hooks/useBrands";
+import { useRunCurrent } from "@/lib/hooks/useRunCurrent";
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
-import { ARTICLE_STATUSES, asBlogProfile, canApprove } from "@/lib/api";
+import { ARTICLE_STATUSES, canApprove } from "@/lib/api";
+import { blogProfileState } from "@/lib/blogProfile";
 import type { Article, GroundingReport, Score, ScoreSignal } from "@/lib/api";
 
 const GATED_STATUSES = new Set(["approved", "published"]);
@@ -364,6 +366,51 @@ function GenerationProgress({ a }: { a: Article }) {
   );
 }
 
+/** Shown when `generation_status` is "failed". The wording depends on whether a
+ *  body exists: an empty body means generation never produced a draft; a non-empty
+ *  one means the run failed after writing a draft (or during post-processing), so
+ *  the article may be only partly processed. `generation_error` is always shown,
+ *  and Retry is offered in both cases (the caller confirms first for a non-empty
+ *  body). */
+function FailedRunNotice({
+  article,
+  retrying,
+  onRetry,
+}: {
+  article: Article;
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  const hasBody = !!article.content_md?.trim();
+  return (
+    <Card className="mt-6">
+      <CardContent className="flex items-center justify-between gap-4 py-5">
+        <div className="space-y-1 text-sm">
+          <p className="text-destructive">
+            {hasBody
+              ? "The last run failed after writing a draft; the article may be " +
+                "partially processed."
+              : "Generation failed"}
+          </p>
+          {article.generation_error && (
+            <p className="text-muted-foreground">{article.generation_error}</p>
+          )}
+        </div>
+        <Button
+          variant={hasBody ? "outline" : "gold"}
+          size="sm"
+          className="shrink-0"
+          onClick={onRetry}
+          disabled={retrying}
+        >
+          {retrying ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+          Retry generation
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function ArticleView({
   params,
 }: {
@@ -377,6 +424,9 @@ export default function ArticleView({
   const optimize = useOptimizeArticle(articleId);
   const refine = useRefineArticle(articleId);
   const retry = useRetryArticle(articleId);
+  // Hide the last run's score strip / frontmatter flags once the article changes.
+  const runCurrent = useRunCurrent(a);
+  const profileState = blogProfileState(brand?.blog_profile);
   const update = useUpdateArticle(articleId);
   const del = useDeleteArticle(id);
   const versions = useArticleVersions(articleId);
@@ -661,8 +711,11 @@ export default function ArticleView({
             {a ? (
               <PostPanel
                 article={a}
-                profile={asBlogProfile(brand?.blog_profile)}
+                profile={profileState.kind === "valid" ? profileState.profile : null}
+                profileInvalid={profileState.kind === "invalid"}
+                brandId={id}
                 busy={!!generating}
+                runCurrent={runCurrent}
               />
             ) : (
               <p className="text-sm text-muted-foreground">Loading…</p>
@@ -863,49 +916,29 @@ export default function ArticleView({
 
               {generating && <GenerationProgress a={a} />}
 
-              {a.generation_status === "failed" &&
-                (!a.content_md || !a.content_md.trim() ? (
-                  <Card className="mt-6">
-                    <CardContent className="flex items-center justify-between gap-4 py-5">
-                      <p className="text-sm text-destructive">
-                        Generation failed: {a.generation_error}
-                      </p>
-                      <Button
-                        variant="gold"
-                        size="sm"
-                        className="shrink-0"
-                        onClick={() =>
-                          retry.mutate(undefined, {
-                            onSuccess: () => toast.success("Retrying generation…"),
-                            onError: (e) =>
-                              toast.error(
-                                e instanceof Error ? e.message : "Retry failed"
-                              ),
-                          })
-                        }
-                        disabled={retry.isPending}
-                      >
-                        {retry.isPending ? (
-                          <Loader2 className="animate-spin" />
-                        ) : (
-                          <RefreshCw />
-                        )}
-                        Retry generation
-                      </Button>
-                    </CardContent>
-                  </Card>
-                ) : (
-                  // Content already exists (e.g. a failed instructed refine/rework
-                  // after generation had finished) — retrying would re-draft from the
-                  // brief and discard it, so offer no retry here.
-                  <Card className="mt-6">
-                    <CardContent className="py-5">
-                      <p className="text-sm text-muted-foreground">
-                        The last run failed; your article is unchanged.
-                      </p>
-                    </CardContent>
-                  </Card>
-                ))}
+              {a.generation_status === "failed" && (
+                <FailedRunNotice
+                  article={a}
+                  retrying={retry.isPending}
+                  onRetry={() => {
+                    // A non-empty body is re-drafted from the brief; the server saves
+                    // a version of it first, so it can be restored from History.
+                    if (
+                      a.content_md.trim() &&
+                      !window.confirm(
+                        "Retry generation? This re-drafts the article from its " +
+                          "brief. A version of the current article is saved first."
+                      )
+                    )
+                      return;
+                    retry.mutate(undefined, {
+                      onSuccess: () => toast.success("Retrying generation…"),
+                      onError: (e) =>
+                        toast.error(e instanceof Error ? e.message : "Retry failed"),
+                    });
+                  }}
+                />
+              )}
 
               {editing ? (
                 <div className="mt-8">

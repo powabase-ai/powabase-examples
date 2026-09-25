@@ -26,6 +26,11 @@ import {
   useUploadBrandLogo,
 } from "@/lib/hooks/useBrands";
 import type { BlogProfile, BusinessProfile, BusinessProfileInput } from "@/lib/api";
+import {
+  blogProfileState,
+  DEFAULT_BLOG_PROFILE,
+  mergeOntoDefault,
+} from "@/lib/blogProfile";
 
 export default function BrandSettings({
   params,
@@ -42,13 +47,28 @@ export default function BrandSettings({
 
   const [form, setForm] = React.useState<BrandFormState>(emptyBrandForm());
   const [bp, setBp] = React.useState<BlogProfile | null>(null);
+  // Set when the stored blog profile is present but doesn't conform (the backend
+  // returns an invalid stored value as-is). The form never sees the raw value; the
+  // user picks a starting point (defaults, or the stored values merged onto them).
+  const [invalidProfile, setInvalidProfile] = React.useState<{ raw: unknown } | null>(
+    null
+  );
   const [newOpen, setNewOpen] = React.useState(false);
 
   React.useEffect(() => {
-    if (brand) {
-      setForm(brandToForm(brand));
-      setBp(brand.blog_profile ?? null);
-    }
+    if (brand) setForm(brandToForm(brand));
+  }, [brand]);
+
+  // Seed the blog-profile editor once per brand, not on every refetch — otherwise
+  // saving the brand card above (or any refetch) would wipe unsaved profile edits,
+  // including a just-chosen "Reset to defaults".
+  const seededBrandId = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!brand || seededBrandId.current === brand.id) return;
+    seededBrandId.current = brand.id;
+    const state = blogProfileState(brand.blog_profile);
+    setBp(state.kind === "valid" ? state.profile : null);
+    setInvalidProfile(state.kind === "invalid" ? { raw: state.raw } : null);
   }, [brand]);
 
   async function save(e: React.FormEvent) {
@@ -132,13 +152,52 @@ export default function BrandSettings({
           <CardTitle className="text-base">Blog profile</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4">
-          <BlogProfileForm value={bp} onChange={setBp} />
+          {invalidProfile ? (
+            <div className="space-y-3 rounded-md border border-[rgb(var(--destructive))]/40 bg-[rgb(var(--destructive))]/5 p-3">
+              <p className="text-sm font-medium text-destructive">
+                This blog profile is invalid
+              </p>
+              <p className="text-sm text-muted-foreground">
+                The stored profile doesn&apos;t match the expected format, so it
+                can&apos;t be edited here and exports and frontmatter fixes are
+                blocked until it&apos;s replaced. Start from the defaults, or from
+                the stored values that can still be read (unknown or malformed
+                settings fall back to the defaults), then save.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => {
+                    setBp(DEFAULT_BLOG_PROFILE);
+                    setInvalidProfile(null);
+                  }}
+                >
+                  Reset to defaults
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setBp(mergeOntoDefault(invalidProfile.raw));
+                    setInvalidProfile(null);
+                  }}
+                >
+                  Start from stored values
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <BlogProfileForm value={bp} onChange={setBp} />
+          )}
           <div className="flex justify-end">
             <Button
               type="button"
               variant="gold"
               onClick={saveBlogProfile}
-              disabled={updateBrand.isPending}
+              // Saving now would send `null` and delete the stored profile.
+              disabled={updateBrand.isPending || !!invalidProfile}
             >
               {updateBrand.isPending ? "Saving…" : "Save blog profile"}
             </Button>
