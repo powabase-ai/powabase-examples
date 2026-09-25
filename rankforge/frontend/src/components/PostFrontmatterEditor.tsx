@@ -37,14 +37,23 @@ export function PostFrontmatterEditor({
   const [faq, setFaq] = useState<FaqItem[]>(article.faq ?? []);
   const [metaTitle, setMetaTitle] = useState(article.meta_title ?? "");
 
-  // Fully empty rows are dropped; a half-filled row is still kept so the server
-  // rejects it rather than silently losing the typed half.
-  const cleanedFaq = faq.filter((f) => f.q.trim() || f.a.trim());
+  // Normalize before comparing/sending — the backend strips whitespace from FAQ
+  // text (and trims summary/meta title), so comparing the raw draft against the
+  // server's trimmed value would leave the editor "dirty" forever after a save
+  // (e.g. typing "Why? " saves as "Why?", the raw draft never matches again, and
+  // the reset effect below then refuses to ever resync this field again).
+  const trimmedSummary = summary.trim();
+  const trimmedMetaTitle = metaTitle.trim();
+  // Fully empty rows are dropped; a half-filled row is still kept (trimmed) so the
+  // server rejects it rather than silently losing the typed half.
+  const cleanedFaq = faq
+    .map((f) => ({ q: f.q.trim(), a: f.a.trim() }))
+    .filter((f) => f.q || f.a);
 
   const categoryChanged = category !== (article.category ?? "");
-  const summaryChanged = summary !== (article.summary ?? "");
+  const summaryChanged = trimmedSummary !== (article.summary ?? "");
   const faqChanged = JSON.stringify(cleanedFaq) !== JSON.stringify(article.faq ?? []);
-  const metaTitleChanged = metaTitle !== (article.meta_title ?? "");
+  const metaTitleChanged = trimmedMetaTitle !== (article.meta_title ?? "");
   const dirty = categoryChanged || summaryChanged || faqChanged || metaTitleChanged;
 
   // Reset the editor from the server record when a different article lands, or when
@@ -77,12 +86,21 @@ export function PostFrontmatterEditor({
     // FAQ/meta title isn't silently dropped as a no-op).
     const payload: ArticleUpdate = {};
     if (categoryChanged) payload.category = category || null;
-    if (summaryChanged) payload.summary = summary || null;
+    if (summaryChanged) payload.summary = trimmedSummary || null;
     if (faqChanged) payload.faq = cleanedFaq.length ? cleanedFaq : null;
-    if (metaTitleChanged) payload.meta_title = metaTitle || null;
+    if (metaTitleChanged) payload.meta_title = trimmedMetaTitle || null;
 
     update.mutate(payload, {
-      onSuccess: () => toast.success("Frontmatter saved"),
+      onSuccess: (updated) => {
+        // The server's response is the new baseline — adopt it exactly (rather than
+        // relying on the next poll) so the editor can't stay "dirty" comparing our
+        // pre-save draft against the server's normalized values.
+        setCategory(updated.category ?? "");
+        setSummary(updated.summary ?? "");
+        setFaq(updated.faq ?? []);
+        setMetaTitle(updated.meta_title ?? "");
+        toast.success("Frontmatter saved");
+      },
       onError: (e) => toast.error(e instanceof Error ? e.message : "Save failed"),
     });
   }
