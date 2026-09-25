@@ -802,3 +802,38 @@ async def test_refine_keeps_body_faq_without_profile(monkeypatch):
     await revise.refine(MagicMock(), MagicMock(), "aid")
     assert state["art"]["content_md"] == _FAQ_BODY
     rescore.assert_not_awaited()
+
+
+# --- review r1 I2: refine() fits meta to the profile's limits ---
+async def test_refine_meta_uses_profile_limits_and_enforces(monkeypatch):
+    brand = {"name": "B", "blog_profile": {
+        "categories": [{"key": "rag", "label": "R"}],
+        "meta": {"title_max": 50, "description_max": 150}}}
+    state, _ = _refine_env(monkeypatch, brand)
+    state["art"]["title"] = "t" * 55
+    fm = AsyncMock()
+    monkeypatch.setattr(revise, "fix_meta", fm)
+    from rankforge_backend.services import frontmatter
+
+    enforce = MagicMock()
+    monkeypatch.setattr(frontmatter, "enforce_meta", enforce)
+    await revise.refine(MagicMock(), MagicMock(), "aid",
+                        targets=["seo:title_length"])
+    kw = fm.await_args.kwargs
+    assert kw["title_max"] == 50 and kw["description_max"] == 150
+    enforce.assert_called_once()
+    assert enforce.call_args.args[3].meta.title_max == 50
+
+
+async def test_refine_meta_without_profile_keeps_defaults(monkeypatch):
+    _refine_env(monkeypatch, {"name": "B", "blog_profile": None})
+    fm = AsyncMock()
+    monkeypatch.setattr(revise, "fix_meta", fm)
+    from rankforge_backend.services import frontmatter
+
+    enforce = MagicMock()
+    monkeypatch.setattr(frontmatter, "enforce_meta", enforce)
+    await revise.refine(MagicMock(), MagicMock(), "aid",
+                        targets=["seo:title_length"])
+    assert "title_max" not in fm.await_args.kwargs
+    enforce.assert_not_called()

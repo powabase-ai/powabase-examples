@@ -172,8 +172,63 @@ async def test_instructed_pass_no_fallback_when_reply_is_not_an_article(env):
     _snap, upd = env
     c = MagicMock()
     c.run_agent_collect = AsyncMock(return_value={"content": "Sorry, I can't help."})
-    with pytest.raises(revise.InstructedRefineError):
+    # mode="rework" has no 60% length floor, so only the "not an article" check can
+    # reject this reply (with "refine" the length check fired first).
+    with pytest.raises(revise.InstructedRefineError, match="empty"):
         await revise.instructed_pass(
-            c, MagicMock(), "a", instructions="x", mode="refine"
+            c, MagicMock(), "a", instructions="x", mode="rework"
         )
     assert not any("content_md" in k.kwargs for k in upd.call_args_list)
+
+
+# --- review r1 I6: a stream cut off before `complete` is not a successful rework ---
+async def test_incomplete_stream_is_rejected(env):
+    _snap, upd = env
+    c = MagicMock()
+    c.run_agent_collect = AsyncMock(return_value={
+        "content": json.dumps({"content_md": "# T\n\nHalf an arti"}),
+        "incomplete": True,
+    })
+    with pytest.raises(revise.InstructedRefineError, match="cut off"):
+        await revise.instructed_pass(c, MagicMock(), "a", instructions="x",
+                                     mode="rework")
+    assert not any("content_md" in k.kwargs for k in upd.call_args_list)
+
+
+# --- review r1 I5: empty model values never replace stored frontmatter ---
+async def test_empty_frontmatter_values_keep_stored(env):
+    _snap, upd = env
+    fm = {"summary": "", "faq": [], "category": "  "}
+    await revise.instructed_pass(_client({"content_md": BODY, "frontmatter": fm}),
+                                 MagicMock(), "a", instructions="x", mode="refine")
+    written = {k for c in upd.call_args_list for k in c.kwargs}
+    assert not written & {"summary", "faq", "category"}
+
+
+async def test_cluster_category_wins_over_model(env):
+    prof = BlogProfile.model_validate({"categories": [
+        {"key": "rag", "label": "R"}, {"key": "agents", "label": "A"}]})
+    _snap, upd = env
+    with patch.object(revise.gen_svc, "get_article",
+                      return_value=dict(ART, cluster_id="c1")), \
+         patch.object(revise.brands, "get_profile",
+                      return_value={"name": "B", "blog_profile": prof.model_dump()}), \
+         patch("rankforge_backend.services.clusters.get_cluster",
+               return_value={"id": "c1", "category": "rag"}) as gc:
+        await revise.instructed_pass(
+            _client({"content_md": BODY, "frontmatter": {"category": "agents"}}),
+            MagicMock(), "a", instructions="x", mode="refine")
+    gc.assert_called_once()
+    written = {k: v for c in upd.call_args_list for k, v in c.kwargs.items()}
+    assert written["category"] == "rag"
+
+
+# --- review r1 I4: instructed-pass frontmatter flags are kept, not dropped ---
+async def test_frontmatter_flags_stored_in_progress(env):
+    _snap, upd = env
+    fm = {"summary": "too short"}
+    await revise.instructed_pass(_client({"content_md": BODY, "frontmatter": fm}),
+                                 MagicMock(), "a", instructions="x", mode="refine")
+    prog = [c.kwargs["progress"] for c in upd.call_args_list
+            if "progress" in c.kwargs]
+    assert prog and "summary is 2 words (needs 40-60)" in prog[-1]["frontmatter_flags"]

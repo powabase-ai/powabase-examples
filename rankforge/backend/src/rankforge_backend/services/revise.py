@@ -1222,7 +1222,12 @@ async def instructed_pass(
     agent_id = await ensure_reviser_agent(client)
     res = await client.run_agent_collect(agent_id, msg)
     if res.get("error"):
-        raise InstructedRefineError(f"reviser failed: {res['error']}")
+        log.warning("instructed reviser error for %s: %s", article_id, res["error"])
+        raise InstructedRefineError("the reviser failed; try again")
+    if res.get("incomplete"):
+        # No `complete` event: the stream was cut off, so the reply may be a
+        # truncated article (rework has no length floor to catch it).
+        raise InstructedRefineError("the reviser's reply was cut off; try again")
 
     raw_content = (res.get("content") or "").strip()
     try:
@@ -1244,9 +1249,11 @@ async def instructed_pass(
 
     new_md = linking.restore_refs(str(data.get("content_md") or "").strip(), refmap)
     if not new_md:
-        raise InstructedRefineError("empty revision")
+        raise InstructedRefineError("the revision came back empty")
     if mode == "refine" and len(new_md) < 0.6 * len(cur_md):
-        raise InstructedRefineError("refine dropped too much of the article")
+        raise InstructedRefineError(
+            "the revision dropped too much of the article (refine keeps at least 60%)"
+        )
     new_md = linking.strip_competitor_links(new_md, linking.competitor_hosts(brand))
     if profile and profile.faq.enabled:
         new_md = blog_rules.strip_body_faq(new_md)
@@ -1256,14 +1263,28 @@ async def instructed_pass(
     for k in ("title", "meta_title", "meta_description"):
         if isinstance(fm_in.get(k), str) and fm_in[k].strip():
             fields[k] = fm_in[k].strip()
-    if profile and any(k in fm_in for k in ("summary", "faq", "category")):
-        merged = {"category": fm_in.get("category", article.get("category")),
-                  "summary": fm_in.get("summary", article.get("summary")),
-                  "faq": fm_in.get("faq", article.get("faq"))}
-        clean, _flags = blog_rules.validate_frontmatter(
-            merged, profile, cluster_category=None
+    fm_flags: list[str] = []
+    # Only real values count as changes: a blank category, "" summary or empty FAQ
+    # from the model keeps what is stored.
+    incoming: dict[str, Any] = {}
+    if isinstance(fm_in.get("category"), str) and fm_in["category"].strip():
+        incoming["category"] = fm_in["category"].strip()
+    if isinstance(fm_in.get("summary"), str) and fm_in["summary"].strip():
+        incoming["summary"] = fm_in["summary"]
+    if blog_rules.clean_faq(fm_in.get("faq")):
+        incoming["faq"] = fm_in["faq"]
+    if profile and incoming:
+        merged = {k: incoming.get(k, article.get(k))
+                  for k in ("category", "summary", "faq")}
+        # The cluster's category wins over the model's (spec).
+        clean, fm_flags = blog_rules.validate_frontmatter(
+            merged, profile,
+            cluster_category=frontmatter._cluster_category(db, article),
         )
-        fields.update({k: v for k, v in clean.items() if v is not None})
+        fields.update({k: clean[k] for k in incoming if clean.get(k) is not None})
+        if fm_flags:
+            log.warning("instructed pass frontmatter flags for %s: %s",
+                        article_id, fm_flags)
 
     snap = {k: article.get(k) for k in (
         "content_md", *gen_svc.FRONTMATTER_FIELDS, "seo_score", "geo_score",
@@ -1284,6 +1305,12 @@ async def instructed_pass(
     except Exception:
         gen_svc._update(db, article_id, **snap)
         raise
+    if fm_flags:
+        # Kept in progress so the refine finisher carries them into the done state.
+        prog = (gen_svc.get_article(db, article_id) or {}).get("progress") or {}
+        gen_svc._update(
+            db, article_id, progress={**prog, "frontmatter_flags": fm_flags}
+        )
 
 
 async def refine(
@@ -1342,7 +1369,24 @@ async def refine(
         t in _SEO_META_SELECTORS for t in targets
     )
     if _meta_failing(article.get("seo_score")) or meta_selected:
-        await fix_meta(client, db, article_id, article, brief)
+        from . import blog_rules, frontmatter  # local: avoid import cycle
+
+        profile = blog_rules.profile_of(
+            brands.get_profile(db, article["business_id"])
+            if article.get("business_id") else None
+        )
+        if profile:
+            await fix_meta(
+                client, db, article_id, article, brief,
+                title_max=profile.meta.title_max,
+                description_max=profile.meta.description_max,
+            )
+            frontmatter.enforce_meta(
+                db, article_id, gen_svc.get_article(db, article_id) or article,
+                profile,
+            )
+        else:
+            await fix_meta(client, db, article_id, article, brief)
         await scoring.score_and_store(client, db, article_id)
 
     if targets is not None:
