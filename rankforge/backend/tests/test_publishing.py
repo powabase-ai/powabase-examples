@@ -526,6 +526,28 @@ def test_publish_route_422_with_export_issues(monkeypatch):
     assert resp.json()["detail"]["export_issues"] == ["x"]
 
 
+def test_export_issue_422s_use_non_deprecated_status(monkeypatch):
+    import warnings
+
+    async def fake_publish(db, aid, **k):
+        raise svc.ExportBlocked(["x"])
+
+    monkeypatch.setattr(svc, "publish", fake_publish)
+    def blocked(*a, **k):
+        raise svc.ExportBlocked(["x"])
+
+    monkeypatch.setattr(svc, "export", blocked)
+    monkeypatch.setattr(svc.gen_svc, "get_article",
+                        lambda _db, _id: {**ARTICLE, "business_id": BID})
+    client = _client(_brand_db())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        r1 = client.post(f"/api/articles/{AID}/publish", json={"target_type": "export"})
+        r2 = client.get(f"/api/articles/{AID}/export")
+    assert r1.status_code == 422 and r2.status_code == 422
+    assert not [w for w in caught if "HTTP_422_UNPROCESSABLE_ENTITY" in str(w.message)]
+
+
 # --- instruction-driven refine/rework: route wiring (Task 10) ---
 def _refine_db() -> MagicMock:
     """A db whose fetch_one returns a full Article-shaped row (unlike _brand_db,

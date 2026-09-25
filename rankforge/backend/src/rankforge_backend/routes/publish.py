@@ -29,6 +29,10 @@ router = APIRouter(
 public_router = APIRouter(prefix="/api/public", tags=["public"])
 
 _EXT = {"markdown": "mdx", "html": "html"}
+# Starlette renamed the 422 constant; fall back on versions that predate the new name.
+_UNPROCESSABLE = getattr(
+    status, "HTTP_422_UNPROCESSABLE_CONTENT", status.HTTP_422_UNPROCESSABLE_ENTITY
+)
 
 
 @router.get("/{article_id}/export")
@@ -46,7 +50,7 @@ def export_article(
         result = svc.export(db, article_id, format)
     except svc.ExportBlocked as e:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, {"export_issues": e.issues}
+            _UNPROCESSABLE, {"export_issues": e.issues}
         ) from e
     if result is None:
         raise HTTPException(
@@ -85,7 +89,7 @@ async def publish_article(
         )
     except svc.ExportBlocked as e:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, {"export_issues": e.issues}
+            _UNPROCESSABLE, {"export_issues": e.issues}
         ) from e
     if pub is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
