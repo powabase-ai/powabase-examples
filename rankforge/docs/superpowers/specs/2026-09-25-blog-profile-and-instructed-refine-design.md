@@ -551,20 +551,36 @@ This is a single pass, not a loop:
 
 ## 6. Frontend
 
+- **Article page, top action bar** — a "Refine with instructions" button (Sparkles
+  icon) sits next to History / Edit / Publish, for every brand (not only profile
+  brands). Disabled while the article is generating/refining or its content is
+  empty. It opens a modal (`RefineInstructionsDialog.tsx`, using the shared
+  `Dialog` primitives, same pattern as `PublishDialog.tsx`): title "Refine with
+  instructions", a one-line description, the instructions textarea (autofocus,
+  4000-character counter), the Refine/Rework segmented toggle with its one-line
+  help, and a footer with Cancel and Run (Run disabled when the text is blank or
+  the refine mutation is pending). It reuses `useRefineArticle({instructions,
+  mode})` — no duplicated refine logic. On a successful submit: the existing
+  toast, the draft is cleared, and the modal closes. On error: the toast shows
+  the error and the modal stays open. Closing via Cancel, the X or an outside
+  click keeps the draft text (it isn't cleared until a successful run) — the
+  dialog component stays mounted (rendered unconditionally like `PublishDialog`)
+  so its local state survives a close, and is keyed on the article id so the
+  draft resets when the shown article changes.
 - **Article page, "Post" tab** (`PostPanel.tsx`) — always shown (not a card on
   the main body), placed after Links and before Comments (tab order: SEO, GEO,
   Readability, Grounding, Links, Post, Comments):
-  - "Refine with instructions": a textarea (4000-character counter), a
-    Refine/Rework segmented toggle with one-line help for each, and a Run
-    button, disabled while a refine or revert is in flight.
-  - After a run, a banner shows score changes (SEO/GEO/Readability before →
-    after) from `progress.before`. It (and the frontmatter flags below) is shown
-    only while the run's result is current: the page stamps `updated_at` when it
-    first sees the article settled (`generation_status === "done"`) and hides
-    both once `updated_at` moves on (a manual edit, a frontmatter save, a
-    revert, a status change). After a reload the stamp restarts from the loaded
-    record.
-  - A **Revert to previous version** button (confirm dialog), always shown.
+  - A compact **"Last run"** area at the top of the tab holds the outcome of the
+    last instructed refine/rework plus revert:
+    - the "Refine didn't apply: …" notice and the before/after score strip
+      (SEO/GEO/Readability, from `progress.before`) each render only when they
+      apply, under the existing `runCurrent` rule: the page stamps `updated_at`
+      when it first sees the article settled (`generation_status === "done"`)
+      and hides both once `updated_at` moves on (a manual edit, a frontmatter
+      save, a revert, a status change). After a reload the stamp restarts from
+      the loaded record.
+    - a **Revert to previous version** button (confirm dialog) is always shown,
+      regardless of whether there's a notice or score strip to show above it.
   - When the brand's stored blog profile is present but invalid, a banner says
     "This brand's blog profile is invalid — fix it in Settings" (linked), and
     since the editor isn't rendered, `progress.frontmatter_flags` (e.g. the

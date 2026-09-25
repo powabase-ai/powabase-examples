@@ -34,6 +34,7 @@ import { InternalLinksPanel } from "@/components/InternalLinksPanel";
 import { Markdown } from "@/components/Markdown";
 import { PostPanel } from "@/components/PostPanel";
 import { PublishDialog } from "@/components/PublishDialog";
+import { RefineInstructionsDialog } from "@/components/RefineInstructionsDialog";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import {
   useArticle,
@@ -468,6 +469,7 @@ export default function ArticleView({
   >("SEO");
   const [showHistory, setShowHistory] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
+  const [showRefine, setShowRefine] = useState(false);
   // Flagged issues the user has ticked to fix (axis:signal / grounding:i), across tabs.
   const [refineTargets, setRefineTargets] = useState<Set<string>>(new Set());
   const toggleTarget = (tid: string) =>
@@ -499,6 +501,7 @@ export default function ArticleView({
     setTab("SEO");
     setShowHistory(false);
     setShowPublish(false);
+    setShowRefine(false);
     setRefineTargets(new Set());
     setLocateUrl(null);
   }, [articleId]);
@@ -844,6 +847,14 @@ export default function ArticleView({
                 <Button
                   variant="outline"
                   size="sm"
+                  onClick={() => setShowRefine(true)}
+                  disabled={!!generating || !a.content_md?.trim()}
+                >
+                  <Sparkles /> Refine with instructions
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => setShowHistory(true)}
                 >
                   <History /> History
@@ -1007,6 +1018,15 @@ export default function ArticleView({
           brandId={id}
           slug={a.slug}
           published={a.status === "published"}
+        />
+      )}
+
+      {a && (
+        <RefineInstructionsDialog
+          key={articleId}
+          open={showRefine}
+          onOpenChange={setShowRefine}
+          articleId={articleId}
         />
       )}
 
