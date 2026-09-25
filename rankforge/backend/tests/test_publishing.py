@@ -436,3 +436,91 @@ def test_export_route_sets_slug_mdx_filename(monkeypatch):
     cd = resp.headers.get("content-disposition", "")
     assert "attachment" in cd
     assert 'filename="title.mdx"' in cd  # <slug>.mdx
+
+
+# --- profile frontmatter + pre-export check ---
+from rankforge_backend.models.blog import BlogProfile  # noqa: E402
+
+_BP = BlogProfile.model_validate({"categories": [{"key": "rag", "label": "R"}]})
+_S = " ".join(["word"] * 44) + " end."
+_FAQ = [{"q": f"Q{i}?", "a": "A."} for i in range(3)]
+
+
+def _pa(**over):
+    return {**ARTICLE, "category": "rag", "summary": _S, "faq": _FAQ,
+            "status": "approved", **over}
+
+
+def test_render_markdown_profile_fields_in_order():
+    out = svc.render_markdown(_pa(), _BP)
+    fm = out.split("---")[1]
+    keys = ["title:", "description:", "category:", "summary:", "faq:", "draft:"]
+    positions = [fm.index(k) for k in keys]
+    assert positions == sorted(positions)
+    assert '  - q: "Q0?"\n    a: "A."' in fm
+    assert "metaTitle" not in fm  # short title
+
+
+def test_render_markdown_meta_title_only_when_title_too_long():
+    out = svc.render_markdown(_pa(title="x" * 70, meta_title="Short one"), _BP)
+    assert 'metaTitle: "Short one"' in out
+    out = svc.render_markdown(_pa(title="Fits", meta_title="Other"), _BP)
+    assert "metaTitle" not in out
+
+
+def test_render_markdown_profile_yaml_safety():
+    tricky = 'Line: "quoted" # not a comment\nnext — ünïcode'
+    out = svc.render_markdown(
+        _pa(summary=tricky, faq=[{"q": 'What: "x"?', "a": "a # b"}] * 3), _BP
+    )
+    import json as _j
+
+    assert f"summary: {_j.dumps(tricky)}" in out
+    assert "\\n" in out.split("summary:")[1].split("\n")[0]  # newline escaped
+
+
+def test_render_markdown_faq_disabled():
+    off = _BP.model_copy(update={"faq": _BP.faq.model_copy(update={"enabled": False})})
+    out = svc.render_markdown(_pa(), off)
+    assert "faq:" not in out and "summary:" in out
+
+
+def test_render_markdown_no_profile_unchanged():
+    assert svc.render_markdown(_pa()) == svc.render_markdown(_pa(), None)
+    assert "category:" not in svc.render_markdown(_pa())
+
+
+def test_export_blocked_on_issues(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(svc.gen_svc, "get_article",
+                        lambda _db, _id: {**_pa(category=None), "business_id": BID})
+    from rankforge_backend.services import business_profiles as bp
+
+    monkeypatch.setattr(bp, "get_profile",
+                        lambda _db, _id: {"name": "B", "blog_profile": _BP.model_dump()})
+    db.fetch_one.return_value = {"keywords": []}
+    with pytest.raises(svc.ExportBlocked) as e:
+        svc.export(db, AID, "markdown")
+    assert any("category" in i for i in e.value.issues)
+
+
+def test_export_route_422_with_export_issues(monkeypatch):
+    monkeypatch.setattr(
+        svc, "export",
+        MagicMock(side_effect=svc.ExportBlocked(["x"])),
+    )
+    resp = _client(_brand_db()).get(f"/api/articles/{AID}/export?format=markdown")
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["export_issues"] == ["x"]
+
+
+def test_publish_route_422_with_export_issues(monkeypatch):
+    async def fake_publish(db, aid, **k):
+        raise svc.ExportBlocked(["x"])
+
+    monkeypatch.setattr(svc, "publish", fake_publish)
+    resp = _client(_brand_db()).post(
+        f"/api/articles/{AID}/publish", json={"target_type": "export"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["export_issues"] == ["x"]

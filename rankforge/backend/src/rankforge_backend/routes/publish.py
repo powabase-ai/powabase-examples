@@ -42,7 +42,12 @@ def export_article(
     if article is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     assert_brand_access(db, article["business_id"], user)
-    result = svc.export(db, article_id, format)
+    try:
+        result = svc.export(db, article_id, format)
+    except svc.ExportBlocked as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, {"export_issues": e.issues}
+        ) from e
     if result is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "article not found or unknown format"
@@ -70,13 +75,18 @@ async def publish_article(
     if article is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     assert_brand_access(db, article["business_id"], user)
-    pub = await svc.publish(
-        db,
-        article_id,
-        target_type=payload.target_type,
-        config=payload.config,
-        public_base_url=get_settings().public_base_url,
-    )
+    try:
+        pub = await svc.publish(
+            db,
+            article_id,
+            target_type=payload.target_type,
+            config=payload.config,
+            public_base_url=get_settings().public_base_url,
+        )
+    except svc.ExportBlocked as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, {"export_issues": e.issues}
+        ) from e
     if pub is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     return pub
