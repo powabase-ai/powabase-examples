@@ -472,10 +472,18 @@ This is a single pass, not a loop:
    - under an FAQ-enabled profile, a body FAQ section is removed.
 6. **Frontmatter overwrite protection:** a blank `category`, an empty `""`
    `summary`, or an empty `faq` list in the model's reply is **ignored** — it
-   never overwrites a stored value. Only non-blank incoming fields are merged
-   with what's currently stored and run through `blog_rules.validate_frontmatter`
-   (which — per the cluster's `category` wins) prefers the cluster's category
-   over anything the model returned.
+   never overwrites a stored value. A non-blank `title`, `meta_title` or
+   `meta_description` is written stripped. Each non-blank incoming
+   category/summary/FAQ is run through `blog_rules.validate_frontmatter` (an
+   over-long summary is trimmed, extra FAQ items dropped) and written **only if
+   it then passes the rules** (`frontmatter.field_ok`):
+   - `category` must be a profile key **as the model sent it** — an unknown
+     one (`"AI agents"`) is dropped, never mapped to the fallback; the
+     cluster's category still wins over a valid one;
+   - a summary or FAQ out of bounds keeps the stored value.
+   Each dropped field adds a flag (e.g. `model's summary was 3 words (needs
+   40-60) — kept the stored one`); a trimmed summary keeps
+   `summary trimmed to fit; review it`.
 7. **Write:** the article is versioned first (so the whole pass is one undo
    point), then body + any validated frontmatter fields are written together,
    `enforce_meta` clamps meta to the profile's limits, and fact-check, GEO and
