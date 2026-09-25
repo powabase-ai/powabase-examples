@@ -119,8 +119,11 @@ The same routes validate `url_pattern` when it is saved (422 with the reason): i
 must be an absolute `http(s)` URL with a host or a path starting with `/` (not
 `//`), with a `{slug}` or `{id}` token, no `#` fragment, no whitespace or control
 characters, and no `\` anywhere (browsers read it as `/`, so `/\evil.com/{slug}`
-would link off-site). A blank value clears it. The response model doesn't re-validate, so a legacy stored
-pattern still reads back unchanged.
+would link off-site). A blank value clears it. Create is always strict; update
+skips the check when the submitted value (stripped) equals the brand's stored
+one, so a brand with an invalid legacy pattern can still save its other
+settings (the form always sends `url_pattern`). The response model doesn't
+re-validate, so a legacy stored pattern still reads back unchanged.
 
 ### Powabase seed (`scripts/seed_powabase_blog_profile.py`)
 

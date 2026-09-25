@@ -14,14 +14,21 @@ from .blog import BlogProfile
 _Tag = Annotated[str, Field(max_length=120)]
 
 
-def _check_url_pattern(v: str | None) -> str | None:
+def normalize_url_pattern(v: str | None) -> str | None:
+    """Stripped; blank means cleared (None)."""
+    if v is None or not v.strip():
+        return None
+    return v.strip()
+
+
+def check_url_pattern(v: str | None) -> str | None:
     """A saved url_pattern must render to a real article URL: an absolute http(s)
     URL or a site path starting with '/', with a {slug} or {id} token, no fragment
     and no whitespace, control characters or '\\'. Blank clears it. Only request
     models run this, so a legacy stored value still reads back as it is."""
-    if v is None or not v.strip():
+    v = normalize_url_pattern(v)
+    if v is None:
         return None
-    v = v.strip()
     if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in v):
         raise ValueError("url_pattern must not contain whitespace")
     # Browsers read a backslash as '/', so '/\evil.com/{slug}' is '//evil.com/…', an
@@ -68,7 +75,7 @@ class BusinessProfileCreate(BaseModel):
     @field_validator("url_pattern")
     @classmethod
     def _url_pattern(cls, v: str | None) -> str | None:
-        return _check_url_pattern(v)
+        return check_url_pattern(v)
 
 
 class BusinessProfileUpdate(BaseModel):
@@ -93,7 +100,10 @@ class BusinessProfileUpdate(BaseModel):
     @field_validator("url_pattern")
     @classmethod
     def _url_pattern(cls, v: str | None) -> str | None:
-        return _check_url_pattern(v)
+        # Normalised only: the PATCH route validates strictly (check_url_pattern)
+        # unless the value equals the brand's stored one, so a brand with a legacy
+        # pattern can still save its other settings.
+        return normalize_url_pattern(v)
 
 
 class BusinessProfile(BaseModel):

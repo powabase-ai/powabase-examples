@@ -19,6 +19,8 @@ from ..models.business import (
     BusinessProfile,
     BusinessProfileCreate,
     BusinessProfileUpdate,
+    check_url_pattern,
+    normalize_url_pattern,
 )
 from ..models.linkedin import LinkedInPostWithArticle
 from ..models.profile import CurrentUser
@@ -102,10 +104,40 @@ def update_business_profile(
     db: Database = Depends(get_db),
     user: CurrentUser = Depends(require_editor),
 ):
+    _check_changed_url_pattern(db, profile_id, payload, user)
     row = svc.update_profile(db, profile_id, payload, user.org_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "business profile not found")
     return row
+
+
+def _check_changed_url_pattern(
+    db: Database, profile_id: UUID, payload: BusinessProfileUpdate,
+    user: CurrentUser,
+) -> None:
+    """422 (same shape as a body validation error) when a submitted url_pattern
+    fails `check_url_pattern` — unless it equals the brand's stored value. The
+    settings form always sends url_pattern, so a brand with an invalid LEGACY
+    pattern could otherwise not save anything else until it fixed the pattern.
+    Only the caller's own brand is compared (no oracle on another org's value)."""
+    new = payload.url_pattern
+    if "url_pattern" not in payload.model_fields_set or new is None:
+        return
+    row = svc.get_profile(db, profile_id)
+    stored = (
+        normalize_url_pattern(row.get("url_pattern"))
+        if row and row.get("org_id") == user.org_id else None
+    )
+    if new == stored:
+        return
+    try:
+        check_url_pattern(new)
+    except ValueError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            [{"type": "value_error", "loc": ["body", "url_pattern"],
+              "msg": f"Value error, {e}", "input": new}],
+        ) from None
 
 
 @router.post("/{profile_id}/logo", response_model=BusinessProfile)
