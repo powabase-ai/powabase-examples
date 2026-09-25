@@ -330,3 +330,12 @@ async def test_instructed_blank_title_and_meta_are_ignored(env):
         instructions="x", mode="refine")
     written = {k for c in upd.call_args_list for k in c.kwargs}
     assert not written & {"title", "meta_title", "meta_description"}
+
+
+async def test_refine_mode_rejects_a_body_at_55_percent(env):
+    _snap, upd = env
+    body = BODY[: len(BODY) * 55 // 100]
+    with pytest.raises(revise.InstructedRefineError, match="60%"):
+        await revise.instructed_pass(_client({"content_md": body}), MagicMock(),
+                                     "a", instructions="x", mode="refine")
+    assert not any("content_md" in c.kwargs for c in upd.call_args_list)

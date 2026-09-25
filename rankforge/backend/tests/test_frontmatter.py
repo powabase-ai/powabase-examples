@@ -549,3 +549,31 @@ def test_frontmatter_route_409_without_profile_says_so(monkeypatch):
     )
     resp = _route_client(db).post(f"/api/articles/{AID}/frontmatter")
     assert resp.json()["detail"] == "brand has no blog profile"
+
+
+# --- coordinator r2 follow-ups ---
+def test_frontmatter_route_releases_claim_when_the_before_read_fails(monkeypatch):
+    from rankforge_backend.services import generation as g
+
+    client, updates = _fm_route(monkeypatch, VALID)
+    n = {"calls": 0}
+
+    def _get(d, a):
+        n["calls"] += 1
+        if n["calls"] == 2:  # 1 = the guard; 2 = the read right after the claim
+            raise RuntimeError("db hiccup")
+        return dict(_ROUTE["state"]["art"])
+
+    monkeypatch.setattr(g, "get_article", _get)
+    client = TestClient(client.app, raise_server_exceptions=False)
+    assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 500
+    assert updates and updates[-1]["generation_status"] == "done"
+
+
+@pytest.mark.parametrize("force", ["yes", 1, "true"])
+def test_frontmatter_route_rejects_a_non_bool_force(monkeypatch, force):
+    complete = AsyncMock(return_value=[])
+    client, _ = _fm_route(monkeypatch, VALID, complete=complete)
+    resp = client.post(f"/api/articles/{AID}/frontmatter", json={"force": force})
+    assert resp.status_code == 422
+    complete.assert_not_awaited()

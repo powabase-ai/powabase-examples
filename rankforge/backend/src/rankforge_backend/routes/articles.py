@@ -213,8 +213,8 @@ async def generate_frontmatter(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "generation already in progress"
         )
-    before = svc.get_article(db, article_id) or article
     try:
+        before = svc.get_article(db, article_id) or article
         flags = await frontmatter_svc.complete(pb, db, article_id, force=force)
         if flags:
             log.info("frontmatter flags for %s: %s", article_id, flags)

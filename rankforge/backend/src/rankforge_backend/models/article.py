@@ -4,7 +4,13 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 from .blog import FaqItem
 
@@ -117,7 +123,8 @@ class FrontmatterRequest(BaseModel):
     summary & FAQ") regenerates the summary and FAQ even when they pass the rules;
     false ("Fix automatically") touches only failing fields."""
 
-    force: bool = False
+    # Strict: "yes"/1/"true" are a 422, not silently coerced to a forced run.
+    force: StrictBool = False
 
 
 FRONTMATTER_CHANGE_FIELDS = (
