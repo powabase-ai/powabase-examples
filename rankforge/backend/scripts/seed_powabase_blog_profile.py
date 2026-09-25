@@ -6,8 +6,7 @@ Targets the brand by id (names are only unique within an org). Idempotent:
 overwrites blog_profile with the validated profile, sets url_pattern to the
 trailing-slash blog URL if it's empty, and rolls back and exits non-zero unless
 exactly one row was updated. Rules mirror website lib/blog.ts,
-content/blog-categories.ts
-and scripts/check-meta.ts (Sept 2026)."""
+content/blog-categories.ts and scripts/check-meta.ts (Sept 2026)."""
 
 import argparse
 import sys

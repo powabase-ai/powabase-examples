@@ -59,12 +59,11 @@ def canonical_url(brand: dict[str, Any] | None, article: dict[str, Any]) -> str 
 
     Resolution: the article's explicit canonical_url override → the brand's url_pattern
     rendered with the article's tokens → None (we REQUIRE a pattern, so there is no
-    /p/{id} fallback for internal-link targets)."""
+    /p/{id} fallback for internal-link targets). On a profile brand with
+    trailing_slash, either result gets the trailing slash."""
     override = (article.get("canonical_url") or "").strip()
-    if override:
-        return override
     pattern = (brand or {}).get("url_pattern")
-    url = _render_pattern(pattern, article) if pattern else None
+    url = override or (_render_pattern(pattern, article) if pattern else None)
     prof = blog_rules.profile_of(brand)
     if url and prof and prof.links.trailing_slash:
         url = blog_rules.with_trailing_slash(url)

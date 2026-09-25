@@ -190,3 +190,10 @@ def test_link_candidates_structural_first_then_hubs_then_ranked(monkeypatch):
     # Then published technical articles by keyword overlap, highest first (per-
     # category cap 2 → the lowest-ranked one is dropped).
     assert targets[2:] == [f"rf:article/{T2}", f"rf:article/{T3}"]
+
+
+def test_canonical_override_gets_the_trailing_slash_on_profile_brands():
+    art = {"slug": "a", "canonical_url": "https://powabase.ai/guides/a"}
+    assert lk.canonical_url(_brand(), art) == "https://powabase.ai/guides/a/"
+    legacy = {**_brand(), "blog_profile": None}
+    assert lk.canonical_url(legacy, art) == "https://powabase.ai/guides/a"
