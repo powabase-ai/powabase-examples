@@ -919,7 +919,7 @@ def _selected_total(article: dict, targets: list[str]) -> float:
 _LOCALIZED_TELL_KEYS = frozenset(
     {"em_dashes", "tell_phrases", "ai_vocabulary", "transitions", "brand_voice"}
 )
-_EM_DASH_RE = re.compile(r"—")
+_EM_DASH_RE = prose_style.EM_DASH_RE
 _TELL_INSTRUCTION = {
     # brand_voice and em_dashes are NOT in the shared taxonomy: one is brand-specific,
     # the other is punctuation policy with a deterministic backstop. They stay here.
@@ -961,13 +961,8 @@ def _has_nonlocalized_target(targets: list[str]) -> bool:
     return False
 
 
-def _thin_em_dashes(text: str) -> str:
-    """Deterministic backstop: replace em-dashes with commas (guarantees the em-dash
-    tell drops regardless of the model's cooperation), then tidy the punctuation."""
-    out = _EM_DASH_RE.sub(", ", text)
-    out = re.sub(r"\s*,\s*,", ",", out)  # collapse a doubled comma
-    out = re.sub(r"\s+([.,;:!?])", r"\1", out)  # no space before punctuation
-    return re.sub(r"[ \t]{2,}", " ", out)
+# Deterministic em-dash backstop (shared with the frontmatter step).
+_thin_em_dashes = prose_style.thin_em_dashes
 
 
 def _tell_instructions(keys: set[str]) -> str:
