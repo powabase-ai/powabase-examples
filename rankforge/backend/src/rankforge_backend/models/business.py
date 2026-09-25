@@ -73,8 +73,11 @@ class BusinessProfile(BaseModel):
     url_pattern: str | None = None
     default_author: str | None = None
     logo_url: str | None = None
-    # Target-blog conventions (see models/blog.py). None = legacy behavior.
-    blog_profile: BlogProfile | None = None
+    # Target-blog conventions (see models/blog.py). None = legacy behavior. Typed
+    # loosely on the RESPONSE so one brand with a stored profile that no longer
+    # validates can't 500 the brand list; the request models stay strict, and
+    # export/publish refuse an invalid profile (services/publishing.py).
+    blog_profile: dict | None = None
     materials_progress: dict = {}
     created_by: UUID | None = None
     created_at: datetime

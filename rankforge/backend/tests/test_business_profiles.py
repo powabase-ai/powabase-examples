@@ -220,3 +220,25 @@ def test_delete_without_powabase_still_returns_204(monkeypatch):
 
     assert resp.status_code == 204
     assert deleted.get("pid") is not None  # the row delete still ran
+
+
+def test_list_tolerates_an_invalid_stored_blog_profile():
+    """One brand with a corrupt stored blog_profile must not 500 the whole list; the
+    raw value is returned so the settings page can show and fix it."""
+    db = MagicMock()
+    bad = {"categories": "nope"}
+    db.fetch_all.return_value = [{**ROW, "blog_profile": bad}]
+    resp = make_client(db).get("/api/business-profiles")
+    assert resp.status_code == 200
+    assert resp.json()[0]["blog_profile"] == bad
+
+
+def test_update_still_validates_the_blog_profile_strictly():
+    db = MagicMock()
+    resp = make_client(db).patch(
+        f"/api/business-profiles/{ROW['id']}",
+        json={"blog_profile": {"categories": [{"key": "rag", "label": "R"}],
+                               "link": {"min": 1}}},
+    )
+    assert resp.status_code == 422
+    db.fetch_one.assert_not_called()
