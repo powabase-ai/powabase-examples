@@ -20,6 +20,7 @@ class ContentCluster(BaseModel):
     business_id: UUID
     label: str
     theme: str | None = None
+    category: str | None = None
     pillar_article_id: UUID | None = None
     pillar_locked: bool = False
     pillar_title: str | None = None
@@ -41,11 +42,13 @@ class NewCluster(BaseModel):
 
 
 class ClusterUpdate(BaseModel):
-    """Edit a cluster's metadata. Both fields are optional (partial patch): an omitted
-    field is left unchanged; an empty `theme` clears it. `label` can't be blanked."""
+    """Edit a cluster's metadata. All fields are optional (partial patch): an omitted
+    field is left unchanged; an empty `theme` clears it. `label` can't be blanked.
+    Sending `category: null` clears the cluster's fallback blog category."""
 
     label: str | None = Field(default=None, min_length=1, max_length=120)
     theme: str | None = Field(default=None, max_length=2000)
+    category: str | None = Field(default=None, max_length=60)
 
 
 class SetPillar(BaseModel):

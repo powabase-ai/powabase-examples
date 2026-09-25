@@ -20,6 +20,8 @@ from ..models.clusters import (
 )
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient
+from ..services import blog_rules
+from ..services import business_profiles as brands
 from ..services import clusters as svc
 from ..services import scouts as scout_svc
 from .deps import get_db, get_powabase
@@ -108,6 +110,11 @@ def analyze_gaps(
     return {"created": created}
 
 
+_UNPROCESSABLE = getattr(
+    status, "HTTP_422_UNPROCESSABLE_CONTENT", status.HTTP_422_UNPROCESSABLE_ENTITY
+)
+
+
 @router.patch("/clusters/{cluster_id}", response_model=ContentCluster)
 async def update_cluster(
     cluster_id: UUID,
@@ -116,11 +123,19 @@ async def update_cluster(
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(require_editor),
 ):
-    """Edit a cluster's label/theme. Re-indexes the cluster's one-doc entry so the
-    architect matches future topics against the updated text, not a stale embedding."""
-    _guard_cluster(db, cluster_id, user)
+    """Edit a cluster's label/theme/category. Re-indexes the cluster's one-doc entry
+    when the label/theme text changes so the architect matches future topics against
+    the updated text, not a stale embedding — a category-only edit skips that entirely.
+    Setting a category validates it against the brand's blog profile."""
+    cluster = _guard_cluster(db, cluster_id, user)
+    category_given = "category" in payload.model_fields_set
+    if category_given and payload.category is not None:
+        profile = blog_rules.profile_of(brands.get_profile(db, cluster["business_id"]))
+        if profile is None or payload.category not in {c.key for c in profile.categories}:
+            raise HTTPException(_UNPROCESSABLE, "unknown category")
+    category = payload.category if category_given else svc._UNSET
     row = await svc.update_cluster(
-        pb, db, cluster_id, label=payload.label, theme=payload.theme
+        pb, db, cluster_id, label=payload.label, theme=payload.theme, category=category
     )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")

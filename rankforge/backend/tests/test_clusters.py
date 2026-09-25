@@ -241,6 +241,20 @@ async def test_update_cluster_theme_only_preserves_label(monkeypatch):
     assert db.fetch_one.call_args.args[1][0] == "Auth"
 
 
+async def test_update_cluster_category_only_skips_reindex(monkeypatch):
+    cur = {"id": "c", "label": "L", "theme": "T", "category": None}
+    db = MagicMock()
+    monkeypatch.setattr(clusters, "get_cluster", lambda _db, _id: cur)
+    db.fetch_one.return_value = {**cur, "category": "rag"}
+    reindex = AsyncMock()
+    monkeypatch.setattr(clusters, "_reindex_cluster", reindex, raising=False)
+    row = await clusters.update_cluster(MagicMock(), db, "c", category="rag")
+    assert row["category"] == "rag"
+    sql = db.fetch_one.call_args.args[0]
+    assert "category = %s" in sql
+    reindex.assert_not_called()
+
+
 async def test_assign_join_with_bad_id_falls_back_to_nearest(monkeypatch):
     db = MagicMock()
     monkeypatch.setattr(clusters.brands, "get_profile", lambda d, bid: {})
@@ -578,6 +592,41 @@ def test_update_cluster_404_when_missing(monkeypatch):
     monkeypatch.setattr(clusters, "update_cluster", AsyncMock(return_value=None))
     resp = _client().patch(f"/api/clusters/{CID}", json={"label": "X"})
     assert resp.status_code == 404
+
+
+def test_patch_cluster_rejects_unknown_category(monkeypatch):
+    from rankforge_backend.routes import clusters as routes_clusters
+
+    monkeypatch.setattr(
+        routes_clusters, "_guard_cluster",
+        lambda d, cid, user: {"id": CID, "business_id": BID},
+    )
+    monkeypatch.setattr(
+        routes_clusters.brands, "get_profile",
+        lambda d, bid: {"blog_profile": {"categories": [{"key": "rag", "label": "R"}]}},
+    )
+    upd = AsyncMock()
+    monkeypatch.setattr(clusters, "update_cluster", upd)
+    resp = _client().patch(f"/api/clusters/{CID}", json={"category": "nope"})
+    assert resp.status_code == 422
+    assert "unknown category" in resp.json()["detail"]
+    upd.assert_not_awaited()
+
+
+def test_patch_cluster_rejects_category_when_no_profile(monkeypatch):
+    from rankforge_backend.routes import clusters as routes_clusters
+
+    monkeypatch.setattr(
+        routes_clusters, "_guard_cluster",
+        lambda d, cid, user: {"id": CID, "business_id": BID},
+    )
+    monkeypatch.setattr(routes_clusters.brands, "get_profile", lambda d, bid: {})
+    upd = AsyncMock()
+    monkeypatch.setattr(clusters, "update_cluster", upd)
+    resp = _client().patch(f"/api/clusters/{CID}", json={"category": "rag"})
+    assert resp.status_code == 422
+    assert "unknown category" in resp.json()["detail"]
+    upd.assert_not_awaited()
 
 
 def test_update_cluster_cross_org_404(monkeypatch):
