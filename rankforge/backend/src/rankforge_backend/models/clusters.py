@@ -44,7 +44,9 @@ class NewCluster(BaseModel):
 class ClusterUpdate(BaseModel):
     """Edit a cluster's metadata. All fields are optional (partial patch): an omitted
     field is left unchanged; an empty `theme` clears it. `label` can't be blanked.
-    Sending `category: null` clears the cluster's fallback blog category."""
+    `category` is the blog category for every article in the cluster: when it is a
+    valid key it takes precedence over the model's pick (it is not a fallback).
+    Sending `category: null` clears it."""
 
     label: str | None = Field(default=None, min_length=1, max_length=120)
     theme: str | None = Field(default=None, max_length=2000)

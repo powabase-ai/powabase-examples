@@ -114,6 +114,16 @@ class ExportBlocked(Exception):
         self.issues = issues
 
 
+def _export_profile(brand: dict[str, Any] | None) -> BlogProfile | None:
+    """The brand's blog profile for an export gate. A stored profile that fails
+    validation blocks the export rather than silently exporting in legacy mode
+    (which would also switch the export rules off)."""
+    reason = blog_rules.invalid_profile_reason(brand)
+    if reason:
+        raise ExportBlocked([f"blog profile is invalid: {reason}"])
+    return blog_rules.profile_of(brand)
+
+
 def _fm_date(val: Any) -> str:
     """YYYY-MM-DD from a datetime (psycopg) or an ISO-ish string."""
     if hasattr(val, "date"):
@@ -268,7 +278,7 @@ async def publish(
     # Pre-flight: if the brand has a blog profile, block BEFORE any side effect
     # (webhook delivery, flipping status to published) rather than publishing
     # something that would fail the target blog's build.
-    profile = blog_rules.profile_of(brand)
+    profile = _export_profile(brand)
     if profile and (issues := blog_rules.export_issues(article, profile)):
         raise ExportBlocked(issues)
     public_url = linking.canonical_url(brand, article) or (
@@ -511,7 +521,7 @@ def export(db: Database, article_id: UUID, fmt: str) -> tuple[str, str] | None:
         # date. Only a not-yet-published article (first export) defaults to today.
         "published_date": _export_published_date(db, article_id, article.get("status")),
     }
-    profile = blog_rules.profile_of(brand)
+    profile = _export_profile(brand) if fmt == "markdown" else None
     if fmt == "markdown":
         if profile is not None:
             issues = blog_rules.export_issues(article, profile)

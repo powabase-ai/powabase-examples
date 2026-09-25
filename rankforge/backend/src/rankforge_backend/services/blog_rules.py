@@ -2,6 +2,7 @@
 validation. No DB, no network, so every rule is unit-testable and shared by
 generation, refine, linking and export."""
 
+import logging
 import re
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -10,6 +11,8 @@ from pydantic import ValidationError
 
 from ..models.blog import BlogProfile
 
+log = logging.getLogger("rankforge.blog_rules")
+
 # An H2 whose text starts "FAQ"/"FAQs"/"Frequently asked…"/"Common questions".
 BODY_FAQ_RE = re.compile(
     r"(?im)^##[ \t]+(?:faqs?\b|frequently[ \t]+asked|common[ \t]+questions)[^\n]*$"
@@ -17,15 +20,38 @@ BODY_FAQ_RE = re.compile(
 _H2_RE = re.compile(r"(?m)^##[ \t]+")
 
 
-def profile_of(brand: dict[str, Any] | None) -> BlogProfile | None:
-    """The brand's parsed blog profile, or None (absent or unparseable → legacy)."""
+def _parse(brand: dict[str, Any] | None) -> tuple[BlogProfile | None, str | None]:
+    """(profile, None) when valid, (None, None) when absent, (None, reason) when a
+    stored profile fails validation."""
     raw = (brand or {}).get("blog_profile")
     if not raw:
-        return None
+        return None, None
     try:
-        return BlogProfile.model_validate(raw)
-    except ValidationError:
-        return None
+        return BlogProfile.model_validate(raw), None
+    except ValidationError as e:
+        err = e.errors()[0]
+        loc = ".".join(str(p) for p in err.get("loc") or ())
+        msg = err.get("msg") or "invalid"
+        return None, f"{loc}: {msg}" if loc else msg
+
+
+def profile_of(brand: dict[str, Any] | None) -> BlogProfile | None:
+    """The brand's parsed blog profile, or None when absent or invalid. An invalid
+    stored profile is logged; export and publish refuse it instead (see
+    invalid_profile_reason), so it never silently exports in legacy mode."""
+    prof, reason = _parse(brand)
+    if reason:
+        log.warning(
+            "brand %s has an invalid blog_profile (%s); treating it as absent",
+            (brand or {}).get("id"), reason,
+        )
+    return prof
+
+
+def invalid_profile_reason(brand: dict[str, Any] | None) -> str | None:
+    """A short reason when the brand HAS a stored blog profile that fails
+    validation; None when it is absent or valid."""
+    return _parse(brand)[1]
 
 
 def word_count(s: str | None) -> int:
