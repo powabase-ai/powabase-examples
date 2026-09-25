@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .blog import FaqItem
 
@@ -14,12 +14,35 @@ class ArticleGenerate(BaseModel):
 
 
 class RefineRequest(BaseModel):
-    """Which flagged issues the user picked to fix. Each selector is `axis:signal_key`
-    (e.g. `readability:em_dashes`, `seo:internal_links`) or `grounding:<index>`. When
-    omitted (None), refine drives every below-target axis automatically (legacy / the
-    post-generation auto-refine)."""
+    """Which flagged issues the user picked to fix — OR free-text `instructions` with
+    a `mode`, for an instruction-driven refine/rework. Each `targets` selector is
+    `axis:signal_key` (e.g. `readability:em_dashes`, `seo:internal_links`) or
+    `grounding:<index>`. When both are omitted, refine drives every below-target axis
+    automatically (legacy / the post-generation auto-refine)."""
 
     targets: list[str] | None = None
+    instructions: str | None = None
+    mode: Literal["refine", "rework"] | None = None
+
+    @field_validator("instructions")
+    @classmethod
+    def _instr(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("instructions must not be blank")
+        if len(v) > 4000:
+            raise ValueError("instructions must be at most 4000 characters")
+        return v
+
+    @model_validator(mode="after")
+    def _exclusive(self):
+        if self.instructions and self.targets:
+            raise ValueError("send either targets or instructions, not both")
+        if self.mode and not self.instructions:
+            raise ValueError("mode requires instructions")
+        return self
 
 
 class ArticleUpdate(BaseModel):

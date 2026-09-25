@@ -200,10 +200,14 @@ async def generate_frontmatter(
 async def _refine_and_finish(
     pb: PowabaseClient, db: Database, article_id: UUID,
     targets: list[str] | None = None,
+    instructions: str | None = None,
+    mode: str = "refine",
 ) -> None:
     failed = False
     try:
-        await revise_svc.refine(pb, db, article_id, targets=targets)
+        await revise_svc.refine(
+            pb, db, article_id, targets=targets, instructions=instructions, mode=mode
+        )
     except Exception:  # noqa: BLE001 — surface an infra failure, don't report a no-op
         # refine() only propagates when a pass raised before doing ANY work (e.g. the
         # reviser agent is misconfigured / unreachable). That's a real failure — mark it
@@ -230,10 +234,16 @@ async def _refine_and_finish(
             await linkcheck_svc.check_article(db, final["business_id"], article_id)
         except Exception:  # noqa: BLE001 — link check is advisory
             log.exception("post-refine link check failed for %s", article_id)
+    # An instructed pass records {"before": {...}, "mode": ...} in progress when it
+    # starts (see revise.refine) — carry it into the terminal state so the UI can show
+    # the before/after change instead of losing it the moment the pipeline finishes.
+    prev = (final or {}).get("progress") or {}
     svc._update(
         db, article_id,
         generation_status="done",
-        progress={"phase": "done", "word_count": len(words)},
+        progress={"phase": "done", "word_count": len(words),
+                  **({"before": prev["before"], "mode": prev.get("mode")}
+                     if prev.get("before") else {})},
     )
 
 
@@ -249,13 +259,19 @@ async def refine_article(
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Refine the draft (async). With `body.targets`, fix exactly the selected flagged
-    issues; without it, auto-iterate every below-target axis."""
+    """Refine the draft (async). With `body.instructions`, run one instruction-driven
+    pass (`body.mode` "refine" or "rework"); with `body.targets`, fix exactly the
+    selected flagged issues; with neither, auto-iterate every below-target axis."""
     _guard_article(db, article_id, user)
+    targets = (body.targets or None) if body else None
+    instructions = body.instructions if body else None
+    mode = (body.mode or "refine") if body else "refine"
     # Atomically claim the article; refuse if a generation/refine is already running
     # so a double-submit can't launch two concurrent pipelines on the same article.
+    # An instructed pass is a single pass (total=1); the legacy/targeted loops cap at
+    # MAX_REVISIONS.
     if not svc.try_begin_refine(
-        db, article_id, total=revise_svc.MAX_REVISIONS
+        db, article_id, total=1 if instructions else revise_svc.MAX_REVISIONS
     ):
         raise HTTPException(
             status.HTTP_409_CONFLICT, "generation already in progress"
@@ -263,8 +279,7 @@ async def refine_article(
     # Normalize an empty selection (`{"targets": []}`) to None so it runs the legacy
     # auto-refine instead of taking the targeted path into a guaranteed no-op (which
     # would still burn a rate-limit token for zero work).
-    targets = (body.targets or None) if body else None
-    spawn(_refine_and_finish(pb, db, article_id, targets))
+    spawn(_refine_and_finish(pb, db, article_id, targets, instructions, mode))
     return svc.get_article(db, article_id)
 
 

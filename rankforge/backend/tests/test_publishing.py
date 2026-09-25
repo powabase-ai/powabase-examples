@@ -524,3 +524,49 @@ def test_publish_route_422_with_export_issues(monkeypatch):
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["export_issues"] == ["x"]
+
+
+# --- instruction-driven refine/rework: route wiring (Task 10) ---
+def _refine_db() -> MagicMock:
+    """A db whose fetch_one returns a full Article-shaped row (unlike _brand_db,
+    which only carries the fields the publish/export routes need) — the /refine
+    route's response_model=Article requires status/generation_status/timestamps."""
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        **ARTICLE, "business_id": BID, "org_id": UUID(ADMIN_ORG),
+        "status": "draft", "generation_status": "grounding", "progress": {},
+        "created_at": "2026-06-19T00:00:00Z", "updated_at": "2026-06-19T00:00:00Z",
+    }
+    return db
+
+
+def test_refine_route_blank_instructions_422_without_starting(monkeypatch):
+    """Pydantic rejects the body before the route runs — try_begin_refine (the
+    generation-claim guard) must never fire for an invalid request."""
+    from rankforge_backend.services import generation as gen_svc
+
+    claim = MagicMock()
+    monkeypatch.setattr(gen_svc, "try_begin_refine", claim)
+    resp = _client(_refine_db()).post(
+        f"/api/articles/{AID}/refine", json={"instructions": "   "}
+    )
+    assert resp.status_code == 422
+    claim.assert_not_called()
+
+
+def test_refine_route_instructed_pass_spawns(monkeypatch):
+    from rankforge_backend.routes import articles as articles_route
+    from rankforge_backend.services import generation as gen_svc
+
+    monkeypatch.setattr(gen_svc, "try_begin_refine", lambda db, aid, total: True)
+    spawned = MagicMock()
+    monkeypatch.setattr(articles_route, "spawn", spawned)
+    resp = _client(_refine_db()).post(
+        f"/api/articles/{AID}/refine",
+        json={"instructions": "tighten the intro", "mode": "rework"},
+    )
+    assert resp.status_code == 200
+    spawned.assert_called_once()
+    # spawn is mocked, so the coroutine it was handed is never awaited — close it
+    # explicitly to avoid a "coroutine was never awaited" warning from the real one.
+    spawned.call_args.args[0].close()
