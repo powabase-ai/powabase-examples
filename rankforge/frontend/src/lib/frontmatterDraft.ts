@@ -78,6 +78,31 @@ export function isDirty(draft: FrontmatterDraft, baseline: FrontmatterDraft): bo
   return FIELDS.some((f) => fieldChanged(f, draft, baseline));
 }
 
+const FIELD_LABEL: Record<FrontmatterField, string> = {
+  category: "category",
+  summary: "summary",
+  faq: "FAQ",
+  metaTitle: "meta title",
+};
+
+/** Before "Generate summary & FAQ": the confirm text when the draft has unsaved
+ *  edits (Generate replaces every field it writes, edited or not — see
+ *  adoptChanged), or null when there is nothing to lose. */
+export function generateConfirmMessage(
+  draft: FrontmatterDraft,
+  baseline: FrontmatterDraft
+): string | null {
+  const edited = FIELDS.filter((f) => fieldChanged(f, draft, baseline)).map(
+    (f) => FIELD_LABEL[f]
+  );
+  if (!edited.length) return null;
+  const list =
+    edited.length === 1
+      ? edited[0]
+      : `${edited.slice(0, -1).join(", ")} and ${edited[edited.length - 1]}`;
+  return `Generate may replace your unsaved changes to the ${list}. Continue?`;
+}
+
 /** PATCH body: only the fields that differ from the baseline. An omitted key is left
  *  alone server-side; an explicit null clears the field. */
 export function buildPatch(

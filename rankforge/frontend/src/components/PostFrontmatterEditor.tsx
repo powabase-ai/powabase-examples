@@ -14,6 +14,7 @@ import {
   adoptChanged,
   buildPatch,
   fromServer,
+  generateConfirmMessage,
   isDirty,
   rebase,
   shouldAdoptSave,
@@ -100,6 +101,9 @@ export function PostFrontmatterEditor({
   }
 
   function generateFrontmatter() {
+    // Generate replaces the fields it writes even over unsaved edits — ask first.
+    const confirmText = generateConfirmMessage(draft, baseline);
+    if (confirmText && !window.confirm(confirmText)) return;
     // Explicit request: regenerate summary & FAQ even when the stored ones pass.
     generate.mutate(
       { force: true },

@@ -573,7 +573,9 @@ This is a single pass, not a loop:
       it is for another article than the one now shown. After "Generate summary
       & FAQ" (an explicit request), every field listed in `changed` takes the
       generated value in both draft and baseline, even over an unsaved edit;
-      other edited fields keep the draft.
+      other edited fields keep the draft. So when the editor has unsaved
+      edits, Generate first asks "Generate may replace your unsaved changes to
+      the <fields>. Continue?" and does nothing if declined.
     - The whole editor and its Save are disabled while its own save/generate
       is in flight and while the page's refine/generation runs.
 - **Article page, failed generation** (`generation_status === "failed"`):

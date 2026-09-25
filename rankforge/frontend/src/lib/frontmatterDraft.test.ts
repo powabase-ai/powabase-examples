@@ -8,6 +8,7 @@ import {
   faqEqual,
   fieldChanged,
   fromServer,
+  generateConfirmMessage,
   isDirty,
   rebase,
   shouldAdoptSave,
@@ -203,5 +204,25 @@ describe("adoptChanged (Generate summary & FAQ)", () => {
     const r = adoptChanged(d, base, server, []);
     assert.deepEqual(r.draft, d);
     assert.deepEqual(r.baseline, base);
+  });
+});
+
+describe("generateConfirmMessage (unsaved edits before Generate)", () => {
+  test("no unsaved edits: no confirm", () => {
+    assert.equal(generateConfirmMessage(clone(base), base), null);
+    const ws = { ...clone(base), summary: "  A summary.  " };
+    assert.equal(generateConfirmMessage(ws, base), null);
+  });
+
+  test("names each edited field", () => {
+    assert.equal(
+      generateConfirmMessage({ ...clone(base), summary: "Edit." }, base),
+      "Generate may replace your unsaved changes to the summary. Continue?"
+    );
+    const d = { ...clone(base), category: "seo", metaTitle: "New", faq: [] };
+    assert.equal(
+      generateConfirmMessage(d, base),
+      "Generate may replace your unsaved changes to the category, FAQ and meta title. Continue?"
+    );
   });
 });
