@@ -23,7 +23,10 @@ from ..models.linking import BrokenLink, LinkSuggestion, RemoveLinkRequest
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient, PowabaseError
 from ..ratelimit import rate_limit
+from ..services import blog_rules
+from ..services import business_profiles as brands_svc
 from ..services import comments as comments_svc
+from ..services import frontmatter as frontmatter_svc
 from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
 from ..services import linkcheck as linkcheck_svc
@@ -172,6 +175,25 @@ async def optimize_article(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
     await quality_svc.reflect(pb, db, article_id)
     await scoring_svc.score_and_store(pb, db, article_id)
+    return svc.get_article(db, article_id)
+
+
+@router.post(
+    "/{article_id}/frontmatter",
+    response_model=Article,
+    dependencies=[Depends(rate_limit("article:optimize"))],
+)
+async def generate_frontmatter(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Generate summary + FAQ + category (and fit meta) for a blog-profile brand."""
+    article = _guard_article(db, article_id, user)
+    if not blog_rules.profile_of(brands_svc.get_profile(db, article["business_id"])):
+        raise HTTPException(status.HTTP_409_CONFLICT, "brand has no blog profile")
+    await frontmatter_svc.complete(pb, db, article_id)
     return svc.get_article(db, article_id)
 
 

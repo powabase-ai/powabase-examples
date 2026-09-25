@@ -131,3 +131,31 @@ async def test_draft_article_keeps_brand_profile_distinct_from_grounding(monkeyp
     assert len(body) >= 500
     # The brand PROFILE drove the brand-context line (not the grounding list).
     assert "**Acme**'s own blog" in captured["msg"]
+
+
+from rankforge_backend.models.blog import BlogProfile  # noqa: E402
+from rankforge_backend.services import generation as _g  # noqa: E402
+
+_BP = BlogProfile.model_validate({"categories": [{"key": "rag", "label": "R"}],
+                                  "stance": "favor_brand"})
+
+
+def test_writer_rules_profile_blocks():
+    r = _g._writer_rules(_BP, "Powabase")
+    assert "Do not write an FAQ" in r
+    assert "Never state a Powabase gap" in r
+    assert _g._writer_rules(None, "Powabase") == ""
+
+
+def test_outline_drops_faq_heading_with_profile():
+    heads = ["H2: Intro", "H2: FAQ", "H3: Is it safe?", "H2: Conclusion"]
+    assert _g._outline_for(heads, _BP) == ["H2: Intro", "H2: Conclusion"]
+    assert _g._outline_for(heads, None) == heads
+
+
+def test_link_block_lists_targets():
+    c = [{"title": "Vector DB", "target": "https://powabase.ai/vector-database/",
+          "category": None}]
+    b = _g._link_block(c, _BP)
+    assert "https://powabase.ai/vector-database/" in b and "3-5" in b
+    assert _g._link_block([], _BP) == ""

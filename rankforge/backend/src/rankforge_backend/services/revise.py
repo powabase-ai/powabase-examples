@@ -173,10 +173,12 @@ def _meta_failing(seo: dict | None) -> bool:
 
 
 async def fix_meta(
-    client: PowabaseClient, db: Database, article_id: UUID, article: dict, brief: dict
+    client: PowabaseClient, db: Database, article_id: UUID, article: dict, brief: dict,
+    *, title_max: int = 60, description_max: int = 160,
 ) -> None:
     """Rewrite meta_title / meta_description to satisfy the title/meta SEO signals."""
     pk = brief.get("primary_keyword") or ""
+    desc_min = min(120, description_max - 20)
     msg = (
         "Write SEO metadata for the article.\n\n"
         "## Context\n"
@@ -185,9 +187,10 @@ async def fix_meta(
         "- Stay faithful to what the working title says the article is about; sharpen "
         "it, don't change the subject.\n\n"
         "## Requirements\n"
-        "- `meta_title`: at most 60 characters, includes the primary keyword.\n"
-        "- `meta_description`: 120–160 characters, compelling, includes the primary "
+        f"- `meta_title`: at most {title_max} characters, includes the primary "
         "keyword.\n"
+        f"- `meta_description`: {desc_min}–{description_max} characters, compelling, "
+        "includes the primary keyword.\n"
         "- Front-load the primary keyword, read naturally (no stuffing), and make the "
         "description earn the click.\n\n"
         "## Output\n"

@@ -14,8 +14,9 @@ from uuid import UUID
 from psycopg.types.json import Json
 
 from ..db import Database
+from ..models.blog import BlogProfile
 from ..powabase import PowabaseClient
-from . import brand_materials, grounding, prose_style
+from . import blog_rules, brand_materials, grounding, prose_style
 from . import brief as brief_svc
 from . import business_profiles as brands
 from . import research as research_svc
@@ -420,6 +421,62 @@ def _cluster_block(cluster: dict[str, Any] | None) -> str:
     return ""
 
 
+def _writer_rules(profile: BlogProfile | None, brand_name: str) -> str:
+    """Blog-profile overrides appended to the per-article message."""
+    if profile is None:
+        return ""
+    lines = ["\n\n## This blog's publishing rules (override anything above)"]
+    if profile.faq.enabled:
+        lines.append(
+            "- Do not write an FAQ or Q&A section. The FAQ is generated separately "
+            "and a body FAQ would appear twice on the page."
+        )
+    if profile.stance == "favor_brand":
+        lines.append(
+            f"- Position {brand_name} as equal to or ahead of the alternatives. Never "
+            f"state a {brand_name} gap, limitation or missing feature. Where a "
+            "competitor genuinely fits a different need, describe that need neutrally. "
+            "(Still never hyperlink a competitor.)"
+        )
+    lines.append(
+        "- Do not add a 'Related reading' or 'Further reading' section; the site adds "
+        "one."
+    )
+    return "\n".join(lines)
+
+
+_FAQ_HEADING_RE = re.compile(
+    r"^h2:\s*(faqs?\b|frequently asked|common questions)", re.I
+)
+
+
+def _outline_for(headings: list[str], profile: BlogProfile | None) -> list[str]:
+    """Drop an FAQ H2 (and its H3s) from the outline when the FAQ is frontmatter."""
+    if profile is None or not profile.faq.enabled:
+        return headings
+    out, skipping = [], False
+    for h in headings:
+        low = h.lower().lstrip()
+        if low.startswith("h2"):
+            skipping = bool(_FAQ_HEADING_RE.match(low))
+        if not skipping:
+            out.append(h)
+    return out
+
+
+def _link_block(candidates: list[dict[str, Any]], profile: BlogProfile | None) -> str:
+    if profile is None or not candidates:
+        return ""
+    rows = "\n".join(f'- "{c["title"]}": {c["target"]}' for c in candidates)
+    return (
+        "\n\n## Internal links you may use\n"
+        f"- Place {profile.links.min}-{profile.links.max} of these as contextual links "
+        "with natural in-sentence anchors, where they genuinely help the reader. Use "
+        "the link target exactly as written.\n"
+        f"{rows}"
+    )
+
+
 def _cluster_context(
     db: Database, article_id: UUID, brand: dict[str, Any] | None
 ) -> dict[str, Any] | None:
@@ -473,11 +530,13 @@ async def _draft_article(
     materials_url_by_source: dict[str, str] | None = None,
     brand: dict[str, Any] | None = None,
     cluster: dict[str, Any] | None = None,
+    profile: BlogProfile | None = None,
+    link_candidates: list[dict[str, Any]] | None = None,
 ) -> str:
     """Draft the WHOLE article in one streamed pass, so the model holds the entire
     piece in context and writes a single coherent argument (the per-section approach
     produced disjoint, stitched-together drafts)."""
-    headings = brief.get("headings") or []
+    headings = _outline_for(brief.get("headings") or [], profile)
     h2s = [
         h.split(":", 1)[1].strip()
         for h in headings
@@ -527,7 +586,9 @@ async def _draft_article(
         "never the page title or a bare URL), and vary the source domain.\n"
         f"{_grounding_block(research, url_by_source)}"
         f"{cluster_block}"
-        f"{brand_block}\n\n"
+        f"{brand_block}"
+        f"{_link_block(link_candidates or [], profile)}"
+        f"{_writer_rules(profile, (brand or {}).get('name') or 'the brand')}\n\n"
         "## Output\n"
         "- Output the full article body in Markdown (intro, every section, "
         "conclusion). Do not include the H1 title."
@@ -630,6 +691,15 @@ async def run_generation_task(
         agent_id = await ensure_writer_agent(client)
         title = brief.get("suggested_title") or topic
         cluster_ctx = _cluster_context(db, article_id, brand_profile)
+        from . import linking as _linking
+
+        profile = blog_rules.profile_of(brand_profile)
+        candidates = (
+            _linking.link_candidates(
+                db, brand_profile, get_article(db, article_id) or {}, brief
+            )
+            if profile else []
+        )
         _update(
             db, article_id,
             generation_status="drafting",
@@ -642,6 +712,8 @@ async def run_generation_task(
             materials_url_by_source=materials_url_by_source,
             brand=brand_profile,
             cluster=cluster_ctx,
+            profile=profile,
+            link_candidates=candidates,
         )
         # Prepend the canonical H1. Strip ANY H1 line the writer emitted anyway
         # (multiline — a stray H1 after a preamble line would otherwise leave the
@@ -651,8 +723,6 @@ async def run_generation_task(
         # The brand's own blog must never pass link authority to a rival: unwrap any
         # outbound link to a competitor domain (keep the anchor text, drop the URL). The
         # writer is told not to link competitors; this enforces it deterministically.
-        from . import linking as _linking
-
         content_md = _linking.strip_competitor_links(
             content_md, _linking.competitor_hosts(brand_profile)
         )
@@ -662,6 +732,14 @@ async def run_generation_task(
             generation_status="optimizing",
             progress={"phase": "scoring", "total": 1, "done": 1},
         )
+
+        if profile:
+            from . import frontmatter
+
+            try:
+                await frontmatter.complete(client, db, article_id)
+            except Exception:  # noqa: BLE001 — never block generation; export checks it
+                log.exception("frontmatter step failed for %s", article_id)
 
         # 6) reflect/fact-check, GEO optimize (JSON-LD), then SEO + GEO scoring
         #    (local import avoids a circular dependency)
