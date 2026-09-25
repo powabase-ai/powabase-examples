@@ -589,7 +589,10 @@ This is a single pass, not a loop:
   `BusinessProfile.blog_profile` is typed `unknown` in the client and read
   only through `asBlogProfile` (`lib/blogProfile.ts`), which mirrors the
   model's shape (missing sections default; an unknown key or wrong type makes
-  it invalid). When the stored value is invalid, settings shows "This blog
+  it invalid) and `HubPage`'s rules (path starts with `/`, not `//`, no
+  whitespace, control characters or `\`; a title; 1-10 topics of 4-80
+  characters), so a stored profile generation would refuse also shows as
+  invalid. When the stored value is invalid, settings shows "This blog
   profile is invalid" with "Reset to defaults" and "Start from stored values"
   (the raw object deep-merged onto the defaults, keeping only known, correctly
   typed keys) instead of the form, and Save is disabled until one is chosen.

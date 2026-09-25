@@ -73,6 +73,61 @@ describe("asBlogProfile", () => {
   }
 });
 
+describe("asBlogProfile hub pages follow the backend's HubPage rules", () => {
+  const withHub = (h: Record<string, unknown>) => ({
+    ...full,
+    links: { ...full.links, hub_pages: [{ ...hub, ...h }] },
+  });
+
+  const okPaths = ["/", "/rag", "/blog/rag-guide/", "/a%20b", "/café"];
+  for (const path of okPaths) {
+    test(`accepts path ${JSON.stringify(path)}`, () => {
+      assert.ok(asBlogProfile(withHub({ path })));
+    });
+  }
+
+  const badPaths: [string, string][] = [
+    ["empty", ""],
+    ["no leading slash", "rag"],
+    ["an absolute URL", "https://evil.com/x"],
+    ["a leading //", "//evil.com"],
+    ["a leading /\\", "/\\evil.com"],
+    ["a space", "/a b"],
+    ["a tab", "/a\tb"],
+    ["/<tab>/host", "/\t/evil.com"],
+    ["a newline", "/a\nb"],
+    ["NUL", "/a\u0000b"],
+    ["DEL", "/a\u007fb"],
+    ["NEL (Python isspace)", "/a\u0085b"],
+    ["a no-break space", "/a b"],
+    ["a backslash", "/a\\b"],
+    ["over 300 characters", "/" + "a".repeat(300)],
+  ];
+  for (const [name, path] of badPaths) {
+    test(`rejects a path with ${name}`, () => {
+      assert.equal(asBlogProfile(withHub({ path })), null);
+    });
+  }
+
+  test("topics are 4-80 characters after trimming", () => {
+    assert.ok(asBlogProfile(withHub({ topics: ["abcd", "  wxyz  ", "x".repeat(80)] })));
+    assert.equal(asBlogProfile(withHub({ topics: ["abc"] })), null);
+    assert.equal(asBlogProfile(withHub({ topics: ["  abc   "] })), null);
+    assert.equal(asBlogProfile(withHub({ topics: ["x".repeat(81)] })), null);
+    assert.equal(asBlogProfile(withHub({ topics: ["retrieval", "ab"] })), null);
+  });
+
+  test("a hub needs a title and at least one topic", () => {
+    assert.equal(asBlogProfile(withHub({ title: "" })), null);
+    assert.equal(asBlogProfile(withHub({ topics: [] })), null);
+    const { title: _t, ...noTitle } = hub;
+    assert.equal(
+      asBlogProfile({ ...full, links: { ...full.links, hub_pages: [noTitle] } }),
+      null
+    );
+  });
+});
+
 describe("blogProfileState", () => {
   test("absent, invalid and valid", () => {
     assert.deepEqual(blogProfileState(null), { kind: "absent" });
