@@ -196,7 +196,8 @@ async def generate_frontmatter(
     """Generate summary + FAQ + category (and fit meta) for a blog-profile brand.
     `force` regenerates a passing summary/FAQ too (see frontmatter.complete).
     Returns the article, the export issues still open after the fix (so the UI never
-    claims "fixed" over a step that left problems) and the fields it changed."""
+    claims "fixed" over a step that left problems), the fields it changed and the
+    step's flags (so the UI can say what it kept or defaulted)."""
     force = bool(body and body.force)
     article = _guard_article(db, article_id, user)
     brand = brands_svc.get_profile(db, article["business_id"])
@@ -213,6 +214,7 @@ async def generate_frontmatter(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "generation already in progress"
         )
+    flags: list[str] = []
     try:
         before = svc.get_article(db, article_id) or article
         flags = await frontmatter_svc.complete(pb, db, article_id, force=force)
@@ -243,7 +245,7 @@ async def generate_frontmatter(
         f for f in FRONTMATTER_CHANGE_FIELDS if before.get(f) != final.get(f)
     ]
     return {"article": final, "export_issues": blog_rules.export_issues(final, profile),
-            "changed": changed}
+            "changed": changed, "flags": flags}
 
 
 async def _refine_and_finish(

@@ -207,7 +207,12 @@ post-generation step never touch a field that already passes. When neither the
 cluster nor the model names a real key, the fallback category is written (if the
 category is being regenerated) with the flag `category defaulted to <key>` — but
 a valid stored category is never swapped for the fallback: it is kept and
-flagged `category kept as <key> (the model's was not a listed key)`.
+flagged `category kept as <key> (the model's was not a listed key)`. A requested
+summary or FAQ that still fails after the retry is not written, and its flag
+says so: `model's summary was 3 words (needs 40-60) — kept the stored one`
+(or `— left empty` when nothing was stored; same form for `model's FAQ had N
+item(s)`). A value equal to the stored one is not a change: no write, no
+version (`fix_meta` likewise skips a meta value equal to the stored one).
 
 A flagged field shows as a warning on the article and **blocks export** (§4). It
 never blocks generation.
@@ -218,9 +223,11 @@ FAQ" / "Fix automatically": it touches only what's wrong — `fix_meta` +
 `failing_fields()`, and stripping a body FAQ section when one exists under an
 FAQ-enabled profile — and snapshots the article once, right before its first
 write, so the whole fix is one undo point. With `force=True` ("Generate summary
-& FAQ") it also regenerates the summary and FAQ (when enabled) even if they pass,
-and the category unless the cluster's category (a profile key) fixes it; a new
-value is still written only when it passes the rules.
+& FAQ") it also regenerates the summary and FAQ (when enabled) even if they pass.
+The category is regenerated only when it fails the rules, forced or not: a
+valid stored category (possibly picked by hand) is never replaced, since the
+button only promises summary and FAQ. A new value is still written only when it
+passes the rules.
 
 ### Meta (`revise.fix_meta` + `frontmatter.enforce_meta`)
 
@@ -422,12 +429,16 @@ step and `fix_meta` on demand. This is the "Generate summary & FAQ" button; see
   running), runs `frontmatter.complete()`, releases the claim in a `finally`
   (a previously `failed` article stays `failed`, so "Retry generation" is
   still offered for an empty draft), and returns
-  `{ "article": <Article>, "export_issues": [str, ...], "changed": [str, ...] }`
+  `{ "article": <Article>, "export_issues": [str, ...], "changed": [str, ...],
+  "flags": [str, ...] }`
   — the issues still open **after** the fix, computed from the fresh row, so
-  the UI never claims "fixed" over a step that left problems; and the fields
+  the UI never claims "fixed" over a step that left problems; the fields
   whose value actually changed (compared by value, a subset of `category`,
-  `summary`, `faq`, `meta_title`, `meta_description`, `content_md`). An empty
-  `changed` means the UI says "Nothing changed".
+  `summary`, `faq`, `meta_title`, `meta_description`, `content_md` — the last
+  meaning a body FAQ section was removed); and the flags `complete()` returned
+  (§2; always present, may be empty), so the UI can say what it kept or
+  defaulted. An empty `changed` means the UI says "Nothing changed"; the UI
+  never claims a field was generated unless it is in `changed`.
 - `POST /api/articles/{id}/revert`:
   - Restores the newest `article_versions` row whose body **or** frontmatter
     (title, meta, category, summary, FAQ — nulls included) differs from the
@@ -501,8 +512,9 @@ This is a single pass, not a loop:
      cluster's category still wins over a valid one;
    - a summary or FAQ out of bounds keeps the stored value.
    Each dropped field adds a flag (e.g. `model's summary was 3 words (needs
-   40-60) — kept the stored one`); a trimmed summary keeps
-   `summary trimmed to fit; review it`.
+   40-60) — kept the stored one`, or `— left empty` when nothing was stored);
+   a trimmed summary keeps `summary trimmed to fit; review it`, and an FAQ cut
+   to `faq.max` is flagged `faq cut to 6 of the model's 9 items; review it`.
 7. **Write:** the article is versioned first (so the whole pass is one undo
    point), then body + any validated frontmatter fields are written together,
    `enforce_meta` clamps meta to the profile's limits, and fact-check, GEO and

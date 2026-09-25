@@ -95,6 +95,30 @@ def field_ok(field: str, value: Any, profile: BlogProfile) -> bool:
     return False
 
 
+def _present(value: Any) -> bool:
+    """Whether a stored frontmatter value holds anything (a blank string or an
+    empty FAQ is nothing)."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
+def rejected_flag(field: str, value: Any, profile: BlogProfile, stored: Any) -> str:
+    """The flag for a model value that failed the rules and was not written: what
+    the model sent, and whether the stored value was kept or the field left empty
+    (never "kept the stored one" when nothing was stored)."""
+    tail = "kept the stored one" if _present(stored) else "left empty"
+    if field == "summary":
+        rule = profile.summary
+        n = blog_rules.word_count(value)
+        return (f"model's summary was {n} words "
+                f"(needs {rule.min_words}-{rule.max_words}) — {tail}")
+    if field == "faq":
+        return (f"model's FAQ had {len(blog_rules.clean_faq(value))} item(s) "
+                f"(needs {profile.faq.min}-{profile.faq.max}) — {tail}")
+    return f'model\'s category "{value}" is not one of this blog\'s keys — {tail}'
+
+
 def failing_fields(article: dict, profile: BlogProfile) -> set[str]:
     """The frontmatter fields whose stored value fails the rules (the only ones
     the frontmatter step regenerates)."""
@@ -179,6 +203,12 @@ async def generate(
         k: clean[k] for k in FM_FIELDS
         if k in fields and field_ok(k, clean.get(k), profile)
     }
+    # A requested summary/FAQ that failed the rules isn't written: say so, and
+    # whether the stored value stayed or the field is still empty.
+    for k in ("summary", "faq"):
+        if k in fields and k not in write and getattr(profile, k).enabled:
+            flags = [f for f in flags if f.split(" ", 1)[0] != k]
+            flags.append(rejected_flag(k, clean.get(k), profile, article.get(k)))
     stored = article.get("category")
     defaulted = f"category defaulted to {clean.get('category')}"
     if defaulted in flags and field_ok("category", stored, profile):
@@ -188,6 +218,9 @@ async def generate(
             f"category kept as {stored} (the model's was not a listed key)"
             if f == defaulted else f for f in flags
         ]
+    # A value equal to the stored one is no change: no write and no version
+    # (compared by value — dict equality ignores FAQ key order).
+    write = {k: v for k, v in write.items() if v != article.get(k)}
     if write:
         if before_write:
             before_write()
@@ -227,10 +260,12 @@ async def complete(
     summary / FAQ only for the fields that currently fail; and drop a body FAQ
     section (the FAQ lives in frontmatter). Used after generation and by "Fix
     automatically". `force` ("Generate summary & FAQ") also regenerates a passing
-    summary and FAQ, and the category unless the cluster fixes it; a new value is
-    still written only when it passes the rules. The prior state is versioned once,
-    just before the first write (no write, no version), so hand edits it
-    overwrites can be reverted. Returns the frontmatter step's flags."""
+    summary and FAQ; the category is regenerated only when it fails (a valid
+    stored category — perhaps picked by hand — is never replaced, forced or not).
+    A new value is still written only when it passes the rules and differs from
+    the stored one. The prior state is versioned once, just before the first write
+    (no write, no version), so hand edits it overwrites can be reverted. Returns
+    the frontmatter step's flags."""
     from . import brief as brief_svc
     from . import revise
 
@@ -242,13 +277,11 @@ async def complete(
         return []
     failing = failing_fields(article, profile)
     if force:
+        # Summary and FAQ only: the category is regenerated when it fails (above).
         if profile.summary.enabled:
             failing.add("summary")
         if profile.faq.enabled:
             failing.add("faq")
-        keys = {c.key for c in profile.categories}
-        if _cluster_category(db, article) not in keys:
-            failing.add("category")
     fix_meta = meta_over_limits(article, profile)
     body_faq = profile.faq.enabled and bool(
         blog_rules.BODY_FAQ_RE.search(article.get("content_md") or "")
