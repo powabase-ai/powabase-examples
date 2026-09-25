@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Loader2, Plus, Save, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useGenerateFrontmatter, useUpdateArticle } from "@/lib/hooks/useArticles";
-import type { Article, BlogProfile, FaqItem } from "@/lib/api";
+import type { Article, ArticleUpdate, BlogProfile, FaqItem } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 function wordCount(s: string): number {
@@ -37,12 +37,36 @@ export function PostFrontmatterEditor({
   const [faq, setFaq] = useState<FaqItem[]>(article.faq ?? []);
   const [metaTitle, setMetaTitle] = useState(article.meta_title ?? "");
 
-  // Reset the editor from the server record when a different (or freshly
-  // refined/generated) article lands. Deliberately narrow deps — re-seeding on
-  // every keystroke-triggered `article` reference change would clobber the draft
+  // Normalize before comparing/sending — the backend strips whitespace from FAQ
+  // text (and trims summary/meta title), so comparing the raw draft against the
+  // server's trimmed value would leave the editor "dirty" forever after a save
+  // (e.g. typing "Why? " saves as "Why?", the raw draft never matches again, and
+  // the reset effect below then refuses to ever resync this field again).
+  const trimmedSummary = summary.trim();
+  const trimmedMetaTitle = metaTitle.trim();
+  // Fully empty rows are dropped; a half-filled row is still kept (trimmed) so the
+  // server rejects it rather than silently losing the typed half.
+  const cleanedFaq = faq
+    .map((f) => ({ q: f.q.trim(), a: f.a.trim() }))
+    .filter((f) => f.q || f.a);
+
+  const categoryChanged = category !== (article.category ?? "");
+  const summaryChanged = trimmedSummary !== (article.summary ?? "");
+  const faqChanged = JSON.stringify(cleanedFaq) !== JSON.stringify(article.faq ?? []);
+  const metaTitleChanged = trimmedMetaTitle !== (article.meta_title ?? "");
+  const dirty = categoryChanged || summaryChanged || faqChanged || metaTitleChanged;
+
+  // Reset the editor from the server record when a different article lands, or when
+  // this one has no unsaved changes (e.g. a background poll picked up a refine/
+  // generation result). Skipping the reset while dirty keeps in-progress edits from
+  // being wiped out mid-poll. Deliberately narrow deps — re-seeding on every
+  // keystroke-triggered `article` reference change would otherwise clobber the draft
   // (same reset-on-identity-change pattern as settings/page.tsx and BrandForm).
+  const prevArticleId = useRef(article.id);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    const articleChanged = prevArticleId.current !== article.id;
+    prevArticleId.current = article.id;
+    if (!articleChanged && dirty) return;
     setCategory(article.category ?? "");
     setSummary(article.summary ?? "");
     setFaq(article.faq ?? []);
@@ -56,32 +80,44 @@ export function PostFrontmatterEditor({
     (wc < profile.summary.min_words || wc > profile.summary.max_words);
   const titleTooLong = metaTitle.length > profile.meta.title_max;
 
-  const dirty =
-    category !== (article.category ?? "") ||
-    summary !== (article.summary ?? "") ||
-    JSON.stringify(faq) !== JSON.stringify(article.faq ?? []) ||
-    metaTitle !== (article.meta_title ?? "");
-
   function save() {
-    update.mutate(
-      {
-        category: category || null,
-        summary: summary || null,
-        // Fully empty rows are dropped; a half-filled row is still sent so the
-        // server rejects it rather than silently losing the typed half.
-        faq: faq.filter((f) => f.q.trim() || f.a.trim()),
-        meta_title: metaTitle,
+    // Only send fields the user actually changed — an omitted key is left alone
+    // server-side, and an explicit null clears it (so a cleared category/summary/
+    // FAQ/meta title isn't silently dropped as a no-op).
+    const payload: ArticleUpdate = {};
+    if (categoryChanged) payload.category = category || null;
+    if (summaryChanged) payload.summary = trimmedSummary || null;
+    if (faqChanged) payload.faq = cleanedFaq.length ? cleanedFaq : null;
+    if (metaTitleChanged) payload.meta_title = trimmedMetaTitle || null;
+
+    update.mutate(payload, {
+      onSuccess: (updated) => {
+        // The server's response is the new baseline — adopt it exactly (rather than
+        // relying on the next poll) so the editor can't stay "dirty" comparing our
+        // pre-save draft against the server's normalized values.
+        setCategory(updated.category ?? "");
+        setSummary(updated.summary ?? "");
+        setFaq(updated.faq ?? []);
+        setMetaTitle(updated.meta_title ?? "");
+        toast.success("Frontmatter saved");
       },
-      {
-        onSuccess: () => toast.success("Frontmatter saved"),
-        onError: (e) => toast.error(e instanceof Error ? e.message : "Save failed"),
-      }
-    );
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Save failed"),
+    });
   }
 
   function generateFrontmatter() {
     generate.mutate(undefined, {
-      onSuccess: () => toast.success("Summary & FAQ generated"),
+      onSuccess: ({ export_issues }) => {
+        if (export_issues.length > 0) {
+          toast.warning(
+            `Generated — ${export_issues.length} issue${
+              export_issues.length === 1 ? "" : "s"
+            } remain`
+          );
+        } else {
+          toast.success("Summary & FAQ generated");
+        }
+      },
       onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
     });
   }
@@ -101,6 +137,10 @@ export function PostFrontmatterEditor({
       return next;
     });
   }
+
+  // Flags the server's frontmatter step left unresolved on the last generation or
+  // instructed refine (e.g. a field it couldn't safely regenerate).
+  const frontmatterFlags = article.progress?.frontmatter_flags ?? [];
 
   // Length/count rules only, mirroring blog_rules.export_issues on the server —
   // the regex-based body-FAQ check is left to the server's authoritative 422.
@@ -138,6 +178,12 @@ export function PostFrontmatterEditor({
     );
   }
 
+  // The onSuccess handlers above adopt the server's response as the new local
+  // state — so while either mutation is in flight, every editable control must be
+  // disabled, or a keystroke landing between "request sent" and "response applied"
+  // would get silently overwritten.
+  const formBusy = update.isPending || generate.isPending;
+
   return (
     <div className="space-y-4 border-t border-border pt-4">
       <div className="flex items-center justify-between gap-2">
@@ -148,13 +194,14 @@ export function PostFrontmatterEditor({
           size="sm"
           variant="outline"
           onClick={generateFrontmatter}
-          disabled={busy || generate.isPending}
+          disabled={busy || formBusy}
         >
           {generate.isPending ? <Loader2 className="animate-spin" /> : <Wand2 />}
           Generate summary &amp; FAQ
         </Button>
       </div>
 
+      <fieldset disabled={formBusy} className="space-y-4 border-0 p-0 m-0 min-w-0">
       <div className="space-y-1.5">
         <Label htmlFor="fm-category" className="text-xs">
           Category
@@ -163,7 +210,7 @@ export function PostFrontmatterEditor({
           id="fm-category"
           value={category}
           onChange={(e) => setCategory(e.target.value)}
-          className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm outline-none focus:ring-1 focus:ring-[rgb(var(--ember))]"
+          className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm outline-none focus:ring-1 focus:ring-[rgb(var(--ember))] disabled:cursor-not-allowed disabled:opacity-50"
         >
           <option value="">— none —</option>
           {profile.categories.map((c) => (
@@ -277,13 +324,14 @@ export function PostFrontmatterEditor({
           {metaTitle.length}/{profile.meta.title_max}
         </p>
       </div>
+      </fieldset>
 
       <Button
         size="sm"
         variant="gold"
         className="w-full"
         onClick={save}
-        disabled={update.isPending || !dirty}
+        disabled={formBusy || !dirty}
       >
         {update.isPending ? <Loader2 className="animate-spin" /> : <Save />}
         Save
@@ -295,6 +343,17 @@ export function PostFrontmatterEditor({
           <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground">
             {warnings.map((w, i) => (
               <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {frontmatterFlags.length > 0 && (
+        <div className="rounded-md border border-[rgb(var(--ember))]/40 bg-[rgb(var(--ember))]/5 p-2 text-xs">
+          <p className="mb-1 font-medium">Flagged by the last generation</p>
+          <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground">
+            {frontmatterFlags.map((f, i) => (
+              <li key={i}>{f}</li>
             ))}
           </ul>
         </div>

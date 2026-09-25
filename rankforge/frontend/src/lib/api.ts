@@ -112,6 +112,23 @@ export interface BusinessProfile {
   updated_at: string;
 }
 
+/** Runtime guard for `BusinessProfile.blog_profile`. An invalid *stored* profile is
+ *  now returned as-is (untyped) rather than failing response validation, so callers
+ *  must not assume its shape — use this wherever the value drives UI instead of
+ *  reading `brand.blog_profile` directly. (The settings page is the one exception:
+ *  it edits the raw value so the user can fix it.) Returns null for anything that
+ *  doesn't look like a real profile. */
+export function asBlogProfile(x: unknown): BlogProfile | null {
+  if (!x || typeof x !== "object") return null;
+  const p = x as Record<string, unknown>;
+  if (!Array.isArray(p.categories) || p.categories.length === 0) return null;
+  if (typeof p.summary !== "object" || p.summary === null) return null;
+  if (typeof p.faq !== "object" || p.faq === null) return null;
+  if (typeof p.meta !== "object" || p.meta === null) return null;
+  if (typeof p.links !== "object" || p.links === null) return null;
+  return p as unknown as BlogProfile;
+}
+
 export interface BusinessProfileInput {
   name: string;
   domain?: string | null;
@@ -556,6 +573,13 @@ export interface ArticleSummary {
     word_count?: number;
     iteration?: number;
     step?: string;
+    // Set (with generation_status "done") when an instructed refine/rework produced
+    // nothing usable — the article is unchanged, and `mode` is the pass that failed.
+    refine_error?: string;
+    mode?: "refine" | "rework";
+    // Frontmatter issues (title/description/summary/FAQ length or count) left
+    // unresolved after a generation or instructed-refine's frontmatter step ran.
+    frontmatter_flags?: string[];
   };
   updated_at: string;
 }
@@ -623,6 +647,13 @@ export interface Article extends ArticleSummary {
 }
 
 export const TERMINAL_GENERATION: GenerationStatus[] = ["done", "failed"];
+
+/** Response of `POST /articles/{id}/frontmatter`: the updated article plus any
+ *  export-blocking issues still outstanding after the fix (empty when fully fixed). */
+export interface FrontmatterResult {
+  article: Article;
+  export_issues: string[];
+}
 
 export type ArticleStatus =
   | "draft"
@@ -714,7 +745,9 @@ export const articlesApi = {
   revert: (id: string) =>
     request<Article>(`/api/articles/${id}/revert`, { method: "POST" }),
   generateFrontmatter: (id: string) =>
-    request<Article>(`/api/articles/${id}/frontmatter`, { method: "POST" }),
+    request<FrontmatterResult>(`/api/articles/${id}/frontmatter`, {
+      method: "POST",
+    }),
   retry: (id: string) =>
     request<Article>(`/api/articles/${id}/retry`, { method: "POST" }),
   update: (id: string, data: ArticleUpdate) =>
@@ -817,7 +850,8 @@ export interface LinkSuggestion {
   id: string;
   business_id: string;
   article_id: string;
-  target_article_id: string;
+  // null for a structural hub-page suggestion (the target isn't another article).
+  target_article_id: string | null;
   anchor_text?: string | null; // null = a structural gap (no natural anchor yet)
   target_url: string;
   target_title?: string | null;
@@ -1222,7 +1256,8 @@ export async function exportArticle(
 export interface ArticleUpdate {
   title?: string;
   content_md?: string;
-  meta_title?: string;
+  // Explicit null clears the field server-side; an omitted key is left unchanged.
+  meta_title?: string | null;
   meta_description?: string;
   status?: string;
   canonical_url?: string;

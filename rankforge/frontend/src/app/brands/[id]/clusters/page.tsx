@@ -45,7 +45,7 @@ import {
 } from "@/lib/hooks/useClusters";
 import { useBrand } from "@/lib/hooks/useBrands";
 import { useAuth } from "@/lib/auth/AuthProvider";
-import { canApprove, type ContentCluster } from "@/lib/api";
+import { asBlogProfile, canApprove, type ContentCluster } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /** A compact "move this article to another cluster" picker (Radix Select used as an
@@ -320,7 +320,7 @@ function EditClusterDialog({
 }) {
   const update = useUpdateCluster(brandId);
   const { data: brand } = useBrand(brandId);
-  const categories = brand?.blog_profile?.categories ?? [];
+  const categories = asBlogProfile(brand?.blog_profile)?.categories ?? [];
   const hasProfile = categories.length > 0;
   const [open, setOpen] = useState(false);
   const [label, setLabel] = useState(cluster.label);

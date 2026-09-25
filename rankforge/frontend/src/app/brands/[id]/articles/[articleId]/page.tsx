@@ -53,7 +53,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
-import { ARTICLE_STATUSES, canApprove } from "@/lib/api";
+import { ARTICLE_STATUSES, asBlogProfile, canApprove } from "@/lib/api";
 import type { Article, GroundingReport, Score, ScoreSignal } from "@/lib/api";
 
 const GATED_STATUSES = new Set(["approved", "published"]);
@@ -661,7 +661,7 @@ export default function ArticleView({
             {a ? (
               <PostPanel
                 article={a}
-                profile={brand?.blog_profile ?? null}
+                profile={asBlogProfile(brand?.blog_profile)}
                 busy={!!generating}
               />
             ) : (
@@ -863,37 +863,49 @@ export default function ArticleView({
 
               {generating && <GenerationProgress a={a} />}
 
-              {a.generation_status === "failed" && (
-                <Card className="mt-6">
-                  <CardContent className="flex items-center justify-between gap-4 py-5">
-                    <p className="text-sm text-destructive">
-                      Generation failed: {a.generation_error}
-                    </p>
-                    <Button
-                      variant="gold"
-                      size="sm"
-                      className="shrink-0"
-                      onClick={() =>
-                        retry.mutate(undefined, {
-                          onSuccess: () => toast.success("Retrying generation…"),
-                          onError: (e) =>
-                            toast.error(
-                              e instanceof Error ? e.message : "Retry failed"
-                            ),
-                        })
-                      }
-                      disabled={retry.isPending}
-                    >
-                      {retry.isPending ? (
-                        <Loader2 className="animate-spin" />
-                      ) : (
-                        <RefreshCw />
-                      )}
-                      Retry generation
-                    </Button>
-                  </CardContent>
-                </Card>
-              )}
+              {a.generation_status === "failed" &&
+                (!a.content_md || !a.content_md.trim() ? (
+                  <Card className="mt-6">
+                    <CardContent className="flex items-center justify-between gap-4 py-5">
+                      <p className="text-sm text-destructive">
+                        Generation failed: {a.generation_error}
+                      </p>
+                      <Button
+                        variant="gold"
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() =>
+                          retry.mutate(undefined, {
+                            onSuccess: () => toast.success("Retrying generation…"),
+                            onError: (e) =>
+                              toast.error(
+                                e instanceof Error ? e.message : "Retry failed"
+                              ),
+                          })
+                        }
+                        disabled={retry.isPending}
+                      >
+                        {retry.isPending ? (
+                          <Loader2 className="animate-spin" />
+                        ) : (
+                          <RefreshCw />
+                        )}
+                        Retry generation
+                      </Button>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  // Content already exists (e.g. a failed instructed refine/rework
+                  // after generation had finished) — retrying would re-draft from the
+                  // brief and discard it, so offer no retry here.
+                  <Card className="mt-6">
+                    <CardContent className="py-5">
+                      <p className="text-sm text-muted-foreground">
+                        The last run failed; your article is unchanged.
+                      </p>
+                    </CardContent>
+                  </Card>
+                ))}
 
               {editing ? (
                 <div className="mt-8">
