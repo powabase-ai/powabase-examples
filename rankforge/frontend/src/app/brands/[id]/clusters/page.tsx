@@ -43,6 +43,7 @@ import {
   useSetPillar,
   useUpdateCluster,
 } from "@/lib/hooks/useClusters";
+import { useBrand } from "@/lib/hooks/useBrands";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { canApprove, type ContentCluster } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -318,9 +319,13 @@ function EditClusterDialog({
   cluster: ContentCluster;
 }) {
   const update = useUpdateCluster(brandId);
+  const { data: brand } = useBrand(brandId);
+  const categories = brand?.blog_profile?.categories ?? [];
+  const hasProfile = categories.length > 0;
   const [open, setOpen] = useState(false);
   const [label, setLabel] = useState(cluster.label);
   const [theme, setTheme] = useState(cluster.theme ?? "");
+  const [category, setCategory] = useState(cluster.category ?? "");
 
   function onOpenChange(v: boolean) {
     // The trigger drives onOpenChange, so seed here — every open reflects the current
@@ -328,18 +333,28 @@ function EditClusterDialog({
     if (v) {
       setLabel(cluster.label);
       setTheme(cluster.theme ?? "");
+      setCategory(cluster.category ?? "");
     }
     setOpen(v);
   }
 
   const dirty =
-    label.trim() !== cluster.label || theme.trim() !== (cluster.theme ?? "");
+    label.trim() !== cluster.label ||
+    theme.trim() !== (cluster.theme ?? "") ||
+    (hasProfile && category !== (cluster.category ?? ""));
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!label.trim() || !dirty) return;
     update.mutate(
-      { clusterId: cluster.id, data: { label: label.trim(), theme: theme.trim() } },
+      {
+        clusterId: cluster.id,
+        data: {
+          label: label.trim(),
+          theme: theme.trim(),
+          ...(hasProfile ? { category: category || null } : {}),
+        },
+      },
       {
         onSuccess: () => {
           toast.success("Cluster saved");
@@ -397,6 +412,24 @@ function EditClusterDialog({
               maxLength={2000}
             />
           </div>
+          {hasProfile && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-cluster-category">Category</Label>
+              <select
+                id="edit-cluster-category"
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                className="h-9 rounded-md border border-input bg-card px-2 text-sm outline-none focus:ring-1 focus:ring-[rgb(var(--ember))]"
+              >
+                <option value="">— none —</option>
+                {categories.map((c) => (
+                  <option key={c.key} value={c.key}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <DialogFooter className="mt-2">
             <Button
               type="button"

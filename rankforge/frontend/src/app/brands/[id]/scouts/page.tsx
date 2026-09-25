@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Boxes,
+  Copy,
   Crown,
   ExternalLink,
   Link2,
@@ -46,6 +47,7 @@ import { useAuth } from "@/lib/auth/AuthProvider";
 import { Page, PageBody, PageHeader } from "@/components/layout/PageHeader";
 import {
   canApprove,
+  relinkApi,
   type Opportunity,
   type PlanSource,
   type RelinkConfig,
@@ -478,6 +480,22 @@ function RelinkCard({
               Run now
             </Button>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(
+                  await relinkApi.patchNotes(brandId)
+                );
+                toast.success("Patch notes copied");
+              } catch (e) {
+                toast.error(e instanceof Error ? e.message : "Copy failed");
+              }
+            }}
+          >
+            <Copy /> Copy as patch notes
+          </Button>
         </div>
         {config.last_run_at && (
           <p className="text-xs text-muted-foreground">
