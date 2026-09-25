@@ -521,3 +521,79 @@ def test_gate_boundary_four_hits_does_not_gate_five_does():
     # 5 hits is below the gate floor, so the axis cannot be "met" however well it
     # scores elsewhere.
     assert five["met"] is False
+
+
+from rankforge_backend.models.blog import BlogProfile  # noqa: E402
+
+_P = BlogProfile.model_validate({
+    "categories": [{"key": "rag", "label": "R"}],
+    "meta": {"title_max": 50, "description_max": 150},
+    "links": {"min": 3, "max": 5},
+})
+
+
+def test_sentences_split_on_lines():
+    md = "| A | B |\n|---|---|\n| one two | three |\n\n- item one\n- item two\n\n## Head"
+    sents = scoring._sentences(scoring._clean(md))
+    assert len(sents) >= 5  # header row, data row, 2 items, heading
+
+
+_RHYTHM_WORDS = (
+    "the quick brown fox jumps over lazy dog near river bank while birds sing "
+    "softly above old stone bridge each calm autumn morning bringing gentle "
+    "light across misty green fields"
+).split()
+
+
+def _alternating_sentence(n: int, offset: int) -> str:
+    """A syntactically plain sentence with exactly `n` words (word-bank cycled so
+    it reads as prose rather than "word0 word1 ...")."""
+    ws = [_RHYTHM_WORDS[(offset + i) % len(_RHYTHM_WORDS)] for i in range(n)]
+    s = " ".join(ws)
+    return s[0].upper() + s[1:] + "."
+
+
+def test_table_heavy_article_keeps_rhythm_score():
+    # Ruling R1: the brief's fixture (30 IDENTICAL rows + 2 short prose sentences)
+    # has near-zero length variance even after the newline-boundary fix, so it can't
+    # score well on rhythm. Instead: a realistic 20-sentence prose body alternating
+    # ~6 and ~20 words (CV ~0.66, inside the [0.5, 2.0] scoring band) plus a 30-row
+    # markdown table — the table must not dilute the prose's rhythm signal to 0.
+    prose = " ".join(
+        _alternating_sentence(6 if i % 2 == 0 else 20, i * 3) for i in range(20)
+    )
+    rows = "\n".join(f"| Feature {i} | Supported in plan {i} |" for i in range(30))
+    md = (
+        "# T\n\n" + prose + "\n\n| Feature | Plan |\n|---|---|\n"
+        f"{rows}\n\nA closing sentence that wraps things up neatly today.\n"
+    )
+    assert len(scoring._sentences(scoring._clean(md))) > 30
+    r = scoring.score_readability(md, None)
+    rhythm = next(s for s in r["signals"] if s["key"] == "rhythm")
+    assert rhythm["score"] == 100
+
+
+def test_seo_title_band_uses_profile_limit():
+    title = "x" * 55  # fits 60 default, exceeds profile 50
+    base = scoring.score_seo("# T\n\nbody", title, "m" * 130, {})
+    prof = scoring.score_seo("# T\n\nbody", title, "m" * 130, {}, profile=_P)
+    tl = lambda s: next(x for x in s["signals"] if x["key"] == "title_length")  # noqa: E731
+    assert tl(base)["score"] == 100 and tl(prof)["score"] < 100
+
+
+def test_internal_links_signal_only_with_profile():
+    md = (
+        "# T\n\n[a](https://powabase.ai/blog/a/) [b](https://powabase.ai/vector-database/)"
+        " [c](https://www.powabase.ai/blog/c/) [ext](https://example.com/x)"
+    )
+    none = scoring.score_seo(md, "t", "m", {})
+    assert not any(s["key"] == "internal_links" for s in none["signals"])
+    s = scoring.score_seo(md, "t", "m", {}, profile=_P, internal_hosts={"powabase.ai"})
+    il = next(x for x in s["signals"] if x["key"] == "internal_links")
+    assert il["score"] == 100 and "3 internal" in il["explanation"]
+    one = scoring.score_seo(
+        "# T\n\n[a](https://powabase.ai/blog/a/)", "t", "m", {},
+        profile=_P, internal_hosts={"powabase.ai"},
+    )
+    il1 = next(x for x in one["signals"] if x["key"] == "internal_links")
+    assert il1["score"] < 100 and il1["fixes"]
