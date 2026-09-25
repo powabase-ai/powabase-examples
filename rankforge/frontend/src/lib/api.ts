@@ -40,6 +40,21 @@ function exportIssuesFrom(body: unknown): string[] | null {
   return Array.isArray(issues) ? (issues as string[]) : null;
 }
 
+/** A FastAPI/pydantic 422 `detail` is a list of `{loc, msg, type}` errors (e.g. a
+ *  brand's `url_pattern` failing its validator). Join their `msg`s — minus
+ *  pydantic's "Value error, " prefix — with "; ". Null if `detail` isn't that shape,
+ *  so the caller falls back to the raw body. */
+export function validationMessage(detail: unknown): string | null {
+  if (!Array.isArray(detail) || detail.length === 0) return null;
+  const msgs: string[] = [];
+  for (const e of detail) {
+    const msg = (e as { msg?: unknown } | null)?.msg;
+    if (typeof msg !== "string") return null;
+    msgs.push(msg.replace(/^Value error, /, ""));
+  }
+  return msgs.join("; ");
+}
+
 /** Turn a backend error into a user-facing message. The expensive AI routes can
  * now return 429 (rate limited) and 409 (a generation/refine already running);
  * surface those gracefully instead of a raw "API 429: ..." string. */
@@ -163,7 +178,9 @@ async function request<T>(
       body = await res.json();
       const bodyDetail = (body as { detail?: unknown } | null)?.detail;
       detail =
-        typeof bodyDetail === "string" ? bodyDetail : JSON.stringify(body);
+        typeof bodyDetail === "string"
+          ? bodyDetail
+          : validationMessage(bodyDetail) ?? JSON.stringify(body);
     } catch {
       /* ignore */
     }
