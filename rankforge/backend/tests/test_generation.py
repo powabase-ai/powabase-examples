@@ -241,3 +241,20 @@ async def test_generation_stores_frontmatter_flags_in_progress(gen_env, monkeypa
 async def test_generation_progress_has_no_flags_when_clean(gen_env):
     await _run_gen()
     assert "frontmatter_flags" not in gen_env["updates"][-1]["progress"]
+
+
+# --- review r2 N2 / K9: an invalid stored profile is surfaced, not silent ---
+async def test_generation_flags_an_invalid_blog_profile(gen_env, monkeypatch):
+    bad = {**_BP.model_dump(), "link": {"min": 1}}  # misspelled key
+    monkeypatch.setattr(
+        gen.brands, "get_profile", lambda d, b: {"name": "B", "blog_profile": bad}
+    )
+    fm_complete = AsyncMock(return_value=[])
+    monkeypatch.setattr(_fm, "complete", fm_complete)
+    await _run_gen()
+    final = gen_env["updates"][-1]
+    assert final["generation_status"] == "done"
+    flags = final["progress"]["frontmatter_flags"]
+    assert len(flags) == 1 and flags[0].startswith("blog profile is invalid: ")
+    assert "link" in flags[0]
+    fm_complete.assert_not_awaited()  # runs without the profile rules

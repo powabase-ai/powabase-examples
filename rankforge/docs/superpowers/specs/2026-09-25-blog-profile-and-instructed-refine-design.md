@@ -135,7 +135,10 @@ given id, so it can never silently update zero or several brands.
 ## 2. Generation
 
 All of the changes below apply **only when the brand has a `blog_profile`**.
-Without one, the pipeline is unchanged.
+Without one, the pipeline is unchanged. A stored profile that fails validation
+counts as none for the rules, but generation still reports it: the final
+`progress.frontmatter_flags` includes `"blog profile is invalid: <reason>"`
+(`blog_rules.invalid_profile_reason`), so the UI shows why the rules were off.
 
 ### Writer prompt (`generation.py`)
 

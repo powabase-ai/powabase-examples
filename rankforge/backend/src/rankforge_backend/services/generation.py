@@ -742,6 +742,10 @@ async def run_generation_task(
         )
 
         frontmatter_flags: list[str] = []
+        if bad := blog_rules.invalid_profile_reason(brand_profile):
+            # The run continues without the profile's rules; say why, so the user
+            # isn't left thinking the rules were applied.
+            frontmatter_flags.append(f"blog profile is invalid: {bad}")
         if profile:
             from . import frontmatter
 
