@@ -638,7 +638,7 @@ export default function ArticleView({
         <aside className="flex h-full w-full flex-col bg-card">
         <div className="flex border-b border-border">
           {(
-            ["SEO", "GEO", "Readability", "Grounding", "Links", "Comments", "Post"] as const
+            ["SEO", "GEO", "Readability", "Grounding", "Links", "Post", "Comments"] as const
           ).map((t) => {
             const sc =
               t === "SEO"

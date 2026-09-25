@@ -542,8 +542,9 @@ This is a single pass, not a loop:
 
 ## 6. Frontend
 
-- **Article page, "Post" tab** (`PostPanel.tsx`) — a tab alongside Comments,
-  Links, SEO, GEO and Readability, always shown (not a card on the main body):
+- **Article page, "Post" tab** (`PostPanel.tsx`) — always shown (not a card on
+  the main body), placed after Links and before Comments (tab order: SEO, GEO,
+  Readability, Grounding, Links, Post, Comments):
   - "Refine with instructions": a textarea (4000-character counter), a
     Refine/Rework segmented toggle with one-line help for each, and a Run
     button, disabled while a refine or revert is in flight.
