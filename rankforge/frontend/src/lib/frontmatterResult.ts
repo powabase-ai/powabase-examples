@@ -37,7 +37,10 @@ export function describeFrontmatterResult(
   result: FrontmatterOutcome,
   action: "generate" | "fix"
 ): FrontmatterToast {
-  const { changed, flags, export_issues: issues } = result;
+  // Defensive: a backend deployed before K12 sends no `flags` (typed required).
+  const changed = result.changed ?? [];
+  const flags = result.flags ?? [];
+  const issues = result.export_issues ?? [];
   const fields = changed
     .filter((f) => f !== "content_md")
     .map((f) => LABEL[f] ?? f.replace(/_/g, " "));

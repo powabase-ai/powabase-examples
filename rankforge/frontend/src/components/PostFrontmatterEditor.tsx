@@ -109,7 +109,8 @@ export function PostFrontmatterEditor({
       { force: true },
       {
         onSuccess: (result) => {
-          const { article: updated, changed } = result;
+          const { article: updated } = result;
+          const changed = result.changed ?? [];
           // Explicit request: the written fields replace any unsaved edit to them
           // (draft and baseline), so Save can't write the edit back over them.
           if (shouldAdoptSave(updated.id, currentArticleId.current)) {

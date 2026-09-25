@@ -90,4 +90,19 @@ describe("describeFrontmatterResult", () => {
       message: "Updated summary — try exporting again",
     });
   });
+
+  test("a pre-K12 response without flags (or changed) doesn't throw", () => {
+    const old = { changed: ["faq"], export_issues: [] } as unknown as Parameters<
+      typeof describeFrontmatterResult
+    >[0];
+    assert.deepEqual(describeFrontmatterResult(old, "generate"), {
+      kind: "success",
+      message: "Updated FAQ",
+    });
+    const bare = {} as unknown as Parameters<typeof describeFrontmatterResult>[0];
+    assert.deepEqual(describeFrontmatterResult(bare, "fix"), {
+      kind: "info",
+      message: "Nothing changed",
+    });
+  });
 });
