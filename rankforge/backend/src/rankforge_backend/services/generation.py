@@ -729,6 +729,11 @@ async def run_generation_task(
         content_md = _linking.strip_competitor_links(
             content_md, _linking.competitor_hosts(brand_profile)
         )
+        # A retry re-drafts over whatever the article holds; version a non-empty body
+        # first so hand edits and earlier refines stay revertable.
+        prior = get_article(db, article_id)
+        if prior and (prior.get("content_md") or "").strip():
+            snapshot_version(db, prior)
         _update(
             db, article_id,
             content_md=content_md,
@@ -736,13 +741,17 @@ async def run_generation_task(
             progress={"phase": "scoring", "total": 1, "done": 1},
         )
 
+        frontmatter_flags: list[str] = []
         if profile:
             from . import frontmatter
 
             try:
-                await frontmatter.complete(client, db, article_id)
+                frontmatter_flags = await frontmatter.complete(client, db, article_id)
             except Exception:  # noqa: BLE001 — never block generation; export checks it
                 log.exception("frontmatter step failed for %s", article_id)
+                frontmatter_flags = ["the frontmatter step failed; run it again"]
+            if frontmatter_flags:
+                log.info("frontmatter flags for %s: %s", article_id, frontmatter_flags)
 
         # 6) reflect/fact-check, GEO optimize (JSON-LD), then SEO + GEO scoring
         #    (local import avoids a circular dependency)
@@ -774,7 +783,9 @@ async def run_generation_task(
             db, article_id,
             generation_status="done",
             progress={"phase": "done", "total": 1, "done": 1,
-                      "word_count": len(final_md.split())},
+                      "word_count": len(final_md.split()),
+                      **({"frontmatter_flags": frontmatter_flags}
+                         if frontmatter_flags else {})},
         )
     except Exception:  # noqa: BLE001
         log.exception("article generation failed for %s", article_id)

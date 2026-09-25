@@ -14,6 +14,7 @@ from ..models.article import (
     ArticleSummary,
     ArticleUpdate,
     ArticleVersion,
+    FrontmatterResult,
     RefineRequest,
     RemoveLinkResult,
 )
@@ -180,7 +181,7 @@ async def optimize_article(
 
 @router.post(
     "/{article_id}/frontmatter",
-    response_model=Article,
+    response_model=FrontmatterResult,
     dependencies=[Depends(rate_limit("article:optimize"))],
 )
 async def generate_frontmatter(
@@ -189,12 +190,43 @@ async def generate_frontmatter(
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Generate summary + FAQ + category (and fit meta) for a blog-profile brand."""
+    """Generate summary + FAQ + category (and fit meta) for a blog-profile brand.
+    Returns the article plus the export issues still open after the fix, so the UI
+    never claims "fixed" over a step that left problems."""
     article = _guard_article(db, article_id, user)
-    if not blog_rules.profile_of(brands_svc.get_profile(db, article["business_id"])):
+    profile = blog_rules.profile_of(brands_svc.get_profile(db, article["business_id"]))
+    if not profile:
         raise HTTPException(status.HTTP_409_CONFLICT, "brand has no blog profile")
-    await frontmatter_svc.complete(pb, db, article_id)
-    return svc.get_article(db, article_id)
+    # Claim the article so the fix can't race a refine/generation writing the same
+    # fields; always released below.
+    if not svc.try_begin_refine(db, article_id, total=1):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "generation already in progress"
+        )
+    try:
+        flags = await frontmatter_svc.complete(pb, db, article_id)
+        if flags:
+            log.info("frontmatter flags for %s: %s", article_id, flags)
+    finally:
+        # Release the claim. A previously failed article stays 'failed' (its progress
+        # restored) so the UI still offers Retry generation for an empty draft.
+        if article.get("generation_status") == "failed":
+            svc._update(
+                db, article_id, generation_status="failed",
+                progress=article.get("progress") or {"phase": "failed"},
+            )
+        else:
+            after = svc.get_article(db, article_id) or article
+            svc._update(
+                db, article_id,
+                generation_status="done",
+                progress={"phase": "done",
+                          "word_count": len((after.get("content_md") or "").split())},
+            )
+    final = svc.get_article(db, article_id)
+    if final is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    return {"article": final, "export_issues": blog_rules.export_issues(final, profile)}
 
 
 async def _refine_and_finish(
@@ -204,20 +236,35 @@ async def _refine_and_finish(
     mode: str = "refine",
 ) -> None:
     failed = False
+    refine_error: str | None = None
     try:
         await revise_svc.refine(
             pb, db, article_id, targets=targets, instructions=instructions, mode=mode
         )
+    except revise_svc.InstructedRefineError as e:
+        # The instructed pass produced nothing usable and left the article unchanged.
+        # Not a failure of the article: report it and keep the status 'done', so the
+        # UI never offers "Retry generation" (which would re-draft over the article).
+        refine_error = str(e) or "the revision was unusable"
+        log.warning("instructed refine not applied for %s: %s", article_id, e)
     except Exception:  # noqa: BLE001 — surface an infra failure, don't report a no-op
         # refine() only propagates when a pass raised before doing ANY work (e.g. the
         # reviser agent is misconfigured / unreachable). That's a real failure — mark it
         # so the user sees an error instead of "refine complete" over an unchanged draft.
         log.exception("refine pipeline failed for %s", article_id)
         failed = True
-    # Return the article to a terminal status. Empty content (bailed on a broken article)
-    # or a propagated infra failure → 'failed'; otherwise 'done'.
     final = svc.get_article(db, article_id)
     words = ((final or {}).get("content_md") or "").split()
+    if refine_error is not None:
+        svc._update(
+            db, article_id,
+            generation_status="done",
+            progress={"phase": "done", "refine_error": refine_error, "mode": mode,
+                      "word_count": len(words)},
+        )
+        return
+    # Return the article to a terminal status. Empty content (bailed on a broken article)
+    # or a propagated infra failure → 'failed'; otherwise 'done'.
     if failed or not words:
         svc._update(
             db, article_id,
@@ -237,13 +284,16 @@ async def _refine_and_finish(
     # An instructed pass records {"before": {...}, "mode": ...} in progress when it
     # starts (see revise.refine) — carry it into the terminal state so the UI can show
     # the before/after change instead of losing it the moment the pipeline finishes.
+    # Likewise any frontmatter flags the pass left (revise.instructed_pass).
     prev = (final or {}).get("progress") or {}
     svc._update(
         db, article_id,
         generation_status="done",
         progress={"phase": "done", "word_count": len(words),
                   **({"before": prev["before"], "mode": prev.get("mode")}
-                     if prev.get("before") else {})},
+                     if prev.get("before") else {}),
+                  **({"frontmatter_flags": prev["frontmatter_flags"]}
+                     if prev.get("frontmatter_flags") else {})},
     )
 
 

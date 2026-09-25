@@ -270,3 +270,62 @@ async def _run_complete_with(monkeypatch, art, client):
     monkeypatch.setattr(revise, "fix_meta", _fix_meta)
     await fm.complete(client, MagicMock(), "a")
     return state, calls
+
+
+# --- review r1 I4 / K1: POST /frontmatter returns the remaining export issues and
+# claims the article for the duration of the fix ---
+def _fm_route(monkeypatch, art, *, claim=True, complete=None):
+    from rankforge_backend.services import generation as g
+
+    state = {"art": {"status": "draft", "generation_status": "done",
+                     "created_at": "2026-09-25T00:00:00Z",
+                     "updated_at": "2026-09-25T00:00:00Z",
+                     **art, "id": AID, "business_id": BID}}
+    updates: list = []
+    monkeypatch.setattr(g, "get_article", lambda d, a: dict(state["art"]))
+    monkeypatch.setattr(brands_svc, "get_profile", lambda d, b: BRAND)
+    monkeypatch.setattr(g, "try_begin_refine", lambda d, a, total: claim)
+    monkeypatch.setattr(g, "_update", lambda d, a, **f: updates.append(f))
+    monkeypatch.setattr(fm, "complete", complete or AsyncMock(return_value=[]))
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": UUID(ADMIN_ORG)}
+    return _route_client(db), updates
+
+
+def test_frontmatter_route_returns_remaining_export_issues(monkeypatch):
+    art = {**ART, "title": "T", "summary": S45, "faq": GOOD["faq"], "category": None,
+           "generation_status": "done"}
+    client, updates = _fm_route(monkeypatch, art)
+    resp = client.post(f"/api/articles/{AID}/frontmatter")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["article"]["id"] == AID
+    assert body["export_issues"] == ["category is missing"]
+    assert updates[-1]["generation_status"] == "done"  # claim released
+
+
+def test_frontmatter_route_409_when_busy(monkeypatch):
+    complete = AsyncMock()
+    client, updates = _fm_route(monkeypatch, ART, claim=False, complete=complete)
+    assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 409
+    complete.assert_not_awaited()
+    assert updates == []
+
+
+def test_frontmatter_route_releases_claim_when_complete_raises(monkeypatch):
+    client, updates = _fm_route(
+        monkeypatch, {**ART, "generation_status": "done"},
+        complete=AsyncMock(side_effect=RuntimeError("boom")),
+    )
+    client = TestClient(client.app, raise_server_exceptions=False)
+    assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 500
+    assert updates and updates[-1]["generation_status"] == "done"
+
+
+def test_frontmatter_route_keeps_a_failed_article_failed(monkeypatch):
+    client, updates = _fm_route(
+        monkeypatch, {**ART, "generation_status": "failed",
+                      "progress": {"phase": "failed"}},
+    )
+    assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 200
+    assert updates[-1]["generation_status"] == "failed"
