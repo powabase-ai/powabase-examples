@@ -548,8 +548,13 @@ This is a single pass, not a loop:
     - meta title field with a character count against `meta.title_max`;
     - "Generate summary & FAQ" button (calls `POST /frontmatter` with
       `{"force": true}`, so summary and FAQ are regenerated even when they
-      already pass; the toast says "Nothing changed" when `changed` is empty,
-      and a 409 detail such as "blog profile is invalid: …" is shown as-is);
+      already pass; the toast is worded from the response's `changed` and
+      `flags` only (`lib/frontmatterResult.ts`): it names the fields in
+      `changed` and nothing else, describes `content_md` as "removed the FAQ
+      section from the body", appends each flag (e.g. "Updated category and
+      FAQ; model's summary was 3 words (needs 40-60) — kept the stored one"),
+      and says "Nothing changed" when both are empty; a 409 detail such as
+      "blog profile is invalid: …" is shown as-is);
     - `progress.frontmatter_flags`, labelled "Flagged by the last run" (hidden
       once the run's result is no longer current, see above);
     - a client-side echo of the export-check warnings (length/count rules only
@@ -594,8 +599,9 @@ This is a single pass, not a loop:
   categories.
 - **Relink UI:** a "Copy as patch notes" button.
 - **Publish dialog:** shows the pre-export check list and a "Fix automatically"
-  action (`POST /frontmatter` with no body: only failing fields; "Nothing
-  changed" when `changed` is empty).
+  action (`POST /frontmatter` with no body: only failing fields; the toast
+  is worded from `changed` + `flags` as in the editor, e.g. "Updated category;
+  category defaulted to rag", and "Nothing changed" when both are empty).
 
 ## 7. No-profile brands
 

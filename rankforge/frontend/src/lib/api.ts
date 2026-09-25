@@ -656,11 +656,15 @@ export const TERMINAL_GENERATION: GenerationStatus[] = ["done", "failed"];
 
 /** Response of `POST /articles/{id}/frontmatter`: the updated article, any
  *  export-blocking issues still outstanding after the fix (empty when fully fixed),
- *  and the names of the fields actually written (empty = nothing changed). */
+ *  the names of the fields actually written (empty = nothing changed; `content_md`
+ *  = the body's FAQ section was removed), and what the step declined or defaulted
+ *  (e.g. "category defaulted to rag"; always present, may be empty). Toasts are
+ *  worded from `changed` + `flags` by lib/frontmatterResult.ts. */
 export interface FrontmatterResult {
   article: Article;
   export_issues: string[];
   changed: string[];
+  flags: string[];
 }
 
 export type ArticleStatus =
