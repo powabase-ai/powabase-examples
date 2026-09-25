@@ -92,3 +92,31 @@ def test_revert_route_409_when_already_in_progress(monkeypatch):
     monkeypatch.setattr(g, "try_begin_refine", lambda db, aid, total: False)
     resp = _client(_brand_db()).post(f"/api/articles/{AID}/revert")
     assert resp.status_code == 409
+
+
+def test_revert_route_releases_claim_when_revert_last_raises(monkeypatch):
+    """A transient failure inside revert_last (after the claim is committed) must
+    not leave the article permanently claimed — the route releases it before the
+    exception propagates."""
+    monkeypatch.setattr(
+        g, "get_article", lambda db, aid: dict(CUR, id=AID, business_id=BID)
+    )
+    monkeypatch.setattr(g, "try_begin_refine", lambda db, aid, total: True)
+
+    def boom(db, aid):
+        raise RuntimeError("transient db error")
+
+    monkeypatch.setattr(g, "revert_last", boom)
+    update_calls = []
+    monkeypatch.setattr(
+        g, "_update", lambda db, aid, **f: update_calls.append(f)
+    )
+
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: _brand_db()
+    app.dependency_overrides[get_powabase] = lambda: MagicMock()
+    client = TestClient(with_auth(app), raise_server_exceptions=False)
+    resp = client.post(f"/api/articles/{AID}/revert")
+
+    assert resp.status_code == 500
+    assert any(c.get("generation_status") == "done" for c in update_calls)

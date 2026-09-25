@@ -463,7 +463,15 @@ async def revert_article(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "generation already in progress"
         )
-    row = svc.revert_last(db, article_id)
+    try:
+        row = svc.revert_last(db, article_id)
+    except Exception:
+        # revert_last raised before landing a change — release the claim so a
+        # transient failure doesn't permanently 409 every later refine/revert.
+        svc._update(
+            db, article_id, generation_status="done", progress={"phase": "done"}
+        )
+        raise
     if row is None:
         svc._update(
             db, article_id, generation_status="done", progress={"phase": "done"}
