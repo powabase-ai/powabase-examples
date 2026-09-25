@@ -190,8 +190,12 @@ problems named) when that attempt has flags. It keeps whichever of the two
 attempts has **fewer** flags (the first on a tie), and — per field — writes only
 values that pass the rules (`field_ok`). An unparseable reply, or a retry that's
 worse than the first attempt, never overwrites a stored value. `failing_fields()`
-limits a call to the fields that currently fail, so "Generate summary & FAQ" and
-the post-generation step never touch a field that already passes.
+limits a call to the fields that currently fail, so "Fix automatically" and the
+post-generation step never touch a field that already passes. When neither the
+cluster nor the model names a real key, the fallback category is written (if the
+category is being regenerated) with the flag `category defaulted to <key>` — but
+a valid stored category is never swapped for the fallback: it is kept and
+flagged `category kept as <key> (the model's was not a listed key)`.
 
 A flagged field shows as a warning on the article and **blocks export** (§4). It
 never blocks generation.
@@ -201,7 +205,10 @@ FAQ" / "Fix automatically": it touches only what's wrong — `fix_meta` +
 `enforce_meta` when the title/meta exceed the profile's limits, `generate()` for
 `failing_fields()`, and stripping a body FAQ section when one exists under an
 FAQ-enabled profile — and snapshots the article once, right before its first
-write, so the whole fix is one undo point.
+write, so the whole fix is one undo point. With `force=True` ("Generate summary
+& FAQ") it also regenerates the summary and FAQ (when enabled) even if they pass,
+and the category unless the cluster's category (a profile key) fixes it; a new
+value is still written only when it passes the rules.
 
 ### Meta (`revise.fix_meta` + `frontmatter.enforce_meta`)
 
@@ -382,15 +389,23 @@ step and `fix_meta` on demand. This is the "Generate summary & FAQ" button; see
   - `targets` together with `instructions` → **422**.
   - Uses the same `try_begin_refine` claim (409 when busy), `article:refine` rate
     limit, background task, progress steps and post-refine link check as today.
-- `POST /api/articles/{id}/frontmatter` (profile brands only; 409 if no profile):
-  claims the article (`try_begin_refine(total=1)`, 409 if a generation/refine is
-  already running), runs `frontmatter.complete()`, releases the claim in a
-  `finally` (a previously `failed` article stays `failed`, so "Retry generation"
-  is still offered for an empty draft), and returns
-  `{ "article": <Article>, "export_issues": [str, ...] }` — the issues still
-  open **after** the fix, computed from the fresh row, so the UI never claims
-  "fixed" over a step that left problems. This is the "Generate summary & FAQ" /
-  "Fix automatically" action.
+- `POST /api/articles/{id}/frontmatter` (profile brands only): 409
+  `"brand has no blog profile"` when the brand has none, 409
+  `"blog profile is invalid: <reason>"` when the stored profile fails
+  validation (`blog_rules.invalid_profile_reason`). Optional JSON body
+  `{ "force": bool }` (default `false`; an empty/absent body is `false`):
+  `false` is "Fix automatically" (only failing fields), `true` is "Generate
+  summary & FAQ" (`complete(force=True)`, §2). It claims the article
+  (`try_begin_refine(total=1)`, 409 if a generation/refine is already
+  running), runs `frontmatter.complete()`, releases the claim in a `finally`
+  (a previously `failed` article stays `failed`, so "Retry generation" is
+  still offered for an empty draft), and returns
+  `{ "article": <Article>, "export_issues": [str, ...], "changed": [str, ...] }`
+  — the issues still open **after** the fix, computed from the fresh row, so
+  the UI never claims "fixed" over a step that left problems; and the fields
+  whose value actually changed (compared by value, a subset of `category`,
+  `summary`, `faq`, `meta_title`, `meta_description`, `content_md`). An empty
+  `changed` means the UI says "Nothing changed".
 - `POST /api/articles/{id}/revert`:
   - Restores the newest `article_versions` row whose body **or** frontmatter
     (title, meta, category, summary, FAQ — nulls included) differs from the

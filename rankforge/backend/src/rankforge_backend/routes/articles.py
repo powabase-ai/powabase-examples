@@ -9,11 +9,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
 from ..models.article import (
+    FRONTMATTER_CHANGE_FIELDS,
     Article,
     ArticleGenerate,
     ArticleSummary,
     ArticleUpdate,
     ArticleVersion,
+    FrontmatterRequest,
     FrontmatterResult,
     RefineRequest,
     RemoveLinkResult,
@@ -186,15 +188,23 @@ async def optimize_article(
 )
 async def generate_frontmatter(
     article_id: UUID,
+    body: FrontmatterRequest | None = None,
     db: Database = Depends(get_db),
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(get_current_user),
 ):
     """Generate summary + FAQ + category (and fit meta) for a blog-profile brand.
-    Returns the article plus the export issues still open after the fix, so the UI
-    never claims "fixed" over a step that left problems."""
+    `force` regenerates a passing summary/FAQ too (see frontmatter.complete).
+    Returns the article, the export issues still open after the fix (so the UI never
+    claims "fixed" over a step that left problems) and the fields it changed."""
+    force = bool(body and body.force)
     article = _guard_article(db, article_id, user)
-    profile = blog_rules.profile_of(brands_svc.get_profile(db, article["business_id"]))
+    brand = brands_svc.get_profile(db, article["business_id"])
+    if reason := blog_rules.invalid_profile_reason(brand):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"blog profile is invalid: {reason}"
+        )
+    profile = blog_rules.profile_of(brand)
     if not profile:
         raise HTTPException(status.HTTP_409_CONFLICT, "brand has no blog profile")
     # Claim the article so the fix can't race a refine/generation writing the same
@@ -203,8 +213,9 @@ async def generate_frontmatter(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "generation already in progress"
         )
+    before = svc.get_article(db, article_id) or article
     try:
-        flags = await frontmatter_svc.complete(pb, db, article_id)
+        flags = await frontmatter_svc.complete(pb, db, article_id, force=force)
         if flags:
             log.info("frontmatter flags for %s: %s", article_id, flags)
     finally:
@@ -226,7 +237,13 @@ async def generate_frontmatter(
     final = svc.get_article(db, article_id)
     if final is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
-    return {"article": final, "export_issues": blog_rules.export_issues(final, profile)}
+    # Compared by value (jsonb returns FAQ items with sorted keys; dict equality
+    # ignores key order), so a rewrite to the same value is not a change.
+    changed = [
+        f for f in FRONTMATTER_CHANGE_FIELDS if before.get(f) != final.get(f)
+    ]
+    return {"article": final, "export_issues": blog_rules.export_issues(final, profile),
+            "changed": changed}
 
 
 async def _refine_and_finish(
