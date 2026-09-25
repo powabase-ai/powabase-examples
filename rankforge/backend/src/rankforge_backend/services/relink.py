@@ -10,6 +10,7 @@ APScheduler tick (scheduler.py) drives it, the same way it drives content scouts
 """
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -139,3 +140,39 @@ def run_relink(db: Database, business_id: UUID) -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             pass
     return {"articles_scanned": scanned, "suggestions_found": found}
+
+
+def _sentence_with(md: str, anchor: str) -> str:
+    """Extract the sentence from markdown that contains the anchor text."""
+    for s in re.split(r"(?<=[.!?])\s+|\n+", md or ""):
+        if anchor.lower() in s.lower():
+            return s.strip()
+    return ""
+
+
+def patch_notes(db: Database, business_id: UUID) -> str:
+    """Pending suggestions as copy-paste Markdown for editing the live site repo
+    (the site, not RankForge, owns already-published posts)."""
+    rows = db.fetch_all(
+        "select a.slug, s.anchor_text, s.target_url, s.target_title, a.content_md "
+        "from public.link_suggestions s join public.articles a on a.id = s.article_id "
+        "where s.business_id = %s and s.status = 'pending' "
+        "order by a.slug, s.created_at",
+        (business_id,),
+    )
+    if not rows:
+        return "No pending link suggestions.\n"
+    out: list[str] = []
+    slug = object()
+    for r in rows:
+        if r["slug"] != slug:
+            slug = r["slug"]
+            out.append(f"{'' if not out else chr(10)}### /blog/{slug}/")
+        if r.get("anchor_text"):
+            sent = _sentence_with(r.get("content_md") or "", r["anchor_text"])
+            out.append(f'- "{r["anchor_text"]}" → {r["target_url"]}  (in: "{sent}")')
+        else:
+            out.append(
+                f'- (new sentence) → {r["target_url"]}  — "{r.get("target_title") or ""}"'
+            )
+    return "\n".join(out) + "\n"
