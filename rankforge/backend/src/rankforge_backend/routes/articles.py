@@ -263,8 +263,8 @@ async def _refine_and_finish(
                       "word_count": len(words)},
         )
         return
-    # Return the article to a terminal status. Empty content (bailed on a broken article)
-    # or a propagated infra failure → 'failed'; otherwise 'done'.
+    # Return the article to a terminal status. Empty content (bailed on a broken
+    # article) or a propagated infra failure → 'failed'; otherwise 'done'.
     if failed or not words:
         svc._update(
             db, article_id,
