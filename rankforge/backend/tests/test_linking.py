@@ -314,6 +314,24 @@ def test_structural_targets_empty_without_cluster():
     assert linking._structural_targets(MagicMock(), {"id": AID}) == []
 
 
+def test_structural_targets_pillar_returns_up_to_five_members():
+    """No blog_profile is passed to (or known by) _structural_targets, so its member
+    cap must stay at _MAX_PER_ARTICLE (5) regardless of any brand's link profile —
+    a pillar with 5 published members must seed all 5 structural candidates.
+    link_candidates/suggest_links apply their own (profile-aware) caps downstream."""
+    db = MagicMock()
+    members = [
+        {"id": f"m{i}", "title": f"M{i}", "slug": f"m{i}", "keywords": [],
+         "canonical_url": None}
+        for i in range(5)
+    ]
+    db.fetch_all.return_value = members
+    out = linking._structural_targets(
+        db, {"id": AID, "cluster_id": CID, "cluster_role": "pillar"}
+    )
+    assert out == [(m, "member") for m in members]
+
+
 def test_suggest_stages_a_gap_for_an_unmentioned_pillar(monkeypatch):
     db = MagicMock()
     monkeypatch.setattr(

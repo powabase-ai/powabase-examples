@@ -261,7 +261,7 @@ def _structural_targets(
             "and status = 'published' and id <> %s order by created_at",
             (cid, art["id"]),
         )
-        return [(m, _MEMBER) for m in members[:3]]
+        return [(m, _MEMBER) for m in members[:_MAX_PER_ARTICLE]]
     return []
 
 
