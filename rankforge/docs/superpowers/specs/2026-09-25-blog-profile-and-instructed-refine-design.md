@@ -488,7 +488,12 @@ This is a single pass, not a loop:
     Refine/Rework segmented toggle with one-line help for each, and a Run
     button, disabled while a refine or revert is in flight.
   - After a run, a banner shows score changes (SEO/GEO/Readability before →
-    after) from `progress.before`.
+    after) from `progress.before`. It (and the frontmatter flags below) is shown
+    only while the run's result is current: the page stamps `updated_at` when it
+    first sees the article settled (`generation_status === "done"`) and hides
+    both once `updated_at` moves on (a manual edit, a frontmatter save, a
+    revert, a status change). After a reload the stamp restarts from the loaded
+    record.
   - A **Revert to previous version** button (confirm dialog), always shown.
   - The frontmatter editor (`PostFrontmatterEditor.tsx`), rendered inside the
     same tab **only when the brand has a blog profile**:
@@ -496,23 +501,51 @@ This is a single pass, not a loop:
     - summary textarea with a live word count against the bounds;
     - FAQ list editor (add, remove, reorder, capped at `faq.max`);
     - meta title field with a character count against `meta.title_max`;
-    - "Generate summary & FAQ" button (calls `POST /frontmatter`);
+    - "Generate summary & FAQ" button (calls `POST /frontmatter` with
+      `{"force": true}`, so summary and FAQ are regenerated even when they
+      already pass; the toast says "Nothing changed" when `changed` is empty,
+      and a 409 detail such as "blog profile is invalid: …" is shown as-is);
+    - `progress.frontmatter_flags`, labelled "Flagged by the last run" (hidden
+      once the run's result is no longer current, see above);
     - a client-side echo of the export-check warnings (length/count rules only
       — the body-FAQ-heading check stays server-side, authoritative on 422);
     - Save sends explicit `null` for an emptied category/summary/meta title so
       the clear actually persists (§5).
-- **Article page, failed generation:** "Retry generation" is offered only when
-  `generation_status === "failed"` **and** `content_md` is empty/whitespace —
-  never over a draft that already has content, instructed-refine failure or not.
+    - Draft vs baseline (`lib/frontmatterDraft.ts`): the editor keeps the last
+      server values it adopted as a baseline. "Dirty" and the PATCH are the
+      draft compared field by field with that baseline (text trimmed; FAQ item
+      by item on trimmed q/a, never `JSON.stringify`, since jsonb returns keys
+      sorted), so Save sends only the fields the user changed. When a new
+      server record arrives (generate, refine, revert, a poll, the save's own
+      echo), each field the user hasn't edited takes the server value and an
+      edited field keeps the user's text; a different article id replaces the
+      draft outright. A save response is adopted as draft and baseline, unless
+      it is for another article than the one now shown.
+    - The whole editor and its Save are disabled while its own save/generate
+      is in flight and while the page's refine/generation runs.
+- **Article page, failed generation** (`generation_status === "failed"`):
+  `generation_error` is always shown. With an empty body the notice says
+  "Generation failed"; with a body it says "The last run failed after writing a
+  draft; the article may be partially processed." "Retry generation" is offered
+  in both cases; over a non-empty body it asks for confirmation first ("A
+  version of the current article is saved first" — the re-draft snapshots it).
 - **Brand settings → "Blog profile":** a structured form with category rows
   (key, label, description, technical), hub-page rows (path, title, topics),
   summary and FAQ toggles with bounds, meta limits, link bounds and trailing
   slash, and stance. A "Disable blog profile" action sets it to null.
+  `BusinessProfile.blog_profile` is typed `unknown` in the client and read
+  only through `asBlogProfile` (`lib/blogProfile.ts`), which mirrors the
+  model's shape (missing sections default; an unknown key or wrong type makes
+  it invalid). When the stored value is invalid, settings shows "This blog
+  profile is invalid" with "Reset to defaults" and "Start from stored values"
+  (the raw object deep-merged onto the defaults, keeping only known, correctly
+  typed keys) instead of the form, and Save is disabled until one is chosen.
 - **Clusters page:** a category select per cluster, from the profile's
   categories.
 - **Relink UI:** a "Copy as patch notes" button.
 - **Publish dialog:** shows the pre-export check list and a "Fix automatically"
-  action.
+  action (`POST /frontmatter` with no body: only failing fields; "Nothing
+  changed" when `changed` is empty).
 
 ## 7. No-profile brands
 

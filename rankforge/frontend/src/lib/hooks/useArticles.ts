@@ -141,7 +141,8 @@ export function useRevertArticle(id: string) {
 export function useGenerateFrontmatter(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => articlesApi.generateFrontmatter(id),
+    mutationFn: (opts?: { force?: boolean }) =>
+      articlesApi.generateFrontmatter(id, opts),
     onSuccess: (data) => {
       qc.setQueryData(["article", id], data.article);
       qc.invalidateQueries({ queryKey: ["versions", id] });

@@ -18,10 +18,15 @@ export function PostPanel({
   article,
   profile,
   busy,
+  runCurrent,
 }: {
   article: Article;
   profile: BlogProfile | null;
   busy: boolean;
+  /** The last run's results (score strip, frontmatter flags) still describe the
+   *  article — false once it has been written since (edit, save, revert…); see
+   *  useRunCurrent. */
+  runCurrent: boolean;
 }) {
   const [text, setText] = useState("");
   const [mode, setMode] = useState<"refine" | "rework">("refine");
@@ -103,7 +108,7 @@ export function PostPanel({
           Run
         </Button>
 
-        {before && article.generation_status === "done" && (
+        {before && runCurrent && (
           <div className="mt-2 rounded-md border p-2 text-xs">
             {(["seo", "geo", "readability"] as const).map((k) => {
               const now = (
@@ -138,7 +143,12 @@ export function PostPanel({
       </div>
 
       {profile && (
-        <PostFrontmatterEditor article={article} profile={profile} busy={busy} />
+        <PostFrontmatterEditor
+          article={article}
+          profile={profile}
+          busy={busy}
+          runCurrent={runCurrent}
+        />
       )}
     </div>
   );

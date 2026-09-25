@@ -106,28 +106,17 @@ export interface BusinessProfile {
   url_pattern?: string | null;
   default_author?: string | null;
   logo_url?: string | null;
-  blog_profile?: BlogProfile | null;
+  // An invalid *stored* profile is returned as-is, so this is untyped: read it
+  // only through `asBlogProfile` (null = absent or invalid).
+  blog_profile?: unknown;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
 }
 
-/** Runtime guard for `BusinessProfile.blog_profile`. An invalid *stored* profile is
- *  now returned as-is (untyped) rather than failing response validation, so callers
- *  must not assume its shape — use this wherever the value drives UI instead of
- *  reading `brand.blog_profile` directly. (The settings page is the one exception:
- *  it edits the raw value so the user can fix it.) Returns null for anything that
- *  doesn't look like a real profile. */
-export function asBlogProfile(x: unknown): BlogProfile | null {
-  if (!x || typeof x !== "object") return null;
-  const p = x as Record<string, unknown>;
-  if (!Array.isArray(p.categories) || p.categories.length === 0) return null;
-  if (typeof p.summary !== "object" || p.summary === null) return null;
-  if (typeof p.faq !== "object" || p.faq === null) return null;
-  if (typeof p.meta !== "object" || p.meta === null) return null;
-  if (typeof p.links !== "object" || p.links === null) return null;
-  return p as unknown as BlogProfile;
-}
+// Runtime guard for `BusinessProfile.blog_profile` (typed `unknown`): every read
+// must go through it. Lives in lib/blogProfile.ts next to the defaults and repair.
+export { asBlogProfile } from "@/lib/blogProfile";
 
 export interface BusinessProfileInput {
   name: string;
@@ -648,11 +637,13 @@ export interface Article extends ArticleSummary {
 
 export const TERMINAL_GENERATION: GenerationStatus[] = ["done", "failed"];
 
-/** Response of `POST /articles/{id}/frontmatter`: the updated article plus any
- *  export-blocking issues still outstanding after the fix (empty when fully fixed). */
+/** Response of `POST /articles/{id}/frontmatter`: the updated article, any
+ *  export-blocking issues still outstanding after the fix (empty when fully fixed),
+ *  and the names of the fields actually written (empty = nothing changed). */
 export interface FrontmatterResult {
   article: Article;
   export_issues: string[];
+  changed: string[];
 }
 
 export type ArticleStatus =
@@ -744,9 +735,14 @@ export const articlesApi = {
     }),
   revert: (id: string) =>
     request<Article>(`/api/articles/${id}/revert`, { method: "POST" }),
-  generateFrontmatter: (id: string) =>
+  /** `force: true` ("Generate summary & FAQ") regenerates summary/FAQ even when
+   *  they already pass the rules; without it ("Fix automatically") only failing
+   *  fields are regenerated. A 409 carries the reason as-is (no profile, or
+   *  "blog profile is invalid: …"). */
+  generateFrontmatter: (id: string, opts?: { force?: boolean }) =>
     request<FrontmatterResult>(`/api/articles/${id}/frontmatter`, {
       method: "POST",
+      ...(opts?.force ? { body: JSON.stringify({ force: true }) } : {}),
     }),
   retry: (id: string) =>
     request<Article>(`/api/articles/${id}/retry`, { method: "POST" }),
