@@ -23,6 +23,7 @@ const base: FrontmatterDraft = {
     { q: "Q2?", a: "A2." },
   ],
   metaTitle: "Meta",
+  metaDescription: "A description.",
 };
 const clone = (d: FrontmatterDraft): FrontmatterDraft => ({
   ...d,
@@ -31,12 +32,22 @@ const clone = (d: FrontmatterDraft): FrontmatterDraft => ({
 
 describe("fromServer", () => {
   test("nulls become empty strings and FAQ rows plain {q, a}", () => {
-    assert.deepEqual(fromServer({ category: null, summary: null, faq: null, meta_title: null }), {
-      category: "",
-      summary: "",
-      faq: [],
-      metaTitle: "",
-    });
+    assert.deepEqual(
+      fromServer({
+        category: null,
+        summary: null,
+        faq: null,
+        meta_title: null,
+        meta_description: null,
+      }),
+      {
+        category: "",
+        summary: "",
+        faq: [],
+        metaTitle: "",
+        metaDescription: "",
+      }
+    );
     assert.deepEqual(fromServer({}).faq, []);
   });
 
@@ -105,6 +116,21 @@ describe("dirty and PATCH", () => {
     });
   });
 
+  test("meta description is compared and sent trimmed", () => {
+    const ws = { ...clone(base), metaDescription: "  A description.  " };
+    assert.equal(isDirty(ws, base), false);
+    assert.equal(fieldChanged("metaDescription", ws, base), false);
+    const d = { ...clone(base), metaDescription: "  New description.  " };
+    assert.ok(isDirty(d, base));
+    assert.deepEqual(buildPatch(d, base), { meta_description: "New description." });
+  });
+
+  test("an emptied meta description is sent as an empty string, never null", () => {
+    // The server ignores null for meta_description (it isn't clearable that way).
+    const d = { ...clone(base), metaDescription: "   " };
+    assert.deepEqual(buildPatch(d, base), { meta_description: "" });
+  });
+
   test("FAQ patch is cleaned; an emptied FAQ is null", () => {
     const d = clone(base);
     d.faq = [{ q: " Q1? ", a: "A1." }, { q: "", a: "" }];
@@ -120,6 +146,7 @@ describe("rebase (a new server record)", () => {
     summary: "Server summary.",
     faq: [{ q: "SQ?", a: "SA." }],
     metaTitle: "Server meta",
+    metaDescription: "Server description.",
   };
 
   test("an untouched draft resyncs every field", () => {
@@ -128,7 +155,15 @@ describe("rebase (a new server record)", () => {
     assert.deepEqual(r.baseline, server);
   });
 
-  for (const field of ["category", "summary", "faq", "metaTitle"] as const) {
+  const FIELDS = ["category", "summary", "faq", "metaTitle", "metaDescription"] as const;
+  const SERVER_NAME = {
+    category: "category",
+    summary: "summary",
+    faq: "faq",
+    metaTitle: "meta_title",
+    metaDescription: "meta_description",
+  } as const;
+  for (const field of FIELDS) {
     test(`an edited ${field} keeps the draft; the other fields resync`, () => {
       const d = clone(base);
       const edits: FrontmatterDraft = {
@@ -136,17 +171,18 @@ describe("rebase (a new server record)", () => {
         summary: "Edited summary.",
         faq: [{ q: "EQ?", a: "EA." }],
         metaTitle: "Edited meta",
+        metaDescription: "Edited description.",
       };
       if (field === "faq") d.faq = edits.faq;
       else d[field] = edits[field];
       const r = rebase(d, base, server, false);
       assert.deepEqual(r.baseline, server);
-      for (const f of ["category", "summary", "faq", "metaTitle"] as const) {
+      for (const f of FIELDS) {
         assert.deepEqual(r.draft[f], f === field ? edits[f] : server[f], f);
       }
       // The edit is still pending against the new baseline; nothing else is.
       assert.deepEqual(Object.keys(buildPatch(r.draft, r.baseline)), [
-        field === "metaTitle" ? "meta_title" : field,
+        SERVER_NAME[field],
       ]);
     });
   }
@@ -172,6 +208,7 @@ describe("adoptChanged (Generate summary & FAQ)", () => {
     summary: "Generated.",
     faq: [{ a: "GA.", q: "GQ?" }],
     meta_title: "Generated meta",
+    meta_description: "Generated description.",
   };
 
   test("changed fields replace draft and baseline, even over an edit", () => {
@@ -187,14 +224,18 @@ describe("adoptChanged (Generate summary & FAQ)", () => {
     assert.deepEqual(buildPatch(r.draft, r.baseline), { category: "mine" });
   });
 
-  test("meta_title maps to metaTitle; unknown names are ignored", () => {
-    const r = adoptChanged(clone(base), base, server, [
+  test("meta_title/meta_description map to the editor; unknown names are ignored", () => {
+    const d = { ...clone(base), metaDescription: "My edit." };
+    const r = adoptChanged(d, base, server, [
       "meta_title",
       "meta_description",
       "content_md",
     ]);
     assert.equal(r.draft.metaTitle, "Generated meta");
     assert.equal(r.baseline.metaTitle, "Generated meta");
+    assert.equal(r.draft.metaDescription, "Generated description.");
+    assert.equal(r.baseline.metaDescription, "Generated description.");
+    assert.deepEqual(buildPatch(r.draft, r.baseline), {});
     assert.equal(r.draft.summary, base.summary);
     assert.equal(r.draft.category, base.category);
   });
@@ -223,6 +264,10 @@ describe("generateConfirmMessage (unsaved edits before Generate)", () => {
     assert.equal(
       generateConfirmMessage(d, base),
       "Generate may replace your unsaved changes to the category, FAQ and meta title. Continue?"
+    );
+    assert.equal(
+      generateConfirmMessage({ ...clone(base), metaDescription: "Edit." }, base),
+      "Generate may replace your unsaved changes to the meta description. Continue?"
     );
   });
 });

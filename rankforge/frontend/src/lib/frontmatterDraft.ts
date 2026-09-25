@@ -18,6 +18,7 @@ export interface FrontmatterDraft {
   summary: string;
   faq: FaqItem[];
   metaTitle: string;
+  metaDescription: string;
 }
 
 export interface FrontmatterSource {
@@ -25,6 +26,7 @@ export interface FrontmatterSource {
   summary?: string | null;
   faq?: FaqItem[] | null;
   meta_title?: string | null;
+  meta_description?: string | null;
 }
 
 /** Server record → editor snapshot (null → ""; FAQ items copied as plain {q, a}). */
@@ -34,6 +36,7 @@ export function fromServer(src: FrontmatterSource): FrontmatterDraft {
     summary: src.summary ?? "",
     faq: (src.faq ?? []).map((f) => ({ q: f.q ?? "", a: f.a ?? "" })),
     metaTitle: src.meta_title ?? "",
+    metaDescription: src.meta_description ?? "",
   };
 }
 
@@ -51,10 +54,16 @@ export function faqEqual(a: FaqItem[], b: FaqItem[]): boolean {
   return x.length === y.length && x.every((f, i) => f.q === y[i].q && f.a === y[i].a);
 }
 
-export type FrontmatterField = "category" | "summary" | "faq" | "metaTitle";
+export type FrontmatterField =
+  | "category"
+  | "summary"
+  | "faq"
+  | "metaTitle"
+  | "metaDescription";
 
 /** Is one field of `draft` different from the same field of `baseline`? Text is
- *  compared trimmed, as the server trims summary/meta title on save. */
+ *  compared trimmed, as the server trims summary/meta title on save (and the
+ *  editor sends the meta description trimmed). */
 export function fieldChanged(
   field: FrontmatterField,
   draft: FrontmatterDraft,
@@ -67,12 +76,20 @@ export function fieldChanged(
       return draft.summary.trim() !== baseline.summary.trim();
     case "metaTitle":
       return draft.metaTitle.trim() !== baseline.metaTitle.trim();
+    case "metaDescription":
+      return draft.metaDescription.trim() !== baseline.metaDescription.trim();
     case "faq":
       return !faqEqual(draft.faq, baseline.faq);
   }
 }
 
-const FIELDS: FrontmatterField[] = ["category", "summary", "faq", "metaTitle"];
+const FIELDS: FrontmatterField[] = [
+  "category",
+  "summary",
+  "faq",
+  "metaTitle",
+  "metaDescription",
+];
 
 export function isDirty(draft: FrontmatterDraft, baseline: FrontmatterDraft): boolean {
   return FIELDS.some((f) => fieldChanged(f, draft, baseline));
@@ -83,6 +100,7 @@ const FIELD_LABEL: Record<FrontmatterField, string> = {
   summary: "summary",
   faq: "FAQ",
   metaTitle: "meta title",
+  metaDescription: "meta description",
 };
 
 /** Before "Generate summary & FAQ": the confirm text when the draft has unsaved
@@ -104,7 +122,8 @@ export function generateConfirmMessage(
 }
 
 /** PATCH body: only the fields that differ from the baseline. An omitted key is left
- *  alone server-side; an explicit null clears the field. */
+ *  alone server-side; an explicit null clears the field — except meta_description,
+ *  which the server does not clear with null, so an emptied one is sent as "". */
 export function buildPatch(
   draft: FrontmatterDraft,
   baseline: FrontmatterDraft
@@ -120,6 +139,9 @@ export function buildPatch(
   }
   if (fieldChanged("metaTitle", draft, baseline)) {
     payload.meta_title = draft.metaTitle.trim() || null;
+  }
+  if (fieldChanged("metaDescription", draft, baseline)) {
+    payload.meta_description = draft.metaDescription.trim();
   }
   return payload;
 }
@@ -148,6 +170,9 @@ export function rebase(
       summary: keep("summary") ? draft.summary : next.summary,
       faq: keep("faq") ? draft.faq : next.faq,
       metaTitle: keep("metaTitle") ? draft.metaTitle : next.metaTitle,
+      metaDescription: keep("metaDescription")
+        ? draft.metaDescription
+        : next.metaDescription,
     },
     baseline: next,
   };
@@ -160,12 +185,13 @@ export function shouldAdoptSave(updatedId: string, currentId: string): boolean {
 }
 
 /** Server field names (`FrontmatterResult.changed`) → editor fields. Names the
- *  editor doesn't hold (meta_description, content_md) are ignored. */
+ *  editor doesn't hold (content_md) are ignored. */
 const SERVER_FIELD: Record<string, FrontmatterField> = {
   category: "category",
   summary: "summary",
   faq: "faq",
   meta_title: "metaTitle",
+  meta_description: "metaDescription",
 };
 
 /** "Generate summary & FAQ" succeeded: the fields the server actually wrote

@@ -29,7 +29,7 @@ function wordCount(s: string): number {
 }
 
 /** The frontmatter editor half of PostPanel — category, summary, FAQ, meta title,
- *  and a live export-check preview. Split out of PostPanel.tsx to keep that file
+ *  meta description, and a live export-check preview. Split out of PostPanel.tsx to keep that file
  *  focused; only rendered when the brand has a blog_profile. */
 export function PostFrontmatterEditor({
   article,
@@ -52,7 +52,7 @@ export function PostFrontmatterEditor({
   // server-side change never makes an untouched draft look edited.
   const [draft, setDraft] = useState<FrontmatterDraft>(() => fromServer(article));
   const [baseline, setBaseline] = useState<FrontmatterDraft>(() => fromServer(article));
-  const { category, summary, faq, metaTitle } = draft;
+  const { category, summary, faq, metaTitle, metaDescription } = draft;
   const setField = <K extends keyof FrontmatterDraft>(k: K, v: FrontmatterDraft[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
   const setFaq = (fn: (prev: FaqItem[]) => FaqItem[]) =>
@@ -80,6 +80,9 @@ export function PostFrontmatterEditor({
     profile.summary.enabled &&
     (wc < profile.summary.min_words || wc > profile.summary.max_words);
   const titleTooLong = metaTitle.length > profile.meta.title_max;
+  // Measured trimmed — the editor saves the description trimmed (buildPatch).
+  const descLen = metaDescription.trim().length;
+  const descTooLong = descLen > profile.meta.description_max;
 
   function save() {
     // Only the fields that differ from the baseline — an omitted key is left alone
@@ -152,9 +155,15 @@ export function PostFrontmatterEditor({
   // (e.g. the user saved a fix here) — the live export check below takes over.
   const frontmatterFlags = runCurrent ? article.progress?.frontmatter_flags ?? [] : [];
 
-  // Length/count rules only, mirroring blog_rules.export_issues on the server —
-  // the regex-based body-FAQ check is left to the server's authoritative 422.
+  // Category and length/count rules, mirroring blog_rules.export_issues on the
+  // server (on the draft, so they update as the user types) — the regex-based
+  // body-FAQ check is left to the server's authoritative 422.
   const warnings: string[] = [];
+  if (!category) {
+    warnings.push("category is missing");
+  } else if (!profile.categories.some((c) => c.key === category)) {
+    warnings.push(`unknown category "${category}"`);
+  }
   const effectiveTitle =
     article.title.length > profile.meta.title_max && metaTitle.trim()
       ? metaTitle.trim()
@@ -165,8 +174,7 @@ export function PostFrontmatterEditor({
         "set a shorter meta title"
     );
   }
-  const descLen = (article.meta_description ?? "").length;
-  if (descLen > profile.meta.description_max) {
+  if (descTooLong) {
     warnings.push(
       `description is ${descLen} characters (max ${profile.meta.description_max})`
     );
@@ -214,7 +222,7 @@ export function PostFrontmatterEditor({
 
       <fieldset disabled={formBusy} className="space-y-4 border-0 p-0 m-0 min-w-0">
       <div className="space-y-1.5">
-        <Label htmlFor="fm-category" className="text-xs">
+        <Label htmlFor="fm-category" className="block text-xs">
           Category
         </Label>
         <select
@@ -234,7 +242,7 @@ export function PostFrontmatterEditor({
 
       {profile.summary.enabled && (
         <div className="space-y-1.5">
-          <Label htmlFor="fm-summary" className="text-xs">
+          <Label htmlFor="fm-summary" className="block text-xs">
             Summary
           </Label>
           <Textarea
@@ -256,7 +264,12 @@ export function PostFrontmatterEditor({
 
       {profile.faq.enabled && (
         <div className="space-y-2">
-          <Label className="text-xs">FAQ</Label>
+          <Label className="block text-xs">FAQ</Label>
+          {faq.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              No questions yet — add some or use Generate.
+            </p>
+          )}
           {faq.map((f, i) => (
             <div key={i} className="space-y-1.5 rounded-md border border-border p-2">
               <div className="flex items-center gap-1.5">
@@ -317,7 +330,7 @@ export function PostFrontmatterEditor({
       )}
 
       <div className="space-y-1.5">
-        <Label htmlFor="fm-meta-title" className="text-xs">
+        <Label htmlFor="fm-meta-title" className="block text-xs">
           Meta title
         </Label>
         <Input
@@ -333,6 +346,26 @@ export function PostFrontmatterEditor({
           )}
         >
           {metaTitle.length}/{profile.meta.title_max}
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="fm-meta-description" className="block text-xs">
+          Meta description
+        </Label>
+        <Textarea
+          id="fm-meta-description"
+          rows={3}
+          value={metaDescription}
+          onChange={(e) => setField("metaDescription", e.target.value)}
+        />
+        <p
+          className={cn(
+            "text-xs text-muted-foreground",
+            descTooLong && "text-destructive"
+          )}
+        >
+          {descLen}/{profile.meta.description_max}
         </p>
       </div>
       </fieldset>

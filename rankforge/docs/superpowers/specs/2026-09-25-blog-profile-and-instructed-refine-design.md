@@ -565,8 +565,12 @@ This is a single pass, not a loop:
     same tab **only when the brand has a blog profile**:
     - category select (with a "— none —" option that clears it);
     - summary textarea with a live word count against the bounds;
-    - FAQ list editor (add, remove, reorder, capped at `faq.max`);
+    - FAQ list editor (add, remove, reorder, capped at `faq.max`), with "No
+      questions yet — add some or use Generate." when it is empty;
     - meta title field with a character count against `meta.title_max`;
+    - meta description textarea with a live `n/description_max` character
+      count (destructive colour when over), counted on the trimmed text;
+    - every field label sits on its own line above its control;
     - "Generate summary & FAQ" button (calls `POST /frontmatter` with
       `{"force": true}`, so summary and FAQ are regenerated even when they
       already pass; the toast is worded from the response's `changed` and
@@ -578,10 +582,13 @@ This is a single pass, not a loop:
       "blog profile is invalid: …" is shown as-is);
     - `progress.frontmatter_flags`, labelled "Flagged by the last run" (hidden
       once the run's result is no longer current, see above);
-    - a client-side echo of the export-check warnings (length/count rules only
-      — the body-FAQ-heading check stays server-side, authoritative on 422);
+    - a client-side echo of the export-check warnings, computed on the draft
+      (category missing / unknown category, title, meta description length,
+      summary words, FAQ count — the body-FAQ-heading check stays server-side,
+      authoritative on 422);
     - Save sends explicit `null` for an emptied category/summary/meta title so
-      the clear actually persists (§5).
+      the clear actually persists (§5); an emptied meta description is sent as
+      `""` (the server ignores `null` for it), and a changed one trimmed.
     - Draft vs baseline (`lib/frontmatterDraft.ts`): the editor keeps the last
       server values it adopted as a baseline. "Dirty" and the PATCH are the
       draft compared field by field with that baseline (text trimmed; FAQ item
