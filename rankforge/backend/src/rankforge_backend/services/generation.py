@@ -859,45 +859,102 @@ def list_versions(db: Database, article_id: UUID) -> list[dict[str, Any]]:
     ]
 
 
+FRONTMATTER_FIELDS = (
+    "title", "meta_title", "meta_description", "category", "summary", "faq",
+)
+
+
 def restore_version(
     db: Database, article_id: UUID, version_id: UUID
 ) -> dict[str, Any] | None:
-    """Restore a prior version. update_article snapshots the current content first,
-    so a restore is itself undoable."""
+    """Restore a prior version's body + frontmatter. update_article snapshots the
+    current state first, so a restore is itself undoable."""
     v = db.fetch_one(
-        "select content_md from public.article_versions "
+        "select content_md, frontmatter from public.article_versions "
         "where id = %s and article_id = %s",
         (version_id, article_id),
     )
     if v is None:
         return None
-    return update_article(db, article_id, {"content_md": v["content_md"]})
+    fields = {
+        "content_md": v["content_md"],
+        **{
+            k: val
+            for k, val in (v.get("frontmatter") or {}).items()
+            if k in FRONTMATTER_FIELDS
+        },
+    }
+    return update_article(db, article_id, fields)
+
+
+def snapshot_version(db: Database, article: dict[str, Any]) -> None:
+    """Record the article's current body + frontmatter as a version (undo point)."""
+    if not article or not article.get("content_md"):
+        return
+    db.execute(
+        "insert into public.article_versions (article_id, content_md, frontmatter) "
+        "values (%s, %s, %s)",
+        (
+            article["id"],
+            article["content_md"],
+            Json({k: article.get(k) for k in FRONTMATTER_FIELDS}),
+        ),
+    )
 
 
 def update_article(
     db: Database, article_id: UUID, fields: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Partial update of editable fields. Snapshots the prior content into
-    article_versions when content_md changes (editorial history)."""
+    """Partial update of editable fields. Snapshots the prior body + frontmatter into
+    article_versions when content_md OR any frontmatter field actually changes
+    (editorial history / undo point)."""
     fields = {k: v for k, v in fields.items() if v is not None}
     if not fields:
         return get_article(db, article_id)
-    if "content_md" in fields:
-        cur = get_article(db, article_id)
-        if cur and cur.get("content_md"):
-            db.execute(
-                "insert into public.article_versions (article_id, content_md) "
-                "values (%s, %s)",
-                (article_id, cur["content_md"]),
-            )
+    cur = get_article(db, article_id)
+    changes_fm = any(
+        k in fields and cur and fields[k] != cur.get(k) for k in FRONTMATTER_FIELDS
+    )
+    if cur and (
+        ("content_md" in fields and fields["content_md"] != cur.get("content_md"))
+        or changes_fm
+    ):
+        snapshot_version(db, cur)
     set_clauses = [f"{k} = %s" for k in fields]
     set_clauses.append("updated_at = now()")
-    params = [*fields.values(), article_id]
+    params = [Json(v) if k == "faq" else v for k, v in fields.items()]
+    params.append(article_id)
     return db.fetch_one(
         f"update public.articles set {', '.join(set_clauses)} "
         f"where id = %s returning {_ARTICLE_COLUMNS}",
         tuple(params),
     )
+
+
+def revert_last(db: Database, article_id: UUID) -> dict[str, Any] | None:
+    """Restore the newest version whose body OR frontmatter differs from now. The
+    current state is versioned first (by update_article), so revert is undoable."""
+    cur = get_article(db, article_id)
+    if cur is None:
+        return None
+    rows = db.fetch_all(
+        "select id, content_md, frontmatter from public.article_versions "
+        "where article_id = %s order by created_at desc limit 20",
+        (article_id,),
+    )
+    for v in rows:
+        fm = {
+            k: val
+            for k, val in (v.get("frontmatter") or {}).items()
+            if k in FRONTMATTER_FIELDS
+        }
+        if v["content_md"] != cur.get("content_md") or any(
+            fm.get(k) != cur.get(k) for k in fm
+        ):
+            return update_article(
+                db, article_id, {"content_md": v["content_md"], **fm}
+            )
+    return None
 
 
 def get_brief(db: Database, brief_id: UUID) -> dict[str, Any] | None:

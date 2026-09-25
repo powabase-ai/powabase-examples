@@ -431,6 +431,50 @@ def restore_version(
     return row
 
 
+async def _rescore_after_revert(
+    pb: PowabaseClient, db: Database, article_id: UUID
+) -> None:
+    try:
+        await quality_svc.reflect(pb, db, article_id)
+        await geo_svc.optimize_and_store(pb, db, article_id)
+        await scoring_svc.score_and_store(pb, db, article_id)
+        final = svc.get_article(db, article_id)
+        if final and final.get("business_id"):
+            await linkcheck_svc.check_article(db, final["business_id"], article_id)
+    except Exception:  # noqa: BLE001 — scores are advisory; the revert already landed
+        log.exception("post-revert rescore failed for %s", article_id)
+    svc._update(db, article_id, generation_status="done", progress={"phase": "done"})
+
+
+@router.post(
+    "/{article_id}/revert",
+    response_model=Article,
+    dependencies=[Depends(rate_limit("article:refine"))],
+)
+async def revert_article(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Undo the last change (body + frontmatter), then re-score in the background."""
+    _guard_article(db, article_id, user)
+    if not svc.try_begin_refine(db, article_id, total=1):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "generation already in progress"
+        )
+    row = svc.revert_last(db, article_id)
+    if row is None:
+        svc._update(
+            db, article_id, generation_status="done", progress={"phase": "done"}
+        )
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "no earlier version to revert to"
+        )
+    spawn(_rescore_after_revert(pb, db, article_id))
+    return svc.get_article(db, article_id)
+
+
 # --- internal links (M6 / Phase 12.1) ---
 def _require_editor(user: CurrentUser) -> None:
     if user.role not in ("editor", "admin"):
