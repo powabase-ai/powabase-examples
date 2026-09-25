@@ -253,7 +253,10 @@ def _update(db: Database, article_id: UUID, **fields: Any) -> None:
     sets, params = [], []
     for k, v in fields.items():
         sets.append(f"{k} = %s")
-        params.append(Json(v) if k in jsonb else v)
+        # None stays SQL NULL (not jsonb 'null') for nullable jsonb (faq), so a
+        # restore can clear it; progress is NOT NULL, so it keeps Json(None).
+        wrap = k in jsonb and not (v is None and k == "faq")
+        params.append(Json(v) if wrap else v)
     sets.append("updated_at = now()")
     params.append(article_id)
     db.execute(
@@ -864,11 +867,31 @@ FRONTMATTER_FIELDS = (
 )
 
 
+def _snapshot_frontmatter(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """The frontmatter keys a version snapshot recorded (None values included)."""
+    return {k: v for k, v in (snapshot or {}).items() if k in FRONTMATTER_FIELDS}
+
+
+def _restore(
+    db: Database,
+    article_id: UUID,
+    cur: dict[str, Any],
+    content_md: str,
+    frontmatter: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Write a version back. Snapshots the current state first (so the restore is
+    itself undoable), then writes every recorded frontmatter key, None included —
+    update_article drops None, which would leave a null summary/meta_title/faq
+    unrestored."""
+    snapshot_version(db, cur)
+    _update(db, article_id, content_md=content_md, **frontmatter)
+    return get_article(db, article_id)
+
+
 def restore_version(
     db: Database, article_id: UUID, version_id: UUID
 ) -> dict[str, Any] | None:
-    """Restore a prior version's body + frontmatter. update_article snapshots the
-    current state first, so a restore is itself undoable."""
+    """Restore a prior version's body + frontmatter (undoable, see _restore)."""
     v = db.fetch_one(
         "select content_md, frontmatter from public.article_versions "
         "where id = %s and article_id = %s",
@@ -876,15 +899,12 @@ def restore_version(
     )
     if v is None:
         return None
-    fields = {
-        "content_md": v["content_md"],
-        **{
-            k: val
-            for k, val in (v.get("frontmatter") or {}).items()
-            if k in FRONTMATTER_FIELDS
-        },
-    }
-    return update_article(db, article_id, fields)
+    cur = get_article(db, article_id)
+    if cur is None:
+        return None
+    return _restore(
+        db, article_id, cur, v["content_md"], _snapshot_frontmatter(v.get("frontmatter"))
+    )
 
 
 def snapshot_version(db: Database, article: dict[str, Any]) -> None:
@@ -932,8 +952,9 @@ def update_article(
 
 
 def revert_last(db: Database, article_id: UUID) -> dict[str, Any] | None:
-    """Restore the newest version whose body OR frontmatter differs from now. The
-    current state is versioned first (by update_article), so revert is undoable."""
+    """Restore the newest version whose body OR frontmatter differs from now; None
+    when no version differs. The current state is versioned first (by _restore),
+    so revert is undoable."""
     cur = get_article(db, article_id)
     if cur is None:
         return None
@@ -943,17 +964,11 @@ def revert_last(db: Database, article_id: UUID) -> dict[str, Any] | None:
         (article_id,),
     )
     for v in rows:
-        fm = {
-            k: val
-            for k, val in (v.get("frontmatter") or {}).items()
-            if k in FRONTMATTER_FIELDS
-        }
+        fm = _snapshot_frontmatter(v.get("frontmatter"))
         if v["content_md"] != cur.get("content_md") or any(
-            fm.get(k) != cur.get(k) for k in fm
+            fm[k] != cur.get(k) for k in fm
         ):
-            return update_article(
-                db, article_id, {"content_md": v["content_md"], **fm}
-            )
+            return _restore(db, article_id, cur, v["content_md"], fm)
     return None
 
 

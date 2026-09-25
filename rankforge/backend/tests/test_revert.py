@@ -45,8 +45,10 @@ def test_revert_restores_latest_differing(monkeypatch):
          "frontmatter": {"summary": "old s", "faq": [{"q": "Q", "a": "A"}]}},
     ]
     called = {}
-    monkeypatch.setattr(g, "update_article",
-                        lambda _db, _id, f: called.setdefault("f", f) or CUR)
+    monkeypatch.setattr(
+        g, "_restore",
+        lambda _db, _id, _cur, md, fm: called.setdefault("f", {"content_md": md, **fm}),
+    )
     g.revert_last(db, "a")
     assert called["f"]["content_md"] == "# T\n\nold"
     assert called["f"]["summary"] == "old s"
@@ -120,3 +122,79 @@ def test_revert_route_releases_claim_when_revert_last_raises(monkeypatch):
 
     assert resp.status_code == 500
     assert any(c.get("generation_status") == "done" for c in update_calls)
+
+
+# --- revert/restore write null frontmatter back (final review Issue 2) ---
+class _Store:
+    """In-memory article + versions, patched in at the generation-service seams
+    (get_article / snapshot_version / _update / db.fetch_all|fetch_one)."""
+
+    def __init__(self, monkeypatch, article, versions):
+        self.article = dict(article)
+        self.versions = list(versions)  # newest first
+        self.db = MagicMock()
+        self.db.fetch_all.side_effect = lambda sql, params: list(self.versions)
+        self.db.fetch_one.side_effect = lambda sql, params: next(
+            (v for v in self.versions if v["id"] == params[0]), None
+        )
+        monkeypatch.setattr(g, "get_article", lambda _db, _id: dict(self.article))
+        monkeypatch.setattr(g, "snapshot_version", self._snapshot)
+        monkeypatch.setattr(g, "_update", self._update)
+
+    def _snapshot(self, _db, art):
+        fm = {k: art.get(k) for k in g.FRONTMATTER_FIELDS}
+        self.versions.insert(0, {"id": f"s{len(self.versions)}",
+                                 "content_md": art["content_md"], "frontmatter": fm})
+
+    def _update(self, _db, _id, **fields):
+        self.article.update(fields)
+
+
+def test_revert_restores_null_summary(monkeypatch):
+    cur = dict(CUR, content_md="# T\n\nbody", summary="hand-written summary")
+    v1 = {"id": "v1", "content_md": "# T\n\nbody",
+          "frontmatter": {k: cur.get(k) for k in g.FRONTMATTER_FIELDS} | {
+              "summary": None}}
+    st = _Store(monkeypatch, cur, [v1])
+    out = g.revert_last(st.db, "a")
+    assert out is not None and out["summary"] is None
+    assert st.article["summary"] is None
+    # The pre-revert state was versioned, so the revert is itself undoable.
+    assert st.versions[0]["frontmatter"]["summary"] == "hand-written summary"
+
+
+def test_second_revert_does_not_reselect_same_version(monkeypatch):
+    cur = dict(CUR, content_md="# T\n\nbody", summary="hand-written summary")
+    v1 = {"id": "v1", "content_md": "# T\n\nbody",
+          "frontmatter": {k: cur.get(k) for k in g.FRONTMATTER_FIELDS} | {
+              "summary": None}}
+    st = _Store(monkeypatch, cur, [v1])
+    g.revert_last(st.db, "a")
+    applied = []
+    real = st._update
+    monkeypatch.setattr(g, "_update",
+                        lambda _db, _id, **f: applied.append(f) or real(_db, _id, **f))
+    g.revert_last(st.db, "a")
+    # v1 now equals the current state; the second revert steps to the snapshot
+    # taken before the first revert (undoing it), not to v1 again.
+    assert applied and applied[0]["summary"] == "hand-written summary"
+
+
+def test_restore_version_writes_null_frontmatter(monkeypatch):
+    cur = dict(CUR, content_md="# T\n\nnow", meta_title="Set later",
+               faq=[{"q": "Q", "a": "A"}])
+    v1 = {"id": "v1", "content_md": "# T\n\nthen",
+          "frontmatter": {k: cur.get(k) for k in g.FRONTMATTER_FIELDS} | {
+              "meta_title": None, "faq": None}}
+    st = _Store(monkeypatch, cur, [v1])
+    out = g.restore_version(st.db, "a", "v1")
+    assert out["content_md"] == "# T\n\nthen"
+    assert out["meta_title"] is None and out["faq"] is None
+    assert st.versions[0]["content_md"] == "# T\n\nnow"  # snapshotted first
+
+
+def test_update_writes_null_faq_as_sql_null():
+    db = MagicMock()
+    g._update(db, "a", faq=None, summary=None)
+    params = db.execute.call_args.args[1]
+    assert params[0] is None and params[1] is None
