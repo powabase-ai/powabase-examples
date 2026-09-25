@@ -234,7 +234,8 @@ def _decide(cur: list[dict], new: list[dict]) -> bool:
 
 
 def _det_scores(
-    md: str, title: str, meta: str | None, brief: dict
+    md: str, title: str, meta: str | None, brief: dict,
+    seo_kwargs: dict | None = None,
 ) -> list[dict]:
     """Cheap deterministic SEO + GEO scores (no LLM) for the commit gate.
 
@@ -242,22 +243,34 @@ def _det_scores(
     loop's LLM editor, not a deterministic tell-count. The commit gate only protects
     the OBJECTIVE axes — so an SEO/GEO-preserving rewrite (whether for SEO fixes or
     for voice) is judged on those, and a good de-AI rewrite can't be vetoed by a
-    tell-counter."""
+    tell-counter. `seo_kwargs` (scoring.seo_kwargs_for) scores SEO with the
+    brand's blog profile, as the stored score does."""
     from . import scoring
 
     return [
-        scoring.score_seo(md, title, meta, brief),
+        scoring.score_seo(md, title, meta, brief, **(seo_kwargs or {})),
         scoring.score_geo(md, brief, None, has_structured_data=True),
     ]
 
 
 def _accept_revision(
-    cur_md: str, new_md: str, title: str, meta: str | None, brief: dict
+    cur_md: str, new_md: str, title: str, meta: str | None, brief: dict,
+    *, db: Database | None = None, article: dict | None = None,
 ) -> bool:
-    """True if `new_md` doesn't regress the objective SEO/GEO axes vs `cur_md`."""
+    """True if `new_md` doesn't regress the objective SEO/GEO axes vs `cur_md`.
+    Given the db and article, both bodies are link-resolved and scored with the
+    brand's profile (so dropping an internal link counts against the rewrite)."""
+    kw = None
+    if db is not None and article and article.get("business_id"):
+        from . import linking, scoring
+
+        kw = scoring.seo_kwargs_for(db, article)
+        bid = article["business_id"]
+        cur_md = linking.resolve_links(db, bid, cur_md)
+        new_md = linking.resolve_links(db, bid, new_md)
     return _decide(
-        _det_scores(cur_md, title, meta, brief),
-        _det_scores(new_md, title, meta, brief),
+        _det_scores(cur_md, title, meta, brief, seo_kwargs=kw),
+        _det_scores(new_md, title, meta, brief, seo_kwargs=kw),
     )
 
 
@@ -699,7 +712,9 @@ async def _editorial_loop(
             # Guard the OBJECTIVE axes only — the editor owns human-ness.
             title = article.get("meta_title") or article.get("title") or ""
             meta = article.get("meta_description")
-            if not _accept_revision(cur_md, new_md, title, meta, brief):
+            if not _accept_revision(
+                cur_md, new_md, title, meta, brief, db=db, article=article
+            ):
                 break
             gen_svc._update(db, article_id, content_md=new_md)
             await quality.reflect(client, db, article_id)

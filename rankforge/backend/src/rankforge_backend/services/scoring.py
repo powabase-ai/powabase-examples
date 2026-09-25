@@ -8,7 +8,7 @@ Score object: { total, target, met, signals: [
 
 import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from ..db import Database
 from ..models.blog import BlogProfile
@@ -116,6 +116,22 @@ def _link_host(url: str) -> str:
     return (urlparse(url).hostname or "").lower().removeprefix("www.")
 
 
+def _norm_url(url: str) -> str:
+    """'host/path' with a lowercased, www-stripped host and no scheme, query or
+    fragment — the form internal-link targets are compared in."""
+    p = urlsplit(url.strip())
+    return f"{(p.hostname or '').lower().removeprefix('www.')}{p.path}"
+
+
+def _is_internal_target(url: str, prefixes: list[str], hub_urls: set[str]) -> bool:
+    """A link to one of the brand's blog articles (under a blog prefix, and not the
+    prefix itself) or exactly to a hub page (trailing slash ignored)."""
+    n = _norm_url(url)
+    if n.rstrip("/") in hub_urls:
+        return True
+    return any(n.startswith(p) and n.rstrip("/") != p.rstrip("/") for p in prefixes)
+
+
 def _signal(key, label, score, weight, explanation, fixes, method="deterministic"):
     return {
         "key": key,
@@ -152,7 +168,13 @@ def score_seo(
     *,
     profile: BlogProfile | None = None,
     internal_hosts: set[str] | None = None,
+    internal_prefixes: list[str] | None = None,
+    internal_urls: set[str] | None = None,
 ) -> dict:
+    """Deterministic SEO score. With a `profile`, adds the internal_links signal:
+    when `internal_prefixes` is given (see seo_brand_kwargs) a link counts if it
+    lands under the brand's blog prefix or on a hub URL; otherwise any link to one
+    of `internal_hosts` counts."""
     text = _clean(content_md)
     words = _words(text)
     wc = len(words)
@@ -282,8 +304,14 @@ def score_seo(
         if n_comp else []))
 
     if profile is not None:
-        hosts = {h.removeprefix("www.") for h in (internal_hosts or set())}
-        n_int = sum(1 for u in links if _link_host(u) in hosts)
+        if internal_prefixes is not None:
+            n_int = sum(
+                1 for u in links
+                if _is_internal_target(u, internal_prefixes, internal_urls or set())
+            )
+        else:
+            hosts = {h.removeprefix("www.") for h in (internal_hosts or set())}
+            n_int = sum(1 for u in links if _link_host(u) in hosts)
         lo, hi = profile.links.min, profile.links.max
         sig.append(_signal(
             "internal_links", "Internal links", _band(n_int, lo, hi, 3), 0.06,
@@ -639,6 +667,45 @@ async def judge_readability(client: PowabaseClient, content_md: str) -> dict | N
         return None
 
 
+def seo_brand_kwargs(brand: dict[str, Any] | None) -> dict[str, Any]:
+    """Every brand-derived score_seo keyword: competitor hosts, the blog profile, and
+    what counts as an internal link — the blog's URL prefix (from url_pattern, up
+    to its first token) plus the hub page URLs. A brand with no url_pattern falls
+    back to counting links to its domain."""
+    from . import blog_rules, linking  # local: linking imports scoring lazily
+
+    dom = linking._bare_host((brand or {}).get("domain") or "")
+    kw: dict[str, Any] = {
+        "competitor_hosts": linking.competitor_hosts(brand),
+        "profile": blog_rules.profile_of(brand),
+        "internal_hosts": {dom} if dom else set(),
+    }
+    pattern = ((brand or {}).get("url_pattern") or "").strip()
+    cut = min((i for i in (pattern.find("{slug}"), pattern.find("{id}")) if i >= 0),
+              default=-1)
+    if cut >= 0:
+        base = pattern[:cut]
+        if "//" not in base:  # relative pattern: the blog lives on the brand domain
+            base = f"https://{dom}{base if base.startswith('/') else '/' + base}"
+        kw["internal_prefixes"] = [_norm_url(base)]
+        kw["internal_urls"] = {
+            _norm_url(h["url"]).rstrip("/") for h in linking.hub_targets(brand)
+        }
+    return kw
+
+
+def seo_kwargs_for(db: Database, article: dict[str, Any]) -> dict[str, Any]:
+    """seo_brand_kwargs for the article's brand (empty kwargs without a brand)."""
+    from . import business_profiles as brands_svc
+
+    brand = (
+        brands_svc.get_profile(db, article["business_id"])
+        if article.get("business_id")
+        else None
+    )
+    return seo_brand_kwargs(brand)
+
+
 def score_seo_for(
     db: Database,
     article: dict[str, Any],
@@ -647,31 +714,21 @@ def score_seo_for(
     brief: dict | None = None,
 ) -> dict:
     """Deterministic SEO score for an article's (link-resolved) body, with every
-    brand-derived input: the blog profile (limits + internal_links signal), the
-    brand domain as the internal host, and competitor hosts. The single entry point
-    for full scoring and the per-link rescores, so they cannot drift apart."""
-    from . import blog_rules, linking  # local: linking imports scoring lazily
-    from . import business_profiles as brands_svc
-
+    brand-derived input (seo_brand_kwargs): the blog profile (limits and the
+    internal_links signal), the internal-link targets, and competitor hosts. The
+    entry point for full scoring and the per-link rescores; the revise commit gate
+    uses the same kwargs, so none of them drift apart."""
     if brief is None:
         brief = (
             brief_svc.get_brief(db, article["brief_id"])
             if article.get("brief_id") else {}
         ) or {}
-    brand = (
-        brands_svc.get_profile(db, article["business_id"])
-        if article.get("business_id")
-        else None
-    )
-    dom = linking._bare_host((brand or {}).get("domain") or "")
     return score_seo(
         resolved_md,
         article.get("meta_title") or article.get("title") or "",
         article.get("meta_description"),
         brief,
-        competitor_hosts=linking.competitor_hosts(brand),
-        profile=blog_rules.profile_of(brand),
-        internal_hosts={dom} if dom else set(),
+        **seo_kwargs_for(db, article),
     )
 
 
