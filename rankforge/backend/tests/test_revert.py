@@ -198,3 +198,163 @@ def test_update_writes_null_faq_as_sql_null():
     g._update(db, "a", faq=None, summary=None)
     params = db.execute.call_args.args[1]
     assert params[0] is None and params[1] is None
+
+
+# --- review r1 test gaps: snapshot payload, newest-first revert, route claims ---
+def test_snapshot_version_records_frontmatter_payload():
+    db = MagicMock()
+    art = dict(CUR, faq=[{"q": "Q", "a": "A"}], extra="not recorded")
+    g.snapshot_version(db, art)
+    sql, params = db.execute.call_args.args
+    assert "insert into public.article_versions" in sql
+    assert params[0] == "a" and params[1] == CUR["content_md"]
+    assert isinstance(params[2], Json)
+    assert params[2].obj == {k: art.get(k) for k in g.FRONTMATTER_FIELDS}
+
+
+def _revert_pick(monkeypatch, rows):
+    db = MagicMock()
+    monkeypatch.setattr(g, "get_article", lambda _db, _id: dict(CUR))
+    db.fetch_all.return_value = rows
+    picked = {}
+    monkeypatch.setattr(
+        g, "_restore",
+        lambda _db, _id, _cur, md, fm: picked.setdefault("md", md),
+    )
+    g.revert_last(db, "a")
+    return db, picked.get("md")
+
+
+def test_revert_queries_newest_first(monkeypatch):
+    db, _ = _revert_pick(monkeypatch, [])
+    sql = " ".join(db.fetch_all.call_args.args[0].lower().split())
+    assert "order by created_at desc" in sql and "limit 20" in sql
+
+
+def test_revert_picks_older_row_when_only_it_differs(monkeypatch):
+    rows = [{"id": "v2", "content_md": CUR["content_md"], "frontmatter": None},
+            {"id": "v1", "content_md": "# T\n\nolder", "frontmatter": None}]
+    assert _revert_pick(monkeypatch, rows)[1] == "# T\n\nolder"
+
+
+def test_revert_picks_newest_when_both_differ(monkeypatch):
+    rows = [{"id": "v2", "content_md": "# T\n\nnewer", "frontmatter": None},
+            {"id": "v1", "content_md": "# T\n\nolder", "frontmatter": None}]
+    assert _revert_pick(monkeypatch, rows)[1] == "# T\n\nnewer"
+
+
+def test_revert_route_releases_claim_on_404(monkeypatch):
+    monkeypatch.setattr(
+        g, "get_article", lambda db, aid: dict(CUR, id=AID, business_id=BID)
+    )
+    monkeypatch.setattr(g, "try_begin_refine", lambda db, aid, total: True)
+    monkeypatch.setattr(g, "revert_last", lambda db, aid: None)
+    updates: list = []
+    monkeypatch.setattr(g, "_update", lambda db, aid, **f: updates.append(f))
+    resp = _client(_brand_db()).post(f"/api/articles/{AID}/revert")
+    assert resp.status_code == 404
+    assert updates and updates[-1]["generation_status"] == "done"
+
+
+async def test_revert_rescore_releases_claim_even_when_rescore_fails(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from rankforge_backend.routes import articles as art_routes
+
+    monkeypatch.setattr(art_routes.quality_svc, "reflect",
+                        AsyncMock(side_effect=RuntimeError("down")))
+    updates: list = []
+    monkeypatch.setattr(g, "_update", lambda db, aid, **f: updates.append(f))
+    await art_routes._rescore_after_revert(MagicMock(), MagicMock(), AID)
+    assert updates[-1]["generation_status"] == "done"
+
+
+async def test_revert_rescore_releases_claim_after_success(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from rankforge_backend.routes import articles as art_routes
+
+    for mod, name in ((art_routes.quality_svc, "reflect"),
+                      (art_routes.geo_svc, "optimize_and_store"),
+                      (art_routes.scoring_svc, "score_and_store"),
+                      (art_routes.linkcheck_svc, "check_article")):
+        monkeypatch.setattr(mod, name, AsyncMock())
+    monkeypatch.setattr(g, "get_article",
+                        lambda db, aid: dict(CUR, id=AID, business_id=BID))
+    updates: list = []
+    monkeypatch.setattr(g, "_update", lambda db, aid, **f: updates.append(f))
+    await art_routes._rescore_after_revert(MagicMock(), MagicMock(), AID)
+    art_routes.scoring_svc.score_and_store.assert_awaited_once()
+    assert updates[-1]["generation_status"] == "done"
+
+
+def test_revert_route_cross_org_404_never_claims(monkeypatch):
+    monkeypatch.setattr(
+        g, "get_article", lambda db, aid: dict(CUR, id=AID, business_id=BID)
+    )
+    claims: list = []
+    monkeypatch.setattr(g, "try_begin_refine",
+                        lambda db, aid, total: claims.append(aid) or True)
+    reverts: list = []
+    monkeypatch.setattr(g, "revert_last", lambda db, aid: reverts.append(aid))
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": UUID("00000000-0000-0000-0000-0000000000ff")}
+    resp = _client(db).post(f"/api/articles/{AID}/revert")
+    assert resp.status_code == 404
+    assert claims == [] and reverts == []
+
+
+# --- review r1 I3: nullable frontmatter can be cleared; omitted fields are kept ---
+def test_update_article_writes_explicit_null_summary(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(g, "get_article", lambda _db, _id: dict(CUR))
+    g.update_article(db, "a", {"summary": None, "category": None})
+    sql, params = db.fetch_one.call_args.args
+    assert "summary = %s" in sql and "category = %s" in sql
+    assert params[0] is None and params[1] is None
+
+
+def test_update_article_clears_faq_as_sql_null(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(g, "get_article",
+                        lambda _db, _id: dict(CUR, faq=[{"q": "Q", "a": "A"}]))
+    g.update_article(db, "a", {"faq": None, "meta_title": None})
+    sql, params = db.fetch_one.call_args.args
+    assert "faq = %s" in sql and "meta_title = %s" in sql
+    assert params[0] is None and params[1] is None  # SQL NULL, not Json(None)
+
+
+def test_update_article_still_ignores_null_title(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(g, "get_article", lambda _db, _id: dict(CUR))
+    g.update_article(db, "a", {"title": None, "summary": "kept"})
+    sql = db.fetch_one.call_args.args[0]
+    assert "title = %s" not in sql.replace("meta_title", "")
+
+
+def _patch_route(monkeypatch, body):
+    seen = {}
+
+    def _upd(db, aid, fields):
+        seen["fields"] = fields
+        return dict(CUR, id=AID, business_id=BID, status="draft",
+                    generation_status="done", created_at="2026-09-25T00:00:00Z",
+                    updated_at="2026-09-25T00:00:00Z")
+
+    monkeypatch.setattr(
+        g, "get_article",
+        lambda db, aid: dict(CUR, id=AID, business_id=BID, status="draft"),
+    )
+    monkeypatch.setattr(g, "update_article", _upd)
+    resp = _client(_brand_db()).patch(f"/api/articles/{AID}", json=body)
+    assert resp.status_code == 200
+    return seen["fields"]
+
+
+def test_patch_null_summary_clears_it(monkeypatch):
+    assert _patch_route(monkeypatch, {"summary": None}) == {"summary": None}
+
+
+def test_patch_omitted_summary_is_left_alone(monkeypatch):
+    fields = _patch_route(monkeypatch, {"category": "rag"})
+    assert fields == {"category": "rag"}

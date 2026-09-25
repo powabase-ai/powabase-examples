@@ -729,6 +729,11 @@ async def run_generation_task(
         content_md = _linking.strip_competitor_links(
             content_md, _linking.competitor_hosts(brand_profile)
         )
+        # A retry re-drafts over whatever the article holds; version a non-empty body
+        # first so hand edits and earlier refines stay revertable.
+        prior = get_article(db, article_id)
+        if prior and (prior.get("content_md") or "").strip():
+            snapshot_version(db, prior)
         _update(
             db, article_id,
             content_md=content_md,
@@ -736,13 +741,17 @@ async def run_generation_task(
             progress={"phase": "scoring", "total": 1, "done": 1},
         )
 
+        frontmatter_flags: list[str] = []
         if profile:
             from . import frontmatter
 
             try:
-                await frontmatter.complete(client, db, article_id)
+                frontmatter_flags = await frontmatter.complete(client, db, article_id)
             except Exception:  # noqa: BLE001 — never block generation; export checks it
                 log.exception("frontmatter step failed for %s", article_id)
+                frontmatter_flags = ["the frontmatter step failed; run it again"]
+            if frontmatter_flags:
+                log.info("frontmatter flags for %s: %s", article_id, frontmatter_flags)
 
         # 6) reflect/fact-check, GEO optimize (JSON-LD), then SEO + GEO scoring
         #    (local import avoids a circular dependency)
@@ -774,7 +783,9 @@ async def run_generation_task(
             db, article_id,
             generation_status="done",
             progress={"phase": "done", "total": 1, "done": 1,
-                      "word_count": len(final_md.split())},
+                      "word_count": len(final_md.split()),
+                      **({"frontmatter_flags": frontmatter_flags}
+                         if frontmatter_flags else {})},
         )
     except Exception:  # noqa: BLE001
         log.exception("article generation failed for %s", article_id)
@@ -881,8 +892,8 @@ def _restore(
 ) -> dict[str, Any] | None:
     """Write a version back. Snapshots the current state first (so the restore is
     itself undoable), then writes every recorded frontmatter key, None included —
-    update_article drops None, which would leave a null summary/meta_title/faq
-    unrestored."""
+    via _update, because update_article ignores None for title/meta_description,
+    which a version may also record."""
     snapshot_version(db, cur)
     _update(db, article_id, content_md=content_md, **frontmatter)
     return get_article(db, article_id)
@@ -922,13 +933,22 @@ def snapshot_version(db: Database, article: dict[str, Any]) -> None:
     )
 
 
+# Frontmatter the editor may clear: an explicit None in `fields` writes NULL.
+CLEARABLE_FIELDS = frozenset({"category", "summary", "faq", "meta_title"})
+
+
 def update_article(
     db: Database, article_id: UUID, fields: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Partial update of editable fields. Snapshots the prior body + frontmatter into
-    article_versions when content_md OR any frontmatter field actually changes
-    (editorial history / undo point)."""
-    fields = {k: v for k, v in fields.items() if v is not None}
+    """Partial update of editable fields. `fields` holds only what the caller set
+    (PATCH passes `model_dump(exclude_unset=True)`): a key that is absent is left
+    alone, and an explicit None clears a CLEARABLE_FIELDS value (other fields ignore
+    None). Snapshots the prior body + frontmatter into article_versions when
+    content_md OR any frontmatter field actually changes (editorial history / undo
+    point)."""
+    fields = {
+        k: v for k, v in fields.items() if v is not None or k in CLEARABLE_FIELDS
+    }
     if not fields:
         return get_article(db, article_id)
     cur = get_article(db, article_id)
@@ -942,7 +962,10 @@ def update_article(
         snapshot_version(db, cur)
     set_clauses = [f"{k} = %s" for k in fields]
     set_clauses.append("updated_at = now()")
-    params = [Json(v) if k == "faq" else v for k, v in fields.items()]
+    # A cleared faq is SQL NULL, not jsonb 'null'.
+    params = [
+        Json(v) if k == "faq" and v is not None else v for k, v in fields.items()
+    ]
     params.append(article_id)
     return db.fetch_one(
         f"update public.articles set {', '.join(set_clauses)} "
@@ -954,7 +977,9 @@ def update_article(
 def revert_last(db: Database, article_id: UUID) -> dict[str, Any] | None:
     """Restore the newest version whose body OR frontmatter differs from now; None
     when no version differs. The current state is versioned first (by _restore),
-    so revert is undoable."""
+    so revert is undoable — and a second revert re-applies the change (it toggles:
+    the newest differing version is then the snapshot the first revert took). Only
+    the latest 20 versions are scanned; an older differing one is not reached."""
     cur = get_article(db, article_id)
     if cur is None:
         return None

@@ -112,6 +112,14 @@ class ArticleVersion(BaseModel):
     word_count: int | None = None
 
 
+class FrontmatterResult(BaseModel):
+    """POST /api/articles/{id}/frontmatter: the article after the fix, plus the
+    export issues still open (`blog_rules.export_issues`; [] = exportable)."""
+
+    article: Article
+    export_issues: list[str]
+
+
 class RemoveLinkResult(BaseModel):
     """Result of a one-click broken-link removal. `repaired` tells the UI HOW the prose
     was mended, so a mechanical strip can be flagged for a human to eyeball:

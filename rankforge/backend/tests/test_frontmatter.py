@@ -143,3 +143,189 @@ async def test_complete_strips_body_faq(monkeypatch):
     state, _ = await _run_complete(monkeypatch, {**ART, "content_md": body})
     assert "Frequently asked" not in state["art"]["content_md"]
     assert "## Intro" in state["art"]["content_md"]
+
+
+# --- review r1 C2: a bad retry / unparseable reply never overwrites good values ---
+def _raw_client(*contents):
+    c = MagicMock()
+    c.run_agent = AsyncMock(side_effect=[{"content": x} for x in contents])
+    return c
+
+
+def _written(upd) -> dict:
+    return {k: v for c in upd.call_args_list for k, v in c.kwargs.items()}
+
+
+async def test_generate_unparseable_reply_is_a_failed_attempt_not_a_500(deps):
+    c = _raw_client("not json at all", json.dumps(GOOD))
+    flags = await fm.generate(c, MagicMock(), "a")
+    assert flags == [] and c.run_agent.await_count == 2
+    assert _written(deps)["summary"] == S45
+
+
+async def test_generate_unparseable_twice_writes_nothing(deps):
+    flags = await fm.generate(_raw_client("nope", "still nope"), MagicMock(), "a")
+    assert any("not valid JSON" in f for f in flags)
+    assert "summary" not in _written(deps) and "faq" not in _written(deps)
+
+
+async def test_generate_keeps_the_better_first_attempt(deps):
+    first = {**GOOD, "summary": "too short"}  # 1 flag
+    flags = await fm.generate(_client(first, {}), MagicMock(), "a")  # retry: 2 flags
+    w = _written(deps)
+    assert flags == ["summary is 2 words (needs 40-60)"]
+    assert len(w["faq"]) == 4  # the first attempt's valid FAQ is kept
+    assert "summary" not in w  # an out-of-bounds summary is never written
+
+
+async def test_generate_first_attempt_wins_ties(deps):
+    first = {**GOOD, "summary": "too short"}
+    second = {**GOOD, "faq": [{"q": "only?", "a": "one"}], "category": "rag"}
+    await fm.generate(_client(first, second), MagicMock(), "a")
+    w = _written(deps)
+    assert w["category"] == "agents" and len(w["faq"]) == 4
+
+
+async def test_generate_empty_reply_never_clears_stored_values(monkeypatch):
+    stored = {**ART, "summary": S45, "faq": GOOD["faq"], "category": None}
+    monkeypatch.setattr(fm.gen_svc, "get_article", lambda d, a: dict(stored))
+    monkeypatch.setattr(fm.brands, "get_profile", lambda d, b: BRAND)
+    monkeypatch.setattr(fm, "ensure_agent", AsyncMock(return_value="agent"))
+    upd = MagicMock()
+    monkeypatch.setattr(fm.gen_svc, "_update", upd)
+    await fm.generate(_client({}, {}), MagicMock(), "a")
+    w = _written(upd)
+    assert "summary" not in w and "faq" not in w
+
+
+async def test_complete_regenerates_only_failing_fields(monkeypatch):
+    art = {**ART, "summary": S45, "faq": GOOD["faq"], "category": None}
+    c = _client({"category": "rag", "summary": "x", "faq": []})
+    state, calls = await _run_complete_with(monkeypatch, art, c)
+    assert state["art"]["summary"] == S45 and state["art"]["faq"] == GOOD["faq"]
+    assert state["art"]["category"] == "rag"
+    assert ("update", ["category"]) in calls
+
+
+async def test_complete_noop_when_everything_passes(monkeypatch):
+    art = {**ART, "summary": S45, "faq": GOOD["faq"], "category": "rag"}
+    c = _client()
+    state, calls = await _run_complete_with(monkeypatch, art, c)
+    assert calls == []  # no snapshot, no write
+    c.run_agent.assert_not_called()
+
+
+async def test_complete_long_title_fixes_meta_only(monkeypatch):
+    art = {**ART, "title": "t" * 80, "summary": S45, "faq": GOOD["faq"],
+           "category": "rag"}
+    c = _client()
+    state, calls = await _run_complete_with(monkeypatch, art, c)
+    c.run_agent.assert_not_called()  # summary/FAQ are not regenerated
+    assert calls[0][0] == "snapshot" and ("update", ["meta_title"]) in calls
+
+
+async def test_complete_no_snapshot_when_the_model_writes_nothing(monkeypatch):
+    art = {**ART, "summary": S45, "faq": [{"q": "Q?", "a": "A."}], "category": "rag"}
+    c = _raw_client("nope", "nope")
+    state, calls = await _run_complete_with(monkeypatch, art, c)
+    assert calls == []
+
+
+async def test_complete_returns_flags(monkeypatch):
+    art = {**ART, "summary": None, "faq": GOOD["faq"], "category": "rag"}
+    monkeypatch.setattr(fm.gen_svc, "get_article", lambda d, a: dict(art))
+    monkeypatch.setattr(fm.brands, "get_profile", lambda d, b: BRAND)
+    monkeypatch.setattr(fm, "ensure_agent", AsyncMock(return_value="agent"))
+    monkeypatch.setattr(fm.gen_svc, "_update", MagicMock())
+    monkeypatch.setattr(fm.gen_svc, "snapshot_version", MagicMock())
+    c = _client({"summary": "short"}, {"summary": "short"})
+    assert await fm.complete(c, MagicMock(), "a") == [
+        "summary is 1 words (needs 40-60)"
+    ]
+
+
+async def _run_complete_with(monkeypatch, art, client):
+    state = {"art": dict(art)}
+    calls: list = []
+    monkeypatch.setattr(fm.gen_svc, "get_article", lambda d, a: dict(state["art"]))
+    monkeypatch.setattr(fm.brands, "get_profile", lambda d, b: BRAND)
+    monkeypatch.setattr(fm, "ensure_agent", AsyncMock(return_value="agent"))
+
+    def _upd(d, a, **f):
+        calls.append(("update", sorted(f)))
+        state["art"].update(f)
+
+    monkeypatch.setattr(fm.gen_svc, "_update", _upd)
+    monkeypatch.setattr(
+        fm.gen_svc, "snapshot_version",
+        lambda d, article: calls.append(("snapshot", article.get("summary"))),
+    )
+    from rankforge_backend.services import revise
+
+    async def _fix_meta(client, db, aid, article, brief, *, before_write=None, **k):
+        if before_write:
+            before_write()
+        _upd(db, aid, meta_title="New meta")
+
+    monkeypatch.setattr(revise, "fix_meta", _fix_meta)
+    await fm.complete(client, MagicMock(), "a")
+    return state, calls
+
+
+# --- review r1 I4 / K1: POST /frontmatter returns the remaining export issues and
+# claims the article for the duration of the fix ---
+def _fm_route(monkeypatch, art, *, claim=True, complete=None):
+    from rankforge_backend.services import generation as g
+
+    state = {"art": {"status": "draft", "generation_status": "done",
+                     "created_at": "2026-09-25T00:00:00Z",
+                     "updated_at": "2026-09-25T00:00:00Z",
+                     **art, "id": AID, "business_id": BID}}
+    updates: list = []
+    monkeypatch.setattr(g, "get_article", lambda d, a: dict(state["art"]))
+    monkeypatch.setattr(brands_svc, "get_profile", lambda d, b: BRAND)
+    monkeypatch.setattr(g, "try_begin_refine", lambda d, a, total: claim)
+    monkeypatch.setattr(g, "_update", lambda d, a, **f: updates.append(f))
+    monkeypatch.setattr(fm, "complete", complete or AsyncMock(return_value=[]))
+    db = MagicMock()
+    db.fetch_one.return_value = {"org_id": UUID(ADMIN_ORG)}
+    return _route_client(db), updates
+
+
+def test_frontmatter_route_returns_remaining_export_issues(monkeypatch):
+    art = {**ART, "title": "T", "summary": S45, "faq": GOOD["faq"], "category": None,
+           "generation_status": "done"}
+    client, updates = _fm_route(monkeypatch, art)
+    resp = client.post(f"/api/articles/{AID}/frontmatter")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["article"]["id"] == AID
+    assert body["export_issues"] == ["category is missing"]
+    assert updates[-1]["generation_status"] == "done"  # claim released
+
+
+def test_frontmatter_route_409_when_busy(monkeypatch):
+    complete = AsyncMock()
+    client, updates = _fm_route(monkeypatch, ART, claim=False, complete=complete)
+    assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 409
+    complete.assert_not_awaited()
+    assert updates == []
+
+
+def test_frontmatter_route_releases_claim_when_complete_raises(monkeypatch):
+    client, updates = _fm_route(
+        monkeypatch, {**ART, "generation_status": "done"},
+        complete=AsyncMock(side_effect=RuntimeError("boom")),
+    )
+    client = TestClient(client.app, raise_server_exceptions=False)
+    assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 500
+    assert updates and updates[-1]["generation_status"] == "done"
+
+
+def test_frontmatter_route_keeps_a_failed_article_failed(monkeypatch):
+    client, updates = _fm_route(
+        monkeypatch, {**ART, "generation_status": "failed",
+                      "progress": {"phase": "failed"}},
+    )
+    assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 200
+    assert updates[-1]["generation_status"] == "failed"
