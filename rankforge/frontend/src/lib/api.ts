@@ -18,6 +18,28 @@ export class ApiError extends Error {
   }
 }
 
+/** A 422 whose `detail.export_issues` is set — export/publish is blocked until
+ *  the listed issues are fixed. Thrown by `request()` and `exportArticle()`. */
+export class ExportBlockedError extends ApiError {
+  issues: string[];
+  constructor(issues: string[]) {
+    super(422, `Fix before exporting: ${issues.join("; ")}`);
+    this.name = "ExportBlockedError";
+    this.issues = issues;
+  }
+}
+
+/** Pull `detail.export_issues` out of a parsed error body, if present. Kept as a
+ *  narrow type guard (rather than `any`) so a malformed/unexpected body just
+ *  falls through to the generic ApiError path instead of throwing here. */
+function exportIssuesFrom(body: unknown): string[] | null {
+  if (!body || typeof body !== "object") return null;
+  const detail = (body as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object") return null;
+  const issues = (detail as { export_issues?: unknown }).export_issues;
+  return Array.isArray(issues) ? (issues as string[]) : null;
+}
+
 /** Turn a backend error into a user-facing message. The expensive AI routes can
  * now return 429 (rate limited) and 409 (a generation/refine already running);
  * surface those gracefully instead of a raw "API 429: ..." string. */
@@ -36,6 +58,39 @@ export interface Competitor {
   domain: string;
 }
 
+// --- Blog profile (per-brand export/frontmatter rules) ---
+export interface BlogCategory {
+  key: string;
+  label: string;
+  description: string;
+  technical: boolean;
+}
+
+export interface HubPage {
+  path: string;
+  title: string;
+  topics: string[];
+}
+
+export interface FaqItem {
+  q: string;
+  a: string;
+}
+
+export interface BlogProfile {
+  categories: BlogCategory[];
+  summary: { enabled: boolean; min_words: number; max_words: number };
+  faq: { enabled: boolean; min: number; max: number };
+  meta: { title_max: number; description_max: number };
+  links: {
+    min: number;
+    max: number;
+    trailing_slash: boolean;
+    hub_pages: HubPage[];
+  };
+  stance: "neutral" | "favor_brand";
+}
+
 export interface BusinessProfile {
   id: string;
   name: string;
@@ -51,6 +106,7 @@ export interface BusinessProfile {
   url_pattern?: string | null;
   default_author?: string | null;
   logo_url?: string | null;
+  blog_profile?: BlogProfile | null;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
@@ -70,6 +126,7 @@ export interface BusinessProfileInput {
   url_pattern?: string | null;
   default_author?: string | null;
   logo_url?: string | null;
+  blog_profile?: BlogProfile | null;
 }
 
 async function request<T>(
@@ -95,12 +152,17 @@ async function request<T>(
   }
   if (!res.ok) {
     let detail = `${res.status}`;
+    let body: unknown = null;
     try {
-      const body = await res.json();
-      detail = body.detail ?? JSON.stringify(body);
+      body = await res.json();
+      const bodyDetail = (body as { detail?: unknown } | null)?.detail;
+      detail =
+        typeof bodyDetail === "string" ? bodyDetail : JSON.stringify(body);
     } catch {
       /* ignore */
     }
+    const exportIssues = res.status === 422 ? exportIssuesFrom(body) : null;
+    if (exportIssues) throw new ExportBlockedError(exportIssues);
     throw new ApiError(res.status, friendlyMessage(res.status, detail));
   }
   if (res.status === 204) return undefined as T;
@@ -554,6 +616,9 @@ export interface Article extends ArticleSummary {
   og_image_url?: string | null;
   cluster_id?: string | null;
   cluster_role?: "pillar" | "member" | null;
+  category?: string | null;
+  summary?: string | null;
+  faq?: FaqItem[] | null;
   created_at: string;
 }
 
@@ -630,11 +695,26 @@ export const articlesApi = {
     request<Article>(`/api/articles/${id}/score`, { method: "POST" }),
   optimize: (id: string) =>
     request<Article>(`/api/articles/${id}/optimize`, { method: "POST" }),
-  refine: (id: string, targets?: string[]) =>
+  refine: (
+    id: string,
+    opts: {
+      targets?: string[];
+      instructions?: string;
+      mode?: "refine" | "rework";
+    } = {}
+  ) =>
     request<Article>(`/api/articles/${id}/refine`, {
       method: "POST",
-      body: JSON.stringify({ targets: targets ?? null }),
+      body: JSON.stringify({
+        targets: opts.targets ?? null,
+        instructions: opts.instructions ?? null,
+        mode: opts.instructions ? opts.mode ?? "refine" : null,
+      }),
     }),
+  revert: (id: string) =>
+    request<Article>(`/api/articles/${id}/revert`, { method: "POST" }),
+  generateFrontmatter: (id: string) =>
+    request<Article>(`/api/articles/${id}/frontmatter`, { method: "POST" }),
   retry: (id: string) =>
     request<Article>(`/api/articles/${id}/retry`, { method: "POST" }),
   update: (id: string, data: ArticleUpdate) =>
@@ -774,7 +854,30 @@ export const relinkApi = {
       `/api/business-profiles/${businessId}/relink/run`,
       { method: "POST" }
     ),
+  patchNotes: (businessId: string) => fetchRelinkPatchNotes(businessId),
 };
+
+/** Fetch the relink scout's latest patch notes as markdown text. Mirrors
+ *  exportArticle's Bearer auth + 401→refresh→retry. */
+async function fetchRelinkPatchNotes(
+  businessId: string,
+  retry = false
+): Promise<string> {
+  const token = getAccessToken();
+  const res = await fetch(
+    `${API_BASE_URL}/api/business-profiles/${businessId}/relink/patch-notes`,
+    {
+      cache: "no-store",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }
+  );
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return fetchRelinkPatchNotes(businessId, true);
+  }
+  if (!res.ok) throw new ApiError(res.status, `Patch notes failed (${res.status})`);
+  return res.text();
+}
 
 // --- Auth / membership ---
 export type Role = "writer" | "editor" | "admin";
@@ -1000,6 +1103,7 @@ export interface ContentCluster {
   pillar_locked: boolean;
   pillar_title?: string | null;
   member_count: number;
+  category?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -1017,9 +1121,12 @@ export const clustersApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  // Edit a cluster's label/theme. An empty-string theme clears it; omit a field to
-  // leave it unchanged. The server re-indexes the cluster on a change.
-  update: (clusterId: string, data: { label?: string; theme?: string }) =>
+  // Edit a cluster's label/theme/category. An empty-string theme clears it; omit
+  // a field to leave it unchanged. The server re-indexes the cluster on a change.
+  update: (
+    clusterId: string,
+    data: { label?: string; theme?: string; category?: string | null }
+  ) =>
     request<ContentCluster>(`/api/clusters/${clusterId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
@@ -1098,7 +1205,17 @@ export async function exportArticle(
     const ns = await refresh();
     if (ns) return exportArticle(id, format, true);
   }
-  if (!res.ok) throw new ApiError(res.status, `Export failed (${res.status})`);
+  if (!res.ok) {
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      /* ignore */
+    }
+    const exportIssues = res.status === 422 ? exportIssuesFrom(body) : null;
+    if (exportIssues) throw new ExportBlockedError(exportIssues);
+    throw new ApiError(res.status, `Export failed (${res.status})`);
+  }
   return res.text();
 }
 
@@ -1110,6 +1227,9 @@ export interface ArticleUpdate {
   status?: string;
   canonical_url?: string;
   author?: string;
+  category?: string | null;
+  summary?: string | null;
+  faq?: FaqItem[] | null;
 }
 
 // --- Brief (Stage B) ---

@@ -110,13 +110,41 @@ export function useOptimizeArticle(id: string) {
 export function useRefineArticle(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (targets?: string[]) => articlesApi.refine(id, targets),
+    mutationFn: (
+      opts?: {
+        targets?: string[];
+        instructions?: string;
+        mode?: "refine" | "rework";
+      }
+    ) => articlesApi.refine(id, opts),
     onSuccess: (data) => {
       qc.setQueryData(["article", id], data);
       // Refine rewrites the body and re-validates links but doesn't move
       // generation_status off "done" — so refresh the broken-link findings
       // (and the ⚠ Links badge) explicitly here.
       qc.invalidateQueries({ queryKey: ["link-health", id] });
+    },
+  });
+}
+
+export function useRevertArticle(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => articlesApi.revert(id),
+    onSuccess: (data) => {
+      qc.setQueryData(["article", id], data);
+      qc.invalidateQueries({ queryKey: ["versions", id] });
+    },
+  });
+}
+
+export function useGenerateFrontmatter(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => articlesApi.generateFrontmatter(id),
+    onSuccess: (data) => {
+      qc.setQueryData(["article", id], data);
+      qc.invalidateQueries({ queryKey: ["versions", id] });
     },
   });
 }

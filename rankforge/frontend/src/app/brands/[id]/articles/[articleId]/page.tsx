@@ -689,7 +689,7 @@ export default function ArticleView({
                   className="w-full"
                   onClick={() => {
                     const targets = Array.from(refineTargets);
-                    refine.mutate(targets, {
+                    refine.mutate({ targets }, {
                       onSuccess: () => {
                         toast.success(
                           `Refining ${targets.length} selected issue${

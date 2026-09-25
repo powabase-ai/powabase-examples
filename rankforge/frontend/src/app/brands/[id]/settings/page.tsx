@@ -17,6 +17,7 @@ import {
   formToPayload,
   type BrandFormState,
 } from "@/components/brand/BrandFields";
+import { BlogProfileForm } from "@/components/brand/BlogProfileForm";
 import {
   useBrands,
   useCreateBrand,
@@ -24,7 +25,7 @@ import {
   useUpdateBrand,
   useUploadBrandLogo,
 } from "@/lib/hooks/useBrands";
-import type { BusinessProfile, BusinessProfileInput } from "@/lib/api";
+import type { BlogProfile, BusinessProfile, BusinessProfileInput } from "@/lib/api";
 
 export default function BrandSettings({
   params,
@@ -40,10 +41,14 @@ export default function BrandSettings({
   const createBrand = useCreateBrand();
 
   const [form, setForm] = React.useState<BrandFormState>(emptyBrandForm());
+  const [bp, setBp] = React.useState<BlogProfile | null>(null);
   const [newOpen, setNewOpen] = React.useState(false);
 
   React.useEffect(() => {
-    if (brand) setForm(brandToForm(brand));
+    if (brand) {
+      setForm(brandToForm(brand));
+      setBp(brand.blog_profile ?? null);
+    }
   }, [brand]);
 
   async function save(e: React.FormEvent) {
@@ -51,6 +56,18 @@ export default function BrandSettings({
     try {
       await updateBrand.mutateAsync({ id, data: formToPayload(form) });
       toast.success("Saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Save failed");
+    }
+  }
+
+  async function saveBlogProfile() {
+    try {
+      await updateBrand.mutateAsync({
+        id,
+        data: { blog_profile: bp } as BusinessProfileInput,
+      });
+      toast.success("Blog profile saved");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Save failed");
     }
@@ -107,6 +124,25 @@ export default function BrandSettings({
               </Button>
             </div>
           </form>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-6">
+        <CardHeader>
+          <CardTitle className="text-base">Blog profile</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <BlogProfileForm value={bp} onChange={setBp} />
+          <div className="flex justify-end">
+            <Button
+              type="button"
+              variant="gold"
+              onClick={saveBlogProfile}
+              disabled={updateBrand.isPending}
+            >
+              {updateBrand.isPending ? "Saving…" : "Save blog profile"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
