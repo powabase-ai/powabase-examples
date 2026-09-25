@@ -36,10 +36,12 @@ def test_seed_profile_validates():
     """Seed profile must be valid BlogProfile."""
     import importlib.util
     import sys
+    from pathlib import Path
 
+    seed_path = Path(__file__).resolve().parents[1] / "scripts" / "seed_powabase_blog_profile.py"
     spec = importlib.util.spec_from_file_location(
         "seed_powabase_blog_profile",
-        "/home/zipeng/worktrees/rankforge-blog-profile/rankforge/backend/scripts/seed_powabase_blog_profile.py"
+        seed_path,
     )
     seed = importlib.util.module_from_spec(spec)
     sys.modules["seed_powabase_blog_profile"] = seed
