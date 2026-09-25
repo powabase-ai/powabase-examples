@@ -4,8 +4,11 @@
  *  `BusinessProfile.blog_profile` is `unknown` and every read goes through
  *  `asBlogProfile`. It mirrors the backend model's shape rules: a missing section
  *  takes its default, while an unknown key or a wrongly typed value makes the whole
- *  profile invalid (null). Numeric ranges and the category-key pattern are left to
- *  the server's validation on save. Type-only imports keep this module free of
+ *  profile invalid (null). Hub pages also follow the backend's HubPage rules (a
+ *  same-site path without whitespace, control characters or backslashes; a title;
+ *  1-10 topics of 4-80 characters), since a stored profile breaking them makes
+ *  generation refuse with 409. Numeric ranges and the category-key pattern are
+ *  left to the server's validation on save. Type-only imports keep this module free of
  *  runtime dependencies. */
 import type { BlogCategory, BlogProfile, HubPage } from "@/lib/api";
 
@@ -69,9 +72,33 @@ const BLANK_HUB: HubPage = { path: "/", title: "", topics: [] };
 const CATEGORY_SPEC: Record<keyof BlogCategory, Check> = {
   key: isStr, label: isStr, description: isStr, technical: isBool,
 };
+/** Python's `str.isspace()` (the backend's check): JS `\s` plus NEL, minus BOM. */
+const isPySpace = (c: string) => (/\s/.test(c) && c !== "\ufeff") || c === "\u0085";
+
+/** Backend `HubPage._path`: a path on the brand's own site. A leading `//` (or
+ *  `/` + backslash) is protocol-relative, i.e. another host; browsers drop tabs and
+ *  newlines and read a backslash as `/`, so whitespace, control characters and
+ *  backslashes are refused. */
+const isHubPath = (x: unknown): x is string =>
+  isStr(x) &&
+  x.length <= 300 &&
+  x.startsWith("/") &&
+  !x.startsWith("//") &&
+  ![...x].some((c) => isPySpace(c) || c === "\\" || c < " " || c === "\u007f");
+
+/** Backend `HubPage.topics`: 1-10 topics, each 4-80 characters once trimmed. */
+const isHubTopics = (x: unknown): x is string[] =>
+  isStrList(x) &&
+  x.length >= 1 &&
+  x.length <= 10 &&
+  x.every((t) => t.trim().length >= 4 && t.trim().length <= 80);
+
 const HUB_SPEC: Record<keyof HubPage, Check> = {
-  path: isStr, title: isStr, topics: isStrList,
+  path: isHubPath,
+  title: (x) => isStr(x) && x.length >= 1 && x.length <= 200,
+  topics: isHubTopics,
 };
+const HUB_KEYS = Object.keys(HUB_SPEC) as (keyof HubPage)[];
 const SUMMARY_SPEC: Record<keyof BlogProfile["summary"], Check> = {
   enabled: isBool, min_words: isNum, max_words: isNum,
 };
@@ -121,8 +148,10 @@ export function asBlogProfile(x: unknown): BlogProfile | null {
     if (hubs !== undefined) {
       if (!Array.isArray(hubs)) return null;
       for (const h of hubs) {
+        // path, title and topics are all required (no defaults server-side).
+        if (!isObj(h) || HUB_KEYS.some((k) => !(k in h))) return null;
         const hub = strict(h, HUB_SPEC, BLANK_HUB);
-        if (!hub || h === undefined) return null;
+        if (!hub) return null;
         hub_pages.push(hub);
       }
     }
@@ -150,7 +179,9 @@ export function blogProfileState(raw: unknown): BlogProfileState {
 
 /** Best-effort repair of an invalid stored profile ("Start from stored values"):
  *  deep-merge the raw object onto DEFAULT_BLOG_PROFILE, keeping only known keys
- *  with correctly typed values. Always returns a conforming profile. */
+ *  with correctly typed values. Always returns a profile of the right shape; a hub
+ *  page breaking HubPage's value rules (e.g. a path with a space) is kept for the
+ *  user to fix in the form, and the server's 422 on save names its row. */
 export function mergeOntoDefault(x: unknown): BlogProfile {
   const d = DEFAULT_BLOG_PROFILE;
   const raw = isObj(x) ? x : {};

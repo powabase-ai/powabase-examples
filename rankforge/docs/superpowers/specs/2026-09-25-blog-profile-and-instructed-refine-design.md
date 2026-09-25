@@ -568,8 +568,13 @@ This is a single pass, not a loop:
     - meta title field with a character count against `meta.title_max`;
     - "Generate summary & FAQ" button (calls `POST /frontmatter` with
       `{"force": true}`, so summary and FAQ are regenerated even when they
-      already pass; the toast says "Nothing changed" when `changed` is empty,
-      and a 409 detail such as "blog profile is invalid: …" is shown as-is);
+      already pass; the toast is worded from the response's `changed` and
+      `flags` only (`lib/frontmatterResult.ts`): it names the fields in
+      `changed` and nothing else, describes `content_md` as "removed the FAQ
+      section from the body", appends each flag (e.g. "Updated category and
+      FAQ; model's summary was 3 words (needs 40-60) — kept the stored one"),
+      and says "Nothing changed" when both are empty; a 409 detail such as
+      "blog profile is invalid: …" is shown as-is);
     - `progress.frontmatter_flags`, labelled "Flagged by the last run" (hidden
       once the run's result is no longer current, see above);
     - a client-side echo of the export-check warnings (length/count rules only
@@ -588,7 +593,9 @@ This is a single pass, not a loop:
       it is for another article than the one now shown. After "Generate summary
       & FAQ" (an explicit request), every field listed in `changed` takes the
       generated value in both draft and baseline, even over an unsaved edit;
-      other edited fields keep the draft.
+      other edited fields keep the draft. So when the editor has unsaved
+      edits, Generate first asks "Generate may replace your unsaved changes to
+      the <fields>. Continue?" and does nothing if declined.
     - The whole editor and its Save are disabled while its own save/generate
       is in flight and while the page's refine/generation runs.
 - **Article page, failed generation** (`generation_status === "failed"`):
@@ -604,18 +611,24 @@ This is a single pass, not a loop:
   `BusinessProfile.blog_profile` is typed `unknown` in the client and read
   only through `asBlogProfile` (`lib/blogProfile.ts`), which mirrors the
   model's shape (missing sections default; an unknown key or wrong type makes
-  it invalid). When the stored value is invalid, settings shows "This blog
+  it invalid) and `HubPage`'s rules (path starts with `/`, not `//`, no
+  whitespace, control characters or `\`; a title; 1-10 topics of 4-80
+  characters), so a stored profile generation would refuse also shows as
+  invalid. When the stored value is invalid, settings shows "This blog
   profile is invalid" with "Reset to defaults" and "Start from stored values"
   (the raw object deep-merged onto the defaults, keeping only known, correctly
   typed keys) instead of the form, and Save is disabled until one is chosen.
+  A 422 on save is shown with each error's location (`lib/validationMessage.ts`,
+  e.g. "blog_profile.links.hub_pages.2.path: hub path must start with '/'").
   The profile editor is seeded once per brand id, not on every refetch, so
   unsaved profile edits survive saving the brand card.
 - **Clusters page:** a category select per cluster, from the profile's
   categories.
 - **Relink UI:** a "Copy as patch notes" button.
 - **Publish dialog:** shows the pre-export check list and a "Fix automatically"
-  action (`POST /frontmatter` with no body: only failing fields; "Nothing
-  changed" when `changed` is empty).
+  action (`POST /frontmatter` with no body: only failing fields; the toast
+  is worded from `changed` + `flags` as in the editor, e.g. "Updated category;
+  category defaulted to rag", and "Nothing changed" when both are empty).
 
 ## 7. No-profile brands
 

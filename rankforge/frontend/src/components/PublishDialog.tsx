@@ -20,6 +20,7 @@ import {
 } from "@/lib/hooks/useArticles";
 import { useBrand } from "@/lib/hooks/useBrands";
 import { exportArticle, ExportBlockedError } from "@/lib/api";
+import { describeFrontmatterResult } from "@/lib/frontmatterResult";
 
 function download(filename: string, content: string, type: string) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -122,17 +123,12 @@ export function PublishDialog({
   function fixAutomatically() {
     // No body: only fields failing the rules are regenerated.
     generateFrontmatter.mutate(undefined, {
-      onSuccess: ({ export_issues, changed }) => {
-        if (changed.length === 0) {
-          setIssues(export_issues.length > 0 ? export_issues : null);
-          toast.info("Nothing changed");
-        } else if (export_issues.length > 0) {
-          setIssues(export_issues);
-          toast.warning("Some issues remain");
-        } else {
-          setIssues(null);
-          toast.success("Fixed — try again");
-        }
+      onSuccess: (result) => {
+        const { export_issues } = result;
+        setIssues(export_issues.length > 0 ? export_issues : null);
+        // Worded from `changed` + `flags` only (e.g. "category defaulted to rag").
+        const { kind, message } = describeFrontmatterResult(result, "fix");
+        toast[kind](message);
       },
       // A 409 detail (e.g. "blog profile is invalid: …") is shown as-is.
       onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),

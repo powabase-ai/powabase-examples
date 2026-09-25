@@ -14,11 +14,13 @@ import {
   adoptChanged,
   buildPatch,
   fromServer,
+  generateConfirmMessage,
   isDirty,
   rebase,
   shouldAdoptSave,
   type FrontmatterDraft,
 } from "@/lib/frontmatterDraft";
+import { describeFrontmatterResult } from "@/lib/frontmatterResult";
 import { cn } from "@/lib/utils";
 
 function wordCount(s: string): number {
@@ -99,11 +101,16 @@ export function PostFrontmatterEditor({
   }
 
   function generateFrontmatter() {
+    // Generate replaces the fields it writes even over unsaved edits — ask first.
+    const confirmText = generateConfirmMessage(draft, baseline);
+    if (confirmText && !window.confirm(confirmText)) return;
     // Explicit request: regenerate summary & FAQ even when the stored ones pass.
     generate.mutate(
       { force: true },
       {
-        onSuccess: ({ article: updated, export_issues, changed }) => {
+        onSuccess: (result) => {
+          const { article: updated } = result;
+          const changed = result.changed ?? [];
           // Explicit request: the written fields replace any unsaved edit to them
           // (draft and baseline), so Save can't write the edit back over them.
           if (shouldAdoptSave(updated.id, currentArticleId.current)) {
@@ -112,23 +119,10 @@ export function PostFrontmatterEditor({
             setDraft((d) => adoptChanged(d, d, updated, changed).draft);
             setBaseline((b) => adoptChanged(b, b, updated, changed).baseline);
           }
-          if (changed.length === 0) {
-            toast.info(
-              export_issues.length > 0
-                ? `Nothing changed — ${export_issues.length} issue${
-                    export_issues.length === 1 ? "" : "s"
-                  } remain`
-                : "Nothing changed"
-            );
-          } else if (export_issues.length > 0) {
-            toast.warning(
-              `Generated — ${export_issues.length} issue${
-                export_issues.length === 1 ? "" : "s"
-              } remain`
-            );
-          } else {
-            toast.success("Summary & FAQ generated");
-          }
+          // Worded from `changed` + `flags` only — never claims a field that
+          // wasn't written (e.g. a summary kept because the model's was too short).
+          const { kind, message } = describeFrontmatterResult(result, "generate");
+          toast[kind](message);
         },
         // A 409 detail (e.g. "blog profile is invalid: …") is shown as-is.
         onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
