@@ -538,11 +538,20 @@ def suggest_links(
         )
         need = prof.links.min - have - len([r for r in out if r.get("anchor_text")])
         brief = gen_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
+        # Targets already covered this run: article candidates are keyed by their
+        # `rf:article/<id>` ref (compare target ids, not rendered URLs), hubs by URL.
+        staged = {
+            link_ref(r["target_article_id"]) if r.get("target_article_id")
+            else r.get("target_url")
+            for r in out
+        }
         for c in link_candidates(db, brand, art, brief or {}):
             if need <= 0 or len(out) >= cap:
                 break
             key = c["target"]
-            if key in {r.get("target_url") for r in out} or key in md:
+            # Skip a target that already has a suggestion, or that the body already
+            # links (the ref for an article, the URL for a hub).
+            if key in staged or key in md:
                 continue
             is_hub = not key.startswith("rf:article/")
             tgt = (
@@ -562,6 +571,7 @@ def suggest_links(
             )
             if row:
                 out.append(row)
+                staged.add(key)
                 need -= 1
     return out
 
