@@ -495,6 +495,11 @@ This is a single pass, not a loop:
     revert, a status change). After a reload the stamp restarts from the loaded
     record.
   - A **Revert to previous version** button (confirm dialog), always shown.
+  - When the brand's stored blog profile is present but invalid, a banner says
+    "This brand's blog profile is invalid — fix it in Settings" (linked), and
+    since the editor isn't rendered, `progress.frontmatter_flags` (e.g. the
+    "blog profile is invalid: …" flag a generation leaves) are listed in the
+    panel itself, under the same "current run" rule.
   - The frontmatter editor (`PostFrontmatterEditor.tsx`), rendered inside the
     same tab **only when the brand has a blog profile**:
     - category select (with a "— none —" option that clears it);
@@ -520,7 +525,10 @@ This is a single pass, not a loop:
       echo), each field the user hasn't edited takes the server value and an
       edited field keeps the user's text; a different article id replaces the
       draft outright. A save response is adopted as draft and baseline, unless
-      it is for another article than the one now shown.
+      it is for another article than the one now shown. After "Generate summary
+      & FAQ" (an explicit request), every field listed in `changed` takes the
+      generated value in both draft and baseline, even over an unsaved edit;
+      other edited fields keep the draft.
     - The whole editor and its Save are disabled while its own save/generate
       is in flight and while the page's refine/generation runs.
 - **Article page, failed generation** (`generation_status === "failed"`):
@@ -540,6 +548,8 @@ This is a single pass, not a loop:
   profile is invalid" with "Reset to defaults" and "Start from stored values"
   (the raw object deep-merged onto the defaults, keeping only known, correctly
   typed keys) instead of the form, and Save is disabled until one is chosen.
+  The profile editor is seeded once per brand id, not on every refetch, so
+  unsaved profile edits survive saving the brand card.
 - **Clusters page:** a category select per cluster, from the profile's
   categories.
 - **Relink UI:** a "Copy as patch notes" button.

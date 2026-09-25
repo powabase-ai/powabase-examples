@@ -134,6 +134,20 @@ export function asBlogProfile(x: unknown): BlogProfile | null {
   return { categories, summary, faq, meta, links, stance };
 }
 
+export type BlogProfileState =
+  | { kind: "absent" }
+  | { kind: "invalid"; raw: unknown }
+  | { kind: "valid"; profile: BlogProfile };
+
+/** Absent (null/undefined), present but invalid, or a conforming profile. The
+ *  "invalid" case matters: generation then runs without the profile's rules and
+ *  the UI must say so rather than behave as if there were no profile. */
+export function blogProfileState(raw: unknown): BlogProfileState {
+  if (raw === null || raw === undefined) return { kind: "absent" };
+  const profile = asBlogProfile(raw);
+  return profile ? { kind: "valid", profile } : { kind: "invalid", raw };
+}
+
 /** Best-effort repair of an invalid stored profile ("Start from stored values"):
  *  deep-merge the raw object onto DEFAULT_BLOG_PROFILE, keeping only known keys
  *  with correctly typed values. Always returns a conforming profile. */

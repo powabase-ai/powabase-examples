@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useGenerateFrontmatter, useUpdateArticle } from "@/lib/hooks/useArticles";
 import type { Article, BlogProfile, FaqItem } from "@/lib/api";
 import {
+  adoptChanged,
   buildPatch,
   fromServer,
   isDirty,
@@ -102,7 +103,15 @@ export function PostFrontmatterEditor({
     generate.mutate(
       { force: true },
       {
-        onSuccess: ({ export_issues, changed }) => {
+        onSuccess: ({ article: updated, export_issues, changed }) => {
+          // Explicit request: the written fields replace any unsaved edit to them
+          // (draft and baseline), so Save can't write the edit back over them.
+          if (shouldAdoptSave(updated.id, currentArticleId.current)) {
+            // Functional updates: the cache echo of this response may already
+            // have rebased draft/baseline since this closure was created.
+            setDraft((d) => adoptChanged(d, d, updated, changed).draft);
+            setBaseline((b) => adoptChanged(b, b, updated, changed).baseline);
+          }
           if (changed.length === 0) {
             toast.info(
               export_issues.length > 0

@@ -54,7 +54,8 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
-import { ARTICLE_STATUSES, asBlogProfile, canApprove } from "@/lib/api";
+import { ARTICLE_STATUSES, canApprove } from "@/lib/api";
+import { blogProfileState } from "@/lib/blogProfile";
 import type { Article, GroundingReport, Score, ScoreSignal } from "@/lib/api";
 
 const GATED_STATUSES = new Set(["approved", "published"]);
@@ -425,6 +426,7 @@ export default function ArticleView({
   const retry = useRetryArticle(articleId);
   // Hide the last run's score strip / frontmatter flags once the article changes.
   const runCurrent = useRunCurrent(a);
+  const profileState = blogProfileState(brand?.blog_profile);
   const update = useUpdateArticle(articleId);
   const del = useDeleteArticle(id);
   const versions = useArticleVersions(articleId);
@@ -709,7 +711,9 @@ export default function ArticleView({
             {a ? (
               <PostPanel
                 article={a}
-                profile={asBlogProfile(brand?.blog_profile)}
+                profile={profileState.kind === "valid" ? profileState.profile : null}
+                profileInvalid={profileState.kind === "invalid"}
+                brandId={id}
                 busy={!!generating}
                 runCurrent={runCurrent}
               />

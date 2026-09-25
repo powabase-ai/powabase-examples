@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Loader2, RotateCcw, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
@@ -17,11 +18,17 @@ import { cn } from "@/lib/utils";
 export function PostPanel({
   article,
   profile,
+  profileInvalid,
+  brandId,
   busy,
   runCurrent,
 }: {
   article: Article;
   profile: BlogProfile | null;
+  /** The brand has a stored blog profile that doesn't conform (blogProfileState
+   *  "invalid"): generation runs without its rules, so say so. */
+  profileInvalid: boolean;
+  brandId: string;
   busy: boolean;
   /** The last run's results (score strip, frontmatter flags) still describe the
    *  article — false once it has been written since (edit, save, revert…); see
@@ -43,9 +50,34 @@ export function PostPanel({
   // run's progress no longer carries it, rather than a one-shot error toast.
   const refineError =
     article.generation_status === "done" ? article.progress?.refine_error : null;
+  // The frontmatter editor shows the last run's frontmatter flags; when it isn't
+  // rendered (no or invalid profile) they're shown here instead — e.g. the
+  // "blog profile is invalid: …" flag a generation leaves.
+  const orphanFlags =
+    !profile && runCurrent ? article.progress?.frontmatter_flags ?? [] : [];
 
   return (
     <div className="space-y-4">
+      {profileInvalid && (
+        <div className="rounded-md border border-[rgb(var(--destructive))]/40 bg-[rgb(var(--destructive))]/5 p-2.5 text-xs">
+          This brand&apos;s blog profile is invalid — fix it in{" "}
+          <Link href={`/brands/${brandId}/settings`} className="font-medium underline">
+            Settings
+          </Link>
+          . Until then, generation and refine ignore its rules and the frontmatter
+          editor is hidden.
+        </div>
+      )}
+      {orphanFlags.length > 0 && (
+        <div className="rounded-md border border-[rgb(var(--ember))]/40 bg-[rgb(var(--ember))]/5 p-2 text-xs">
+          <p className="mb-1 font-medium">Flagged by the last run</p>
+          <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground">
+            {orphanFlags.map((f, i) => (
+              <li key={i}>{f}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {refineError && (
         <div className="rounded-md border border-[rgb(var(--ember))]/40 bg-[rgb(var(--ember))]/5 p-2.5 text-xs text-muted-foreground">
           Refine didn&apos;t apply: {refineError}. Your article is unchanged.

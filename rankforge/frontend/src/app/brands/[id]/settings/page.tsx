@@ -25,9 +25,12 @@ import {
   useUpdateBrand,
   useUploadBrandLogo,
 } from "@/lib/hooks/useBrands";
-import { asBlogProfile } from "@/lib/api";
 import type { BlogProfile, BusinessProfile, BusinessProfileInput } from "@/lib/api";
-import { DEFAULT_BLOG_PROFILE, mergeOntoDefault } from "@/lib/blogProfile";
+import {
+  blogProfileState,
+  DEFAULT_BLOG_PROFILE,
+  mergeOntoDefault,
+} from "@/lib/blogProfile";
 
 export default function BrandSettings({
   params,
@@ -53,14 +56,19 @@ export default function BrandSettings({
   const [newOpen, setNewOpen] = React.useState(false);
 
   React.useEffect(() => {
-    if (brand) {
-      setForm(brandToForm(brand));
-      const raw = brand.blog_profile;
-      const parsed = asBlogProfile(raw);
-      const present = raw !== null && raw !== undefined;
-      setBp(parsed);
-      setInvalidProfile(present && !parsed ? { raw } : null);
-    }
+    if (brand) setForm(brandToForm(brand));
+  }, [brand]);
+
+  // Seed the blog-profile editor once per brand, not on every refetch — otherwise
+  // saving the brand card above (or any refetch) would wipe unsaved profile edits,
+  // including a just-chosen "Reset to defaults".
+  const seededBrandId = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!brand || seededBrandId.current === brand.id) return;
+    seededBrandId.current = brand.id;
+    const state = blogProfileState(brand.blog_profile);
+    setBp(state.kind === "valid" ? state.profile : null);
+    setInvalidProfile(state.kind === "invalid" ? { raw: state.raw } : null);
   }, [brand]);
 
   async function save(e: React.FormEvent) {

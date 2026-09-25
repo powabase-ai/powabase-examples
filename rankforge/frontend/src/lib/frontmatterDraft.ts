@@ -133,3 +133,42 @@ export function rebase(
 export function shouldAdoptSave(updatedId: string, currentId: string): boolean {
   return updatedId === currentId;
 }
+
+/** Server field names (`FrontmatterResult.changed`) → editor fields. Names the
+ *  editor doesn't hold (meta_description, content_md) are ignored. */
+const SERVER_FIELD: Record<string, FrontmatterField> = {
+  category: "category",
+  summary: "summary",
+  faq: "faq",
+  meta_title: "metaTitle",
+};
+
+/** "Generate summary & FAQ" succeeded: the fields the server actually wrote
+ *  (`changed`) are an explicit request, so they replace the draft *and* the
+ *  baseline even where the user had unsaved edits — otherwise the editor would
+ *  keep showing the edit and Save would write it back over the generated value.
+ *  Fields the server didn't write keep their draft and baseline. */
+export function adoptChanged(
+  draft: FrontmatterDraft,
+  baseline: FrontmatterDraft,
+  server: FrontmatterSource,
+  changed: string[]
+): { draft: FrontmatterDraft; baseline: FrontmatterDraft } {
+  const next = fromServer(server);
+  const d: FrontmatterDraft = { ...draft };
+  const b: FrontmatterDraft = { ...baseline };
+  for (const name of changed) {
+    const f = SERVER_FIELD[name];
+    if (!f) continue;
+    switch (f) {
+      case "faq":
+        d.faq = next.faq;
+        b.faq = next.faq;
+        break;
+      default:
+        d[f] = next[f];
+        b[f] = next[f];
+    }
+  }
+  return { draft: d, baseline: b };
+}
