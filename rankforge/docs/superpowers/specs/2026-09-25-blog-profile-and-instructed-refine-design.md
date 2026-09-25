@@ -396,7 +396,8 @@ step and `fix_meta` on demand. This is the "Generate summary & FAQ" button; see
   `"brand has no blog profile"` when the brand has none, 409
   `"blog profile is invalid: <reason>"` when the stored profile fails
   validation (`blog_rules.invalid_profile_reason`). Optional JSON body
-  `{ "force": bool }` (default `false`; an empty/absent body is `false`):
+  `{ "force": bool }` (default `false`; an empty/absent body is `false`; a
+  non-boolean such as `"yes"` or `1` is a **422**):
   `false` is "Fix automatically" (only failing fields), `true` is "Generate
   summary & FAQ" (`complete(force=True)`, §2). It claims the article
   (`try_begin_refine(total=1)`, 409 if a generation/refine is already
