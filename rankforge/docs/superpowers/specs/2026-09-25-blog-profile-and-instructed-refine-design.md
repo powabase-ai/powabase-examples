@@ -364,8 +364,9 @@ dialog shows the list, with a "Fix automatically" action that calls
 `POST /frontmatter`.
 
 **Invalid stored profile:** if `blog_profile` fails `BlogProfile` validation (a
-hand-edited row, or a schema change), `blog_rules.profile_of` logs a warning and
-returns `None` everywhere else (generation, scoring, linking — legacy behavior).
+hand-edited row, or a schema change), `blog_rules.profile_of` logs a warning
+(once per brand and reason per process, not once per call) and returns `None`
+everywhere else (generation, scoring, linking — legacy behavior).
 Export and publish are the exception: they call `invalid_profile_reason` and
 raise `ExportBlocked(["blog profile is invalid: …"])` for markdown/publish rather
 than silently falling through to legacy mode, which would also switch the export

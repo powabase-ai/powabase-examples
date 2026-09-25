@@ -52,10 +52,30 @@ def test_seed_profile_and_dump_round_trip_under_forbid():
 
 
 # --- blog_rules ---
+@pytest.fixture(autouse=True)
+def _fresh_warning_memo():
+    br._WARNED.clear()  # profile_of warns once per (brand, reason) per process
+    yield
+    br._WARNED.clear()
+
+
 def test_profile_of_logs_a_warning_with_the_brand_id(caplog):
     with caplog.at_level(logging.WARNING):
         assert br.profile_of({"id": BID, "blog_profile": BAD}) is None
     assert any(BID in r.getMessage() for r in caplog.records)
+
+
+def test_profile_of_warns_once_per_brand_and_reason(caplog):
+    other = {"categories": [{"key": "rag", "label": "R"}], "links": {"min": -1}}
+    with caplog.at_level(logging.WARNING, logger="rankforge.blog_rules"):
+        for _ in range(3):  # e.g. one call per link on every render
+            br.profile_of({"id": BID, "blog_profile": BAD})
+        br.profile_of({"id": BID, "blog_profile": other})  # a new reason
+        br.profile_of({"id": AID, "blog_profile": BAD})  # another brand
+        br.profile_of({"id": AID, "blog_profile": BAD})
+    msgs = [r.getMessage() for r in caplog.records]
+    assert len(msgs) == 3
+    assert sum(BID in m for m in msgs) == 2 and sum(AID in m for m in msgs) == 1
 
 
 def test_invalid_profile_reason():
