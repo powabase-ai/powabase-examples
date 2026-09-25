@@ -734,3 +734,6 @@ async def test_gap_fill_on_profile_brand_rescores_with_internal_links(monkeypatc
     monkeypatch.setattr(linking.gen_svc, "_update", lambda d, aid, **f: updates.update(f))
     await linking.generate_gap_link(client, db, BID, SID)
     assert "internal_links" in _signal_keys(updates["seo_score"])
+    # A hub gap has no target article: the body keeps the hub URL, never a ref.
+    assert "rf:article/None" not in updates["content_md"]
+    assert "[RAG](https://acme.com/blog/category/rag/)" in updates["content_md"]

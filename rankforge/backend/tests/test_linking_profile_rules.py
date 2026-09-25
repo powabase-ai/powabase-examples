@@ -253,3 +253,17 @@ def test_canonical_override_gets_the_trailing_slash_on_profile_brands():
     assert lk.canonical_url(_brand(), art) == "https://powabase.ai/guides/a/"
     legacy = {**_brand(), "blog_profile": None}
     assert lk.canonical_url(legacy, art) == "https://powabase.ai/guides/a"
+
+
+def test_link_candidates_list_a_target_once(monkeypatch):
+    """L6: the pillar is both a structural target and a technical article in the
+    ranked pool — it is offered once (as the structural link), not twice."""
+    pillar = _row(PILLAR, "Pillar Guide", ["pgvector"])
+    db = FakeDB([pillar, _row(T1, "Other", ["pgvector"])], pillar)
+    art = {"id": AID, "business_id": BID, "cluster_id": "c1",
+           "cluster_role": "member"}
+    brief = {"primary_keyword": "pgvector", "secondary_keywords": []}
+    targets = [x["target"] for x in lk.link_candidates(db, _brand(), art, brief)]
+    assert targets.count(f"rf:article/{PILLAR}") == 1
+    assert targets[0] == f"rf:article/{PILLAR}"
+    assert f"rf:article/{T1}" in targets
