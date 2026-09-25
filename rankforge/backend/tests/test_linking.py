@@ -669,3 +669,65 @@ def test_suggest_links_stages_min_gaps(monkeypatch):
         if "insert into public.link_suggestions" in c.args[0] and c.args[1][3] is None
     ]
     assert len(gap_inserts) == 2  # both technical candidates staged as gaps
+
+
+# --- the post-apply rescore keeps the brand's blog profile (final review Issue 3) ---
+_PROFILE_BRAND = {
+    "name": "B", "domain": "https://www.acme.com", "competitors": ["rival.io"],
+    "blog_profile": {"categories": [{"key": "rag", "label": "R"}]},
+}
+
+
+def _signal_keys(seo):
+    return {s["key"] for s in seo["signals"]}
+
+
+def test_apply_on_profile_brand_rescores_with_internal_links(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.side_effect = [
+        {"id": SID, "article_id": AID, "target_article_id": None,
+         "anchor_text": "headless cms",
+         "target_url": "https://acme.com/blog/category/rag/", "status": "pending"},
+        {"id": SID, "status": "accepted"},
+    ]
+    monkeypatch.setattr(
+        linking.gen_svc, "get_article",
+        lambda d, aid: {"content_md": "We weigh headless cms options.", "title": "T",
+                        "business_id": BID},
+    )
+    monkeypatch.setattr(linking.brands, "get_profile", lambda d, bid: _PROFILE_BRAND)
+    monkeypatch.setattr(linking, "resolve_links", lambda d, b, md, **k: md)
+    updates: dict = {}
+    monkeypatch.setattr(
+        linking.gen_svc, "_update", lambda d, aid, **f: updates.update(f)
+    )
+    linking.apply_suggestion(db, BID, SID)
+    seo = updates["seo_score"]
+    assert "internal_links" in _signal_keys(seo)
+    il = next(s for s in seo["signals"] if s["key"] == "internal_links")
+    assert il["explanation"].startswith("1 internal link")
+
+
+async def test_gap_fill_on_profile_brand_rescores_with_internal_links(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.side_effect = [
+        {"id": SID, "article_id": AID, "target_article_id": None, "anchor_text": None,
+         "target_url": "https://acme.com/blog/category/rag/", "target_title": "RAG",
+         "status": "pending"},
+        {"id": SID, "status": "accepted"},
+    ]
+    monkeypatch.setattr(
+        linking.gen_svc, "get_article",
+        lambda d, aid: {"content_md": "# Title\n\nIntro para.\n\nMore body.",
+                        "title": "T", "business_id": BID},
+    )
+    monkeypatch.setattr(linking.brands, "get_profile", lambda d, bid: _PROFILE_BRAND)
+    monkeypatch.setattr(linking, "_ensure_linker", AsyncMock(return_value="lk"))
+    monkeypatch.setattr(linking, "resolve_links", lambda d, b, md, **k: md)
+    client = MagicMock()
+    client.run_agent = AsyncMock(return_value={
+        "content": "See [RAG](https://acme.com/blog/category/rag/)."})
+    updates: dict = {}
+    monkeypatch.setattr(linking.gen_svc, "_update", lambda d, aid, **f: updates.update(f))
+    await linking.generate_gap_link(client, db, BID, SID)
+    assert "internal_links" in _signal_keys(updates["seo_score"])

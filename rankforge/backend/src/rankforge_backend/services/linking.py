@@ -600,19 +600,12 @@ def apply_suggestion(
     # Re-score SEO DETERMINISTICALLY (no LLM): a single internal link only moves the
     # on-page link signals, so re-judging GEO/readability with the model on every
     # "Add" click would be pure latency + token cost. Local imports avoid a cycle.
-    from . import brief as brief_svc
     from . import scoring
 
-    brief = (
-        brief_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
-    ) or {}
-    # Score the RESOLVED body so link signals see real URLs, not the ref token.
-    seo = scoring.score_seo(
-        resolve_links(db, business_id, new_md),
-        art.get("meta_title") or art.get("title") or "",
-        art.get("meta_description"),
-        brief,
-    )
+    # Score the RESOLVED body so link signals see real URLs, not the ref token;
+    # score_seo_for keeps the brand's profile (internal_links, limits) and
+    # competitor hosts, exactly as the full score does.
+    seo = scoring.score_seo_for(db, art, resolve_links(db, business_id, new_md))
     gen_svc._update(db, s["article_id"], seo_score=seo)
     return _set_status(db, business_id, suggestion_id, "accepted")
 
@@ -691,16 +684,8 @@ async def generate_gap_link(
         sentence = sentence.replace(s["target_url"], link_ref(s["target_article_id"]))
     new_md = _insert_after_intro(md, sentence)
     gen_svc._update(db, s["article_id"], content_md=new_md)
-    from . import brief as brief_svc
     from . import scoring
 
-    brief = (
-        brief_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
-    ) or {}
-    seo = scoring.score_seo(
-        resolve_links(db, business_id, new_md),
-        art.get("meta_title") or art.get("title") or "",
-        art.get("meta_description"), brief,
-    )
+    seo = scoring.score_seo_for(db, art, resolve_links(db, business_id, new_md))
     gen_svc._update(db, s["article_id"], seo_score=seo)
     return _set_status(db, business_id, suggestion_id, "accepted")

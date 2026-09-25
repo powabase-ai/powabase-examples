@@ -639,6 +639,42 @@ async def judge_readability(client: PowabaseClient, content_md: str) -> dict | N
         return None
 
 
+def score_seo_for(
+    db: Database,
+    article: dict[str, Any],
+    resolved_md: str,
+    *,
+    brief: dict | None = None,
+) -> dict:
+    """Deterministic SEO score for an article's (link-resolved) body, with every
+    brand-derived input: the blog profile (limits + internal_links signal), the
+    brand domain as the internal host, and competitor hosts. The single entry point
+    for full scoring and the per-link rescores, so they cannot drift apart."""
+    from . import blog_rules, linking  # local: linking imports scoring lazily
+    from . import business_profiles as brands_svc
+
+    if brief is None:
+        brief = (
+            brief_svc.get_brief(db, article["brief_id"])
+            if article.get("brief_id") else {}
+        ) or {}
+    brand = (
+        brands_svc.get_profile(db, article["business_id"])
+        if article.get("business_id")
+        else None
+    )
+    dom = linking._bare_host((brand or {}).get("domain") or "")
+    return score_seo(
+        resolved_md,
+        article.get("meta_title") or article.get("title") or "",
+        article.get("meta_description"),
+        brief,
+        competitor_hosts=linking.competitor_hosts(brand),
+        profile=blog_rules.profile_of(brand),
+        internal_hosts={dom} if dom else set(),
+    )
+
+
 async def score_and_store(
     client: PowabaseClient, db: Database, article_id
 ) -> dict[str, Any] | None:
@@ -649,25 +685,12 @@ async def score_and_store(
     brief = brief or {}
     # Resolve internal-link refs to real URLs so link signals are counted (and the LLM
     # judges see real links, not `rf:article/{id}` tokens). Local import avoids a cycle.
-    from . import blog_rules, linking
-    from . import business_profiles as brands_svc
+    from . import linking
 
     md = linking.resolve_links(
         db, article.get("business_id"), article.get("content_md") or ""
     )
-    # The brand's competitors → hosts, so the competitor-link signal can flag any
-    # outbound link to a rival's domain.
-    brand = (
-        brands_svc.get_profile(db, article["business_id"])
-        if article.get("business_id")
-        else None
-    )
-    profile = blog_rules.profile_of(brand)
-    dom = linking._bare_host((brand or {}).get("domain") or "")
-    seo = score_seo(md, article.get("meta_title") or article.get("title") or "",
-                    article.get("meta_description"), brief,
-                    competitor_hosts=linking.competitor_hosts(brand),
-                    profile=profile, internal_hosts={dom} if dom else set())
+    seo = score_seo_for(db, article, md, brief=brief)
     llm = await judge_geo(client, md)
     template = templates_svc.get_template(db, brief.get("article_type"))
     geo = score_geo(
