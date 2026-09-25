@@ -10,6 +10,7 @@ then re-runs fact-check → JSON-LD → scoring. Capped so it always terminates.
 import json
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -176,8 +177,10 @@ def _meta_failing(seo: dict | None) -> bool:
 async def fix_meta(
     client: PowabaseClient, db: Database, article_id: UUID, article: dict, brief: dict,
     *, title_max: int = 60, description_max: int = 160,
+    before_write: Callable[[], None] | None = None,
 ) -> None:
-    """Rewrite meta_title / meta_description to satisfy the title/meta SEO signals."""
+    """Rewrite meta_title / meta_description to satisfy the title/meta SEO signals.
+    `before_write` runs just before a write (none when the model gave nothing)."""
     pk = brief.get("primary_keyword") or ""
     desc_min = min(120, description_max - 20)
     msg = (
@@ -210,6 +213,8 @@ async def fix_meta(
     if (md := (data.get("meta_description") or "").strip()):
         fields["meta_description"] = md
     if fields:
+        if before_write:
+            before_write()
         gen_svc._update(db, article_id, **fields)
 
 

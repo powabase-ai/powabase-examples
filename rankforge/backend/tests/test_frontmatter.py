@@ -143,3 +143,130 @@ async def test_complete_strips_body_faq(monkeypatch):
     state, _ = await _run_complete(monkeypatch, {**ART, "content_md": body})
     assert "Frequently asked" not in state["art"]["content_md"]
     assert "## Intro" in state["art"]["content_md"]
+
+
+# --- review r1 C2: a bad retry / unparseable reply never overwrites good values ---
+def _raw_client(*contents):
+    c = MagicMock()
+    c.run_agent = AsyncMock(side_effect=[{"content": x} for x in contents])
+    return c
+
+
+def _written(upd) -> dict:
+    return {k: v for c in upd.call_args_list for k, v in c.kwargs.items()}
+
+
+async def test_generate_unparseable_reply_is_a_failed_attempt_not_a_500(deps):
+    c = _raw_client("not json at all", json.dumps(GOOD))
+    flags = await fm.generate(c, MagicMock(), "a")
+    assert flags == [] and c.run_agent.await_count == 2
+    assert _written(deps)["summary"] == S45
+
+
+async def test_generate_unparseable_twice_writes_nothing(deps):
+    flags = await fm.generate(_raw_client("nope", "still nope"), MagicMock(), "a")
+    assert any("not valid JSON" in f for f in flags)
+    assert "summary" not in _written(deps) and "faq" not in _written(deps)
+
+
+async def test_generate_keeps_the_better_first_attempt(deps):
+    first = {**GOOD, "summary": "too short"}  # 1 flag
+    flags = await fm.generate(_client(first, {}), MagicMock(), "a")  # retry: 2 flags
+    w = _written(deps)
+    assert flags == ["summary is 2 words (needs 40-60)"]
+    assert len(w["faq"]) == 4  # the first attempt's valid FAQ is kept
+    assert "summary" not in w  # an out-of-bounds summary is never written
+
+
+async def test_generate_first_attempt_wins_ties(deps):
+    first = {**GOOD, "summary": "too short"}
+    second = {**GOOD, "faq": [{"q": "only?", "a": "one"}], "category": "rag"}
+    await fm.generate(_client(first, second), MagicMock(), "a")
+    w = _written(deps)
+    assert w["category"] == "agents" and len(w["faq"]) == 4
+
+
+async def test_generate_empty_reply_never_clears_stored_values(monkeypatch):
+    stored = {**ART, "summary": S45, "faq": GOOD["faq"], "category": None}
+    monkeypatch.setattr(fm.gen_svc, "get_article", lambda d, a: dict(stored))
+    monkeypatch.setattr(fm.brands, "get_profile", lambda d, b: BRAND)
+    monkeypatch.setattr(fm, "ensure_agent", AsyncMock(return_value="agent"))
+    upd = MagicMock()
+    monkeypatch.setattr(fm.gen_svc, "_update", upd)
+    await fm.generate(_client({}, {}), MagicMock(), "a")
+    w = _written(upd)
+    assert "summary" not in w and "faq" not in w
+
+
+async def test_complete_regenerates_only_failing_fields(monkeypatch):
+    art = {**ART, "summary": S45, "faq": GOOD["faq"], "category": None}
+    c = _client({"category": "rag", "summary": "x", "faq": []})
+    state, calls = await _run_complete_with(monkeypatch, art, c)
+    assert state["art"]["summary"] == S45 and state["art"]["faq"] == GOOD["faq"]
+    assert state["art"]["category"] == "rag"
+    assert ("update", ["category"]) in calls
+
+
+async def test_complete_noop_when_everything_passes(monkeypatch):
+    art = {**ART, "summary": S45, "faq": GOOD["faq"], "category": "rag"}
+    c = _client()
+    state, calls = await _run_complete_with(monkeypatch, art, c)
+    assert calls == []  # no snapshot, no write
+    c.run_agent.assert_not_called()
+
+
+async def test_complete_long_title_fixes_meta_only(monkeypatch):
+    art = {**ART, "title": "t" * 80, "summary": S45, "faq": GOOD["faq"],
+           "category": "rag"}
+    c = _client()
+    state, calls = await _run_complete_with(monkeypatch, art, c)
+    c.run_agent.assert_not_called()  # summary/FAQ are not regenerated
+    assert calls[0][0] == "snapshot" and ("update", ["meta_title"]) in calls
+
+
+async def test_complete_no_snapshot_when_the_model_writes_nothing(monkeypatch):
+    art = {**ART, "summary": S45, "faq": [{"q": "Q?", "a": "A."}], "category": "rag"}
+    c = _raw_client("nope", "nope")
+    state, calls = await _run_complete_with(monkeypatch, art, c)
+    assert calls == []
+
+
+async def test_complete_returns_flags(monkeypatch):
+    art = {**ART, "summary": None, "faq": GOOD["faq"], "category": "rag"}
+    monkeypatch.setattr(fm.gen_svc, "get_article", lambda d, a: dict(art))
+    monkeypatch.setattr(fm.brands, "get_profile", lambda d, b: BRAND)
+    monkeypatch.setattr(fm, "ensure_agent", AsyncMock(return_value="agent"))
+    monkeypatch.setattr(fm.gen_svc, "_update", MagicMock())
+    monkeypatch.setattr(fm.gen_svc, "snapshot_version", MagicMock())
+    c = _client({"summary": "short"}, {"summary": "short"})
+    assert await fm.complete(c, MagicMock(), "a") == [
+        "summary is 1 words (needs 40-60)"
+    ]
+
+
+async def _run_complete_with(monkeypatch, art, client):
+    state = {"art": dict(art)}
+    calls: list = []
+    monkeypatch.setattr(fm.gen_svc, "get_article", lambda d, a: dict(state["art"]))
+    monkeypatch.setattr(fm.brands, "get_profile", lambda d, b: BRAND)
+    monkeypatch.setattr(fm, "ensure_agent", AsyncMock(return_value="agent"))
+
+    def _upd(d, a, **f):
+        calls.append(("update", sorted(f)))
+        state["art"].update(f)
+
+    monkeypatch.setattr(fm.gen_svc, "_update", _upd)
+    monkeypatch.setattr(
+        fm.gen_svc, "snapshot_version",
+        lambda d, article: calls.append(("snapshot", article.get("summary"))),
+    )
+    from rankforge_backend.services import revise
+
+    async def _fix_meta(client, db, aid, article, brief, *, before_write=None, **k):
+        if before_write:
+            before_write()
+        _upd(db, aid, meta_title="New meta")
+
+    monkeypatch.setattr(revise, "fix_meta", _fix_meta)
+    await fm.complete(client, MagicMock(), "a")
+    return state, calls
