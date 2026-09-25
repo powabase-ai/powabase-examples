@@ -756,3 +756,49 @@ def test_em_dash_instruction_is_unchanged():
     """Em-dash handling is deliberately out of scope: the zero-tolerance backstop and
     its instruction must survive this refactor untouched."""
     assert "Do not leave a single em-dash" in revise._TELL_INSTRUCTION["em_dashes"]
+
+
+# --- legacy/targeted refine strips a body FAQ on a profile brand (final review #4) ---
+_FAQ_BODY = "# T\n\n## Intro\n\ntext\n\n## FAQ\n\n### Q?\n\nA.\n\n## End\n\nbye"
+_PROFILE_BRAND = {"name": "B", "blog_profile": {"categories": [{"key": "rag",
+                                                                 "label": "R"}]}}
+
+
+def _refine_env(monkeypatch, brand):
+    state = {"art": {"id": "aid", "business_id": "b", "brief_id": None,
+                     "seo_score": None, "content_md": _FAQ_BODY}}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda d, a: dict(state["art"]))
+    monkeypatch.setattr(revise.gen_svc, "_update",
+                        lambda d, a, **f: state["art"].update(f))
+    monkeypatch.setattr(revise.brands, "get_profile", lambda d, b: brand)
+    monkeypatch.setattr(revise, "_article_context", lambda d, a: (None, {}, None))
+    monkeypatch.setattr(revise, "_objective_loop", AsyncMock())
+    monkeypatch.setattr(revise, "_editorial_loop", AsyncMock())
+    monkeypatch.setattr(revise, "_targeted_loop", AsyncMock())
+    rescore = AsyncMock()
+    monkeypatch.setattr(scoring, "score_and_store", rescore)
+    return state, rescore
+
+
+async def test_refine_strips_body_faq_on_profile_brand(monkeypatch):
+    state, rescore = _refine_env(monkeypatch, _PROFILE_BRAND)
+    out = await revise.refine(MagicMock(), MagicMock(), "aid")
+    assert "## FAQ" not in state["art"]["content_md"]
+    assert "## Intro" in state["art"]["content_md"]
+    assert "## End" in state["art"]["content_md"]
+    assert "## FAQ" not in out["content_md"]
+    rescore.assert_awaited_once()
+
+
+async def test_targeted_refine_strips_body_faq_on_profile_brand(monkeypatch):
+    state, _ = _refine_env(monkeypatch, _PROFILE_BRAND)
+    await revise.refine(MagicMock(), MagicMock(), "aid",
+                        targets=["readability:em_dashes"])
+    assert "## FAQ" not in state["art"]["content_md"]
+
+
+async def test_refine_keeps_body_faq_without_profile(monkeypatch):
+    state, rescore = _refine_env(monkeypatch, {"name": "B", "blog_profile": None})
+    await revise.refine(MagicMock(), MagicMock(), "aid")
+    assert state["art"]["content_md"] == _FAQ_BODY
+    rescore.assert_not_awaited()

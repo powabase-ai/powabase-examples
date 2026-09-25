@@ -125,8 +125,10 @@ def enforce_meta(
 async def complete(
     client: PowabaseClient, db: Database, article_id: UUID
 ) -> list[str]:
-    """Meta (model, then clamp) + category/summary/FAQ. Used after generation and by
-    the "Generate summary & FAQ" / "Fix automatically" actions."""
+    """Meta (model, then clamp) + category/summary/FAQ, and drop a body FAQ section
+    (the FAQ lives in frontmatter). Used after generation and by the "Generate
+    summary & FAQ" / "Fix automatically" actions. The prior state is versioned first,
+    so hand edits it overwrites can be reverted."""
     from . import brief as brief_svc
     from . import revise
 
@@ -136,6 +138,7 @@ async def complete(
     profile = blog_rules.profile_of(brands.get_profile(db, article["business_id"]))
     if not profile:
         return []
+    gen_svc.snapshot_version(db, article)
     brief = (
         brief_svc.get_brief(db, article["brief_id"]) if article.get("brief_id") else {}
     ) or {}
@@ -145,4 +148,9 @@ async def complete(
     )
     fresh = gen_svc.get_article(db, article_id) or article
     enforce_meta(db, article_id, fresh, profile)
-    return await generate(client, db, article_id)
+    flags = await generate(client, db, article_id)
+    if profile.faq.enabled:
+        md = (gen_svc.get_article(db, article_id) or {}).get("content_md") or ""
+        if blog_rules.BODY_FAQ_RE.search(md):
+            gen_svc._update(db, article_id, content_md=blog_rules.strip_body_faq(md))
+    return flags

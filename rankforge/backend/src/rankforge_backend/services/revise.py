@@ -1351,4 +1351,24 @@ async def refine(
         await _editorial_loop(
             client, db, article_id, brief, kb_id, source_ids, url_by_source
         )
+    await _strip_profile_body_faq(client, db, article_id)
     return gen_svc.get_article(db, article_id)
+
+
+async def _strip_profile_body_faq(
+    client: PowabaseClient, db: Database, article_id: UUID
+) -> None:
+    """The legacy/targeted loops know nothing of the blog profile, so a GEO fix
+    ("answer the remaining questions") can add a body FAQ section. On a brand whose
+    profile puts the FAQ in frontmatter, remove it and re-score."""
+    from . import blog_rules, scoring  # local: avoid import cycle
+
+    art = gen_svc.get_article(db, article_id)
+    if not art or not art.get("business_id"):
+        return
+    profile = blog_rules.profile_of(brands.get_profile(db, art["business_id"]))
+    md = art.get("content_md") or ""
+    if not (profile and profile.faq.enabled and blog_rules.BODY_FAQ_RE.search(md)):
+        return
+    gen_svc._update(db, article_id, content_md=blog_rules.strip_body_faq(md))
+    await scoring.score_and_store(client, db, article_id)

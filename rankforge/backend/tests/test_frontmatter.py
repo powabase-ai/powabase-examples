@@ -102,3 +102,44 @@ def test_frontmatter_route_409_without_profile(monkeypatch):
     )
     resp = _route_client(db).post(f"/api/articles/{AID}/frontmatter")
     assert resp.status_code == 409
+
+
+# --- complete(): undo point + body-FAQ strip (final review #4/#5) ---
+async def _run_complete(monkeypatch, art):
+    state = {"art": dict(art)}
+    calls: list = []
+    monkeypatch.setattr(fm.gen_svc, "get_article", lambda d, a: dict(state["art"]))
+    monkeypatch.setattr(fm.brands, "get_profile", lambda d, b: BRAND)
+    monkeypatch.setattr(fm, "ensure_agent", AsyncMock(return_value="agent"))
+
+    def _upd(d, a, **f):
+        calls.append(("update", sorted(f)))
+        state["art"].update(f)
+
+    def _snap(d, article):
+        calls.append(("snapshot", article.get("summary")))
+
+    monkeypatch.setattr(fm.gen_svc, "_update", _upd)
+    monkeypatch.setattr(fm.gen_svc, "snapshot_version", _snap)
+    from rankforge_backend.services import revise
+
+    async def _fix_meta(client, db, aid, article, brief, **k):
+        _upd(db, aid, meta_title="New meta")
+
+    monkeypatch.setattr(revise, "fix_meta", _fix_meta)
+    await fm.complete(_client(GOOD), MagicMock(), "a")
+    return state, calls
+
+
+async def test_complete_snapshots_once_before_first_write(monkeypatch):
+    _, calls = await _run_complete(monkeypatch, {**ART, "summary": "hand edit"})
+    snaps = [c for c in calls if c[0] == "snapshot"]
+    assert snaps == [("snapshot", "hand edit")]
+    assert calls[0][0] == "snapshot"  # before any write
+
+
+async def test_complete_strips_body_faq(monkeypatch):
+    body = "# T\n\n## Intro\n\ntext\n\n## Frequently asked questions\n\n### Q?\n\nA."
+    state, _ = await _run_complete(monkeypatch, {**ART, "content_md": body})
+    assert "Frequently asked" not in state["art"]["content_md"]
+    assert "## Intro" in state["art"]["content_md"]
