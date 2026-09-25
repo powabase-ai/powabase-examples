@@ -97,10 +97,12 @@ def _overlap(terms: list[str], text: str) -> int:
 def link_candidates(
     db: Database, brand: dict[str, Any] | None, article: dict[str, Any],
     brief: dict[str, Any] | None, limit: int = 8,
+    *, pool: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Internal-link targets offered to the writer: structural first, then hub pages
     matching the brief, then published technical-category articles ranked by keyword
-    overlap, at most 2 per category."""
+    overlap, at most 2 per category. `pool` is the brand's other published articles
+    when the caller already has them (else they are fetched here)."""
     prof = blog_rules.profile_of(brand)
     if not prof:
         return []
@@ -124,10 +126,9 @@ def link_candidates(
         if _overlap(h["topics"], probe) or _overlap(terms, " ".join(h["topics"])):
             _add(h["title"], h["url"], None)
     technical = {c.key for c in prof.categories if c.technical}
-    rows = [
-        r for r in _link_targets(db, article.get("business_id"), article.get("id"))
-        if r.get("category") in technical
-    ]
+    if pool is None:
+        pool = _link_targets(db, article.get("business_id"), article.get("id"))
+    rows = [r for r in pool if r.get("category") in technical]
     rows.sort(
         key=lambda r: _overlap(terms, " ".join(map(str, r.get("keywords") or []))
                                + " " + (r.get("title") or "")),
@@ -459,12 +460,15 @@ def _suggestion_key(row: dict[str, Any]) -> str | None:
     return row.get("target_url")
 
 
-def _pending(db: Database, article_id: UUID) -> list[dict[str, Any]]:
+def _pending(
+    db: Database, business_id: UUID, article_id: UUID
+) -> list[dict[str, Any]]:
     """The article's pending suggestions (anchored and gaps) from any run."""
     return db.fetch_all(
         "select target_article_id, target_url, anchor_text "
-        "from public.link_suggestions where article_id = %s and status = 'pending'",
-        (article_id,),
+        "from public.link_suggestions where article_id = %s and business_id = %s "
+        "and status = 'pending'",
+        (article_id, business_id),
     )
 
 
@@ -551,17 +555,23 @@ def suggest_links(
         have = len(_LINK_REF_RE.findall(md)) + sum(
             1 for h in hub_targets(brand) if h["url"] in md
         )
-        brief = gen_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
         # Targets that already have a PENDING suggestion — staged this run (`out`) or
         # by an earlier run (a re-insert of those hits ON CONFLICT and returns None,
         # so `out` alone would miss them). Article targets are keyed by their
         # `rf:article/<id>` ref (compare ids, not rendered URLs), hubs by URL. Each
         # one counts toward the minimum once, and never gets a second (gap) row.
         staged = {
-            k for k in map(_suggestion_key, [*out, *_pending(db, article_id)]) if k
+            k for k in map(_suggestion_key, [*out, *_pending(db, business_id, article_id)]) if k
         }
         need = prof.links.min - have - len([k for k in staged if k not in md])
-        for c in link_candidates(db, brand, art, brief or {}):
+        ranked: list[dict[str, Any]] = []
+        if need > 0 and len(out) < cap:
+            brief = (
+                gen_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
+            )
+            # Reuse the library already in hand (step 2) instead of re-fetching it.
+            ranked = link_candidates(db, brand, art, brief or {}, pool=targets)
+        for c in ranked:
             if need <= 0 or len(out) >= cap:
                 break
             key = c["target"]

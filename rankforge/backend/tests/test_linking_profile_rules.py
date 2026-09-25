@@ -51,6 +51,7 @@ class FakeDB:
         self.pillar = pillar
         self.inserts: list[tuple] = []  # every insert attempted
         self.pending: list[dict[str, Any]] = []  # rows actually stored
+        self.library_fetches = 0  # published-library reads (_link_targets)
 
     @staticmethod
     def _key(r: dict[str, Any]) -> tuple:
@@ -60,9 +61,12 @@ class FakeDB:
 
     def fetch_all(self, q: str, p: Any = None) -> list[dict[str, Any]]:
         if "from public.link_suggestions" in q:
+            # Scoped to the article AND its brand (defence in depth).
+            assert "business_id = %s" in q and tuple(map(str, p)) == (AID, BID)
             return [dict(r) for r in self.pending]
         if "cluster_role = 'member'" in q:
             return []
+        self.library_fetches += 1
         return list(self.rows)
 
     def fetch_one(self, q: str, p: Any = None) -> dict[str, Any] | None:
@@ -167,6 +171,51 @@ def test_two_runs_stage_the_same_suggestions_once(monkeypatch):
     assert db.pending == before  # nothing new: no T1 gap, no fourth target
     assert [r["anchor_text"] for r in db.pending
             if str(r["target_article_id"]) == T1] == ["tech one guide"]
+
+
+def test_pending_target_already_linked_in_the_body_counts_once(monkeypatch):
+    """A pending suggestion to T1, which the body already links, must not count
+    twice: the body link counts (have=1), the pending row doesn't → need=2."""
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", []),
+            _row(T3, "Tech Three", [], "agents"), _row(T5, "Tech Five", [], "agents")]
+    db = FakeDB(rows)
+    db.pending.append({"target_article_id": T1, "anchor_text": "old anchor",
+                       "target_url": "https://powabase.ai/blog/tech-one",
+                       "kind": "mention"})
+    _run(monkeypatch, f"See [one](rf:article/{T1}).", rows,
+         _brand(min=3, max=10), db=db)
+    assert len([p for p in db.inserts if p[3] is None]) == 2
+
+
+# --- step 4 reuses the library and skips ranking when nothing is needed ---
+def test_per_article_path_fetches_the_library_once(monkeypatch):
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", [])]
+    db, out = _run(monkeypatch, "Nothing matching here.", rows)
+    assert sorted(str(p[2]) for p in db.inserts) == [T1, T2]  # both gaps staged
+    assert db.library_fetches == 1  # step 2 only; link_candidates reuses it
+
+
+def test_relink_candidates_are_reused_for_the_minimum(monkeypatch):
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", [])]
+    art = {"id": AID, "business_id": BID, "content_md": "Nothing here.",
+           "cluster_id": None, "cluster_role": None, "brief_id": None}
+    monkeypatch.setattr(lk.gen_svc, "get_article", lambda d, aid: art)
+    monkeypatch.setattr(lk.brands, "get_profile", lambda d, bid: _brand())
+    db = FakeDB(rows)
+    lk.suggest_links(db, BID, AID, candidates=[*rows, {**_row(AID, "Me", [])}])
+    assert sorted(str(p[2]) for p in db.inserts) == [T1, T2]
+    assert db.library_fetches == 0
+
+
+def test_no_candidate_ranking_when_the_minimum_is_met(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("link_candidates must not run when need <= 0")
+
+    monkeypatch.setattr(lk, "link_candidates", boom)
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", [])]
+    body = f"[a](rf:article/{T3}) [b](rf:article/{T4}) [c]({MVP})"
+    db, _ = _run(monkeypatch, body, rows)  # min=3, already met
+    assert db.inserts == [] and db.library_fetches == 1
 
 
 # --- hub gap-fill writes the hub URL, never a bogus article ref ---
