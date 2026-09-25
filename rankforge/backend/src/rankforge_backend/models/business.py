@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from .blog import BlogProfile
+
 # Bounded so a typo/hostile client can't store unbounded blobs (cost/DoS/bloat) —
 # mirrors the ScoutPlan max_length precedent.
 _Tag = Annotated[str, Field(max_length=120)]
@@ -32,6 +34,8 @@ class BusinessProfileCreate(BaseModel):
     # Public storage URL for the brand logo (set via POST /{id}/logo). Client can also
     # clear it by PATCHing null.
     logo_url: str | None = Field(default=None, max_length=2_000)
+    # Target-blog conventions (see models/blog.py). None = legacy behavior.
+    blog_profile: BlogProfile | None = None
 
 
 class BusinessProfileUpdate(BaseModel):
@@ -50,6 +54,8 @@ class BusinessProfileUpdate(BaseModel):
     # Public storage URL for the brand logo (set via POST /{id}/logo). Client can also
     # clear it by PATCHing null.
     logo_url: str | None = Field(default=None, max_length=2_000)
+    # Target-blog conventions (see models/blog.py). None = legacy behavior.
+    blog_profile: BlogProfile | None = None
 
 
 class BusinessProfile(BaseModel):
@@ -67,6 +73,8 @@ class BusinessProfile(BaseModel):
     url_pattern: str | None = None
     default_author: str | None = None
     logo_url: str | None = None
+    # Target-blog conventions (see models/blog.py). None = legacy behavior.
+    blog_profile: BlogProfile | None = None
     materials_progress: dict = {}
     created_by: UUID | None = None
     created_at: datetime

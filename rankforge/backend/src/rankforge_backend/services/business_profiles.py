@@ -11,7 +11,7 @@ from ..models.business import BusinessProfileCreate, BusinessProfileUpdate
 _COLUMNS = (
     "id, org_id, name, domain, description, niche, audience, seed_topics, "
     "target_keywords, competitors, brand_kb_id, sitemap_url, url_pattern, "
-    "default_author, logo_url, "
+    "default_author, logo_url, blog_profile, "
     "materials_kb_id, materials_progress, cluster_kb_id, created_by, "
     "created_at, updated_at"
 )
@@ -59,8 +59,8 @@ def create_profile(
         insert into public.business_profiles
             (org_id, name, domain, description, niche, audience,
              seed_topics, target_keywords, competitors, brand_kb_id, sitemap_url,
-             url_pattern, default_author, logo_url)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             url_pattern, default_author, logo_url, blog_profile)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         returning {_COLUMNS}
         """,
         (
@@ -78,6 +78,7 @@ def create_profile(
             data.url_pattern,
             data.default_author,
             data.logo_url,
+            Json(data.blog_profile.model_dump()) if data.blog_profile else None,
         ),
     )
 
@@ -95,7 +96,10 @@ def update_profile(
     for key, value in fields.items():
         # keys come from a fixed Pydantic model → safe to interpolate as column names
         set_clauses.append(f"{key} = %s")
-        params.append(Json(value) if key in _JSONB_FIELDS else value)
+        if key == "blog_profile":
+            params.append(Json(value) if value is not None else None)
+        else:
+            params.append(Json(value) if key in _JSONB_FIELDS else value)
     set_clauses.append("updated_at = now()")
     params.extend([profile_id, org_id])
 

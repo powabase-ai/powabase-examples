@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from .blog import FaqItem
+
 
 class ArticleGenerate(BaseModel):
     brief_id: UUID
@@ -28,6 +30,9 @@ class ArticleUpdate(BaseModel):
     status: str | None = None  # draft|in_review|approved|published|archived
     canonical_url: str | None = None  # override for where this article lives
     author: str | None = None  # per-article override of the brand's default author
+    category: str | None = Field(default=None, max_length=60)
+    summary: str | None = Field(default=None, max_length=2000)
+    faq: list[FaqItem] | None = Field(default=None, max_length=20)
 
 
 class Article(BaseModel):
@@ -61,6 +66,9 @@ class Article(BaseModel):
     og_image_url: str | None = None
     cluster_id: UUID | None = None
     cluster_role: str | None = None
+    category: str | None = None
+    summary: str | None = None
+    faq: list[dict] | None = None
     created_at: datetime
     updated_at: datetime
 

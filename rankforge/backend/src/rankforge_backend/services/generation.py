@@ -159,7 +159,7 @@ _ARTICLE_COLUMNS = (
     "generation_status, generation_error, progress, content_md, meta_title, "
     "meta_description, seo_score, geo_score, readability_score, json_ld, "
     "grounding_report, canonical_url, author, og_image_url, cluster_id, "
-    "cluster_role, created_at, updated_at"
+    "cluster_role, category, summary, faq, created_at, updated_at"
 )
 _SUMMARY_COLUMNS = "id, title, status, generation_status, progress, updated_at"
 
@@ -247,7 +247,7 @@ def create_article(
 def _update(db: Database, article_id: UUID, **fields: Any) -> None:
     jsonb = {
         "progress", "seo_score", "geo_score", "readability_score", "json_ld",
-        "grounding_report",
+        "grounding_report", "faq",
     }
     sets, params = [], []
     for k, v in fields.items():
