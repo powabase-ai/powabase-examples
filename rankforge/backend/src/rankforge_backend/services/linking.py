@@ -460,14 +460,16 @@ def _suggestion_key(row: dict[str, Any]) -> str | None:
     return row.get("target_url")
 
 
-def _pending(
+def _open_suggestions(
     db: Database, business_id: UUID, article_id: UUID
 ) -> list[dict[str, Any]]:
-    """The article's pending suggestions (anchored and gaps) from any run."""
+    """The article's pending AND dismissed suggestions (anchored and gaps) from any
+    run. Accepted rows are left out: an accepted link is in the body (or was removed
+    from it by the editor, who may want it suggested again)."""
     return db.fetch_all(
-        "select target_article_id, target_url, anchor_text "
+        "select target_article_id, target_url, anchor_text, status "
         "from public.link_suggestions where article_id = %s and business_id = %s "
-        "and status = 'pending'",
+        "and status in ('pending', 'dismissed')",
         (article_id, business_id),
     )
 
@@ -555,14 +557,22 @@ def suggest_links(
         have = len(_LINK_REF_RE.findall(md)) + sum(
             1 for h in hub_targets(brand) if h["url"] in md
         )
-        # Targets that already have a PENDING suggestion — staged this run (`out`) or
-        # by an earlier run (a re-insert of those hits ON CONFLICT and returns None,
-        # so `out` alone would miss them). Article targets are keyed by their
-        # `rf:article/<id>` ref (compare ids, not rendered URLs), hubs by URL. Each
-        # one counts toward the minimum once, and never gets a second (gap) row.
+        # Article targets are keyed by their `rf:article/<id>` ref (compare ids, not
+        # rendered URLs), hubs by URL. An earlier run's rows matter too: re-inserting
+        # them hits ON CONFLICT and returns None, so `out` alone would miss them.
+        # - `staged`: targets with a PENDING suggestion (this run or earlier). Each
+        #   counts toward the minimum once.
+        # - `blocked`: `staged` plus targets the editor DISMISSED. A dismissed row
+        #   doesn't count toward the minimum, but its target never gets a gap here —
+        #   the gap's key (target, '') differs from the dismissed anchor's key, so
+        #   the unique index wouldn't stop it re-suggesting a rejected link.
+        prior = _open_suggestions(db, business_id, article_id)
         staged = {
-            k for k in map(_suggestion_key, [*out, *_pending(db, business_id, article_id)]) if k
+            k for k in map(_suggestion_key, [
+                *out, *(r for r in prior if r.get("status") == "pending"),
+            ]) if k
         }
+        blocked = staged | {k for k in map(_suggestion_key, prior) if k}
         need = prof.links.min - have - len([k for k in staged if k not in md])
         ranked: list[dict[str, Any]] = []
         if need > 0 and len(out) < cap:
@@ -575,9 +585,9 @@ def suggest_links(
             if need <= 0 or len(out) >= cap:
                 break
             key = c["target"]
-            # Skip a target that already has a suggestion, or that the body already
-            # links (the ref for an article, the URL for a hub).
-            if key in staged or key in md:
+            # Skip a target that already has a pending or dismissed suggestion, or
+            # that the body already links (the ref for an article, the URL for a hub).
+            if key in blocked or key in md:
                 continue
             is_hub = not key.startswith("rf:article/")
             tgt = (
@@ -597,7 +607,7 @@ def suggest_links(
             )
             if row:
                 out.append(row)
-                staged.add(key)
+                blocked.add(key)
                 need -= 1
     return out
 

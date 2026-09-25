@@ -320,6 +320,10 @@ mandatory.
     `pending` suggestion (anchored or gap), whether this run or an earlier one
     staged it. Such a target never gets a second (gap) row, so re-running suggest
     or the relink sweep stages nothing new once the minimum is covered.
+  - A target whose suggestion the editor **dismissed** never gets a gap either
+    (the gap's unique key differs from the dismissed anchor's, so the index
+    alone wouldn't stop it). A dismissed row does not count toward the minimum;
+    an accepted row neither counts nor blocks.
 - **Trailing slash:** `canonical_url` and hub rendering append `/` to the path
   when `trailing_slash` is on and the path has no file extension.
   - Link check and relink use the same functions, so they stay consistent.

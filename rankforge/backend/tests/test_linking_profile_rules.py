@@ -42,9 +42,11 @@ def _row(tid: str, title: str, kw: list[str], cat: str = "rag") -> dict[str, Any
 
 class FakeDB:
     """Just enough of Database for suggest_links: published rows, cluster pillar
-    lookups, and a link_suggestions table that keeps its pending rows and CONFLICTS
-    (returns None, like ON CONFLICT DO NOTHING) on a duplicate of the unique keys
-    (target article or hub URL, lower(coalesce(anchor, '')))."""
+    lookups, and a link_suggestions table that keeps its rows (with a `status`;
+    pending unless a test says otherwise) and CONFLICTS (returns None, like ON
+    CONFLICT DO NOTHING) on a duplicate of the unique keys (target article or hub
+    URL, lower(coalesce(anchor, ''))) whatever the stored row's status. The read
+    honours the query's status filter, so dropping it from the SQL shows up."""
 
     def __init__(self, rows: list[dict[str, Any]], pillar: dict | None = None):
         self.rows = rows
@@ -63,7 +65,16 @@ class FakeDB:
         if "from public.link_suggestions" in q:
             # Scoped to the article AND its brand (defence in depth).
             assert "business_id = %s" in q and tuple(map(str, p)) == (AID, BID)
-            return [dict(r) for r in self.pending]
+            if "status = 'pending'" in q:
+                allowed: tuple[str, ...] | None = ("pending",)
+            elif "status in ('pending', 'dismissed')" in q:
+                allowed = ("pending", "dismissed")
+            else:
+                allowed = None  # no status filter: every stored row
+            return [
+                {"status": "pending", **r} for r in self.pending
+                if allowed is None or r.get("status", "pending") in allowed
+            ]
         if "cluster_role = 'member'" in q:
             return []
         self.library_fetches += 1
@@ -171,6 +182,63 @@ def test_two_runs_stage_the_same_suggestions_once(monkeypatch):
     assert db.pending == before  # nothing new: no T1 gap, no fourth target
     assert [r["anchor_text"] for r in db.pending
             if str(r["target_article_id"]) == T1] == ["tech one guide"]
+
+
+# --- F1 (round 3): a DISMISSED suggestion blocks a gap to its target but doesn't
+# count toward the minimum ---
+def _dismissed(tid: str | None, anchor: str | None, url: str) -> dict[str, Any]:
+    return {"target_article_id": tid, "anchor_text": anchor, "target_url": url,
+            "kind": "mention", "status": "dismissed"}
+
+
+def test_dismissed_anchor_blocks_a_gap_to_that_target(monkeypatch):
+    """Run 1 staged an anchored link to T1; the editor dismissed it. The next run's
+    anchored re-insert conflicts, and step 4 must not come back with a T1 gap."""
+    rows = [_row(T1, "Tech One", ["tech one guide"])]
+    db = FakeDB(rows)
+    db.pending.append(_dismissed(T1, "tech one guide",
+                                 "https://powabase.ai/blog/tech-one"))
+    _, out = _run(monkeypatch, "We compare the tech one guide approach.", rows,
+                  db=db)
+    assert out == []
+    assert [p[3] for p in _to(db, T1)] == ["tech one guide"]  # no gap attempted
+
+
+def test_dismissed_hub_anchor_blocks_a_hub_gap(monkeypatch):
+    brief = {"primary_keyword": "pgvector", "secondary_keywords": []}
+    db = FakeDB([])
+    db.pending.append(_dismissed(None, "pgvector", VDB))
+    _run(monkeypatch, "We rely on pgvector for retrieval.", [], brief=brief, db=db)
+    assert [p[3] for p in db.inserts if p[4] == VDB] == ["pgvector"]
+
+
+def test_dismissed_rows_do_not_count_toward_the_minimum(monkeypatch):
+    """min=3 with T1 dismissed: the dismissed row doesn't count, so three gaps go
+    to the OTHER targets (T1 is skipped). Kills dropping `status = 'pending'` from
+    the pending count (then need would be 2)."""
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", []),
+            _row(T3, "Tech Three", [], "agents"), _row(T5, "Tech Five", [], "agents")]
+    db = FakeDB(rows)
+    db.pending.append(_dismissed(T1, "old anchor",
+                                 "https://powabase.ai/blog/tech-one"))
+    _run(monkeypatch, "No links here.", rows, _brand(min=3, max=10), db=db)
+    gaps = [str(p[2]) for p in db.inserts if p[3] is None]
+    assert len(gaps) == 3 and T1 not in gaps
+
+
+def test_accepted_rows_neither_count_nor_block(monkeypatch):
+    """An accepted suggestion whose link the editor later removed from the body is
+    neither pending nor dismissed: its target may be gapped again, and it doesn't
+    count toward the minimum."""
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", []),
+            _row(T3, "Tech Three", [], "agents")]
+    db = FakeDB(rows)
+    db.pending.append({**_dismissed(T1, "old anchor",
+                                    "https://powabase.ai/blog/tech-one"),
+                       "status": "accepted"})
+    _run(monkeypatch, "No links here.", rows, _brand(min=3, max=10), db=db)
+    gaps = sorted(str(p[2]) for p in db.inserts if p[3] is None)
+    assert gaps == sorted([T1, T2, T3])
 
 
 def test_pending_target_already_linked_in_the_body_counts_once(monkeypatch):
