@@ -11,7 +11,7 @@ class LinkSuggestion(BaseModel):
     id: UUID
     business_id: UUID
     article_id: UUID
-    target_article_id: UUID
+    target_article_id: UUID | None = None  # None = a hub-page link (no target article)
     anchor_text: str | None = None  # null = a structural gap (no natural anchor yet)
     target_url: str
     target_title: str | None = None

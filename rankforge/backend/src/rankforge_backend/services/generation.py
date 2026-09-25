@@ -14,8 +14,9 @@ from uuid import UUID
 from psycopg.types.json import Json
 
 from ..db import Database
+from ..models.blog import BlogProfile
 from ..powabase import PowabaseClient
-from . import brand_materials, grounding, prose_style
+from . import blog_rules, brand_materials, grounding, prose_style
 from . import brief as brief_svc
 from . import business_profiles as brands
 from . import research as research_svc
@@ -159,7 +160,7 @@ _ARTICLE_COLUMNS = (
     "generation_status, generation_error, progress, content_md, meta_title, "
     "meta_description, seo_score, geo_score, readability_score, json_ld, "
     "grounding_report, canonical_url, author, og_image_url, cluster_id, "
-    "cluster_role, created_at, updated_at"
+    "cluster_role, category, summary, faq, created_at, updated_at"
 )
 _SUMMARY_COLUMNS = "id, title, status, generation_status, progress, updated_at"
 
@@ -247,12 +248,15 @@ def create_article(
 def _update(db: Database, article_id: UUID, **fields: Any) -> None:
     jsonb = {
         "progress", "seo_score", "geo_score", "readability_score", "json_ld",
-        "grounding_report",
+        "grounding_report", "faq",
     }
     sets, params = [], []
     for k, v in fields.items():
         sets.append(f"{k} = %s")
-        params.append(Json(v) if k in jsonb else v)
+        # None stays SQL NULL (not jsonb 'null') for nullable jsonb (faq), so a
+        # restore can clear it; progress is NOT NULL, so it keeps Json(None).
+        wrap = k in jsonb and not (v is None and k == "faq")
+        params.append(Json(v) if wrap else v)
     sets.append("updated_at = now()")
     params.append(article_id)
     db.execute(
@@ -420,6 +424,62 @@ def _cluster_block(cluster: dict[str, Any] | None) -> str:
     return ""
 
 
+def _writer_rules(profile: BlogProfile | None, brand_name: str) -> str:
+    """Blog-profile overrides appended to the per-article message."""
+    if profile is None:
+        return ""
+    lines = ["\n\n## This blog's publishing rules (override anything above)"]
+    if profile.faq.enabled:
+        lines.append(
+            "- Do not write an FAQ or Q&A section. The FAQ is generated separately "
+            "and a body FAQ would appear twice on the page."
+        )
+    if profile.stance == "favor_brand":
+        lines.append(
+            f"- Position {brand_name} as equal to or ahead of the alternatives. Never "
+            f"state a {brand_name} gap, limitation or missing feature. Where a "
+            "competitor genuinely fits a different need, describe that need neutrally. "
+            "(Still never hyperlink a competitor.)"
+        )
+    lines.append(
+        "- Do not add a 'Related reading' or 'Further reading' section; the site adds "
+        "one."
+    )
+    return "\n".join(lines)
+
+
+_FAQ_HEADING_RE = re.compile(
+    r"^h2:\s*(faqs?\b|frequently asked|common questions)", re.I
+)
+
+
+def _outline_for(headings: list[str], profile: BlogProfile | None) -> list[str]:
+    """Drop an FAQ H2 (and its H3s) from the outline when the FAQ is frontmatter."""
+    if profile is None or not profile.faq.enabled:
+        return headings
+    out, skipping = [], False
+    for h in headings:
+        low = h.lower().lstrip()
+        if low.startswith("h2"):
+            skipping = bool(_FAQ_HEADING_RE.match(low))
+        if not skipping:
+            out.append(h)
+    return out
+
+
+def _link_block(candidates: list[dict[str, Any]], profile: BlogProfile | None) -> str:
+    if profile is None or not candidates:
+        return ""
+    rows = "\n".join(f'- "{c["title"]}": {c["target"]}' for c in candidates)
+    return (
+        "\n\n## Internal links you may use\n"
+        f"- Place {profile.links.min}-{profile.links.max} of these as contextual links "
+        "with natural in-sentence anchors, where they genuinely help the reader. Use "
+        "the link target exactly as written.\n"
+        f"{rows}"
+    )
+
+
 def _cluster_context(
     db: Database, article_id: UUID, brand: dict[str, Any] | None
 ) -> dict[str, Any] | None:
@@ -473,11 +533,13 @@ async def _draft_article(
     materials_url_by_source: dict[str, str] | None = None,
     brand: dict[str, Any] | None = None,
     cluster: dict[str, Any] | None = None,
+    profile: BlogProfile | None = None,
+    link_candidates: list[dict[str, Any]] | None = None,
 ) -> str:
     """Draft the WHOLE article in one streamed pass, so the model holds the entire
     piece in context and writes a single coherent argument (the per-section approach
     produced disjoint, stitched-together drafts)."""
-    headings = brief.get("headings") or []
+    headings = _outline_for(brief.get("headings") or [], profile)
     h2s = [
         h.split(":", 1)[1].strip()
         for h in headings
@@ -527,7 +589,9 @@ async def _draft_article(
         "never the page title or a bare URL), and vary the source domain.\n"
         f"{_grounding_block(research, url_by_source)}"
         f"{cluster_block}"
-        f"{brand_block}\n\n"
+        f"{brand_block}"
+        f"{_link_block(link_candidates or [], profile)}"
+        f"{_writer_rules(profile, (brand or {}).get('name') or 'the brand')}\n\n"
         "## Output\n"
         "- Output the full article body in Markdown (intro, every section, "
         "conclusion). Do not include the H1 title."
@@ -630,6 +694,15 @@ async def run_generation_task(
         agent_id = await ensure_writer_agent(client)
         title = brief.get("suggested_title") or topic
         cluster_ctx = _cluster_context(db, article_id, brand_profile)
+        from . import linking as _linking
+
+        profile = blog_rules.profile_of(brand_profile)
+        candidates = (
+            _linking.link_candidates(
+                db, brand_profile, get_article(db, article_id) or {}, brief
+            )
+            if profile else []
+        )
         _update(
             db, article_id,
             generation_status="drafting",
@@ -642,6 +715,8 @@ async def run_generation_task(
             materials_url_by_source=materials_url_by_source,
             brand=brand_profile,
             cluster=cluster_ctx,
+            profile=profile,
+            link_candidates=candidates,
         )
         # Prepend the canonical H1. Strip ANY H1 line the writer emitted anyway
         # (multiline — a stray H1 after a preamble line would otherwise leave the
@@ -651,17 +726,36 @@ async def run_generation_task(
         # The brand's own blog must never pass link authority to a rival: unwrap any
         # outbound link to a competitor domain (keep the anchor text, drop the URL). The
         # writer is told not to link competitors; this enforces it deterministically.
-        from . import linking as _linking
-
         content_md = _linking.strip_competitor_links(
             content_md, _linking.competitor_hosts(brand_profile)
         )
+        # A retry re-drafts over whatever the article holds; version a non-empty body
+        # first so hand edits and earlier refines stay revertable.
+        prior = get_article(db, article_id)
+        if prior and (prior.get("content_md") or "").strip():
+            snapshot_version(db, prior)
         _update(
             db, article_id,
             content_md=content_md,
             generation_status="optimizing",
             progress={"phase": "scoring", "total": 1, "done": 1},
         )
+
+        frontmatter_flags: list[str] = []
+        if bad := blog_rules.invalid_profile_reason(brand_profile):
+            # The run continues without the profile's rules; say why, so the user
+            # isn't left thinking the rules were applied.
+            frontmatter_flags.append(f"blog profile is invalid: {bad}")
+        if profile:
+            from . import frontmatter
+
+            try:
+                frontmatter_flags = await frontmatter.complete(client, db, article_id)
+            except Exception:  # noqa: BLE001 — never block generation; export checks it
+                log.exception("frontmatter step failed for %s", article_id)
+                frontmatter_flags = ["the frontmatter step failed; run it again"]
+            if frontmatter_flags:
+                log.info("frontmatter flags for %s: %s", article_id, frontmatter_flags)
 
         # 6) reflect/fact-check, GEO optimize (JSON-LD), then SEO + GEO scoring
         #    (local import avoids a circular dependency)
@@ -693,7 +787,9 @@ async def run_generation_task(
             db, article_id,
             generation_status="done",
             progress={"phase": "done", "total": 1, "done": 1,
-                      "word_count": len(final_md.split())},
+                      "word_count": len(final_md.split()),
+                      **({"frontmatter_flags": frontmatter_flags}
+                         if frontmatter_flags else {})},
         )
     except Exception:  # noqa: BLE001
         log.exception("article generation failed for %s", article_id)
@@ -781,45 +877,128 @@ def list_versions(db: Database, article_id: UUID) -> list[dict[str, Any]]:
     ]
 
 
+FRONTMATTER_FIELDS = (
+    "title", "meta_title", "meta_description", "category", "summary", "faq",
+)
+
+
+def _snapshot_frontmatter(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """The frontmatter keys a version snapshot recorded (None values included)."""
+    return {k: v for k, v in (snapshot or {}).items() if k in FRONTMATTER_FIELDS}
+
+
+def _restore(
+    db: Database,
+    article_id: UUID,
+    cur: dict[str, Any],
+    content_md: str,
+    frontmatter: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Write a version back. Snapshots the current state first (so the restore is
+    itself undoable), then writes every recorded frontmatter key, None included —
+    via _update, because update_article ignores None for title/meta_description,
+    which a version may also record."""
+    snapshot_version(db, cur)
+    _update(db, article_id, content_md=content_md, **frontmatter)
+    return get_article(db, article_id)
+
+
 def restore_version(
     db: Database, article_id: UUID, version_id: UUID
 ) -> dict[str, Any] | None:
-    """Restore a prior version. update_article snapshots the current content first,
-    so a restore is itself undoable."""
+    """Restore a prior version's body + frontmatter (undoable, see _restore)."""
     v = db.fetch_one(
-        "select content_md from public.article_versions "
+        "select content_md, frontmatter from public.article_versions "
         "where id = %s and article_id = %s",
         (version_id, article_id),
     )
     if v is None:
         return None
-    return update_article(db, article_id, {"content_md": v["content_md"]})
+    cur = get_article(db, article_id)
+    if cur is None:
+        return None
+    return _restore(
+        db, article_id, cur, v["content_md"], _snapshot_frontmatter(v.get("frontmatter"))
+    )
+
+
+def snapshot_version(db: Database, article: dict[str, Any]) -> None:
+    """Record the article's current body + frontmatter as a version (undo point)."""
+    if not article or not article.get("content_md"):
+        return
+    db.execute(
+        "insert into public.article_versions (article_id, content_md, frontmatter) "
+        "values (%s, %s, %s)",
+        (
+            article["id"],
+            article["content_md"],
+            Json({k: article.get(k) for k in FRONTMATTER_FIELDS}),
+        ),
+    )
+
+
+# Frontmatter the editor may clear: an explicit None in `fields` writes NULL.
+CLEARABLE_FIELDS = frozenset({"category", "summary", "faq", "meta_title"})
 
 
 def update_article(
     db: Database, article_id: UUID, fields: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Partial update of editable fields. Snapshots the prior content into
-    article_versions when content_md changes (editorial history)."""
-    fields = {k: v for k, v in fields.items() if v is not None}
+    """Partial update of editable fields. `fields` holds only what the caller set
+    (PATCH passes `model_dump(exclude_unset=True)`): a key that is absent is left
+    alone, and an explicit None clears a CLEARABLE_FIELDS value (other fields ignore
+    None). Snapshots the prior body + frontmatter into article_versions when
+    content_md OR any frontmatter field actually changes (editorial history / undo
+    point)."""
+    fields = {
+        k: v for k, v in fields.items() if v is not None or k in CLEARABLE_FIELDS
+    }
     if not fields:
         return get_article(db, article_id)
-    if "content_md" in fields:
-        cur = get_article(db, article_id)
-        if cur and cur.get("content_md"):
-            db.execute(
-                "insert into public.article_versions (article_id, content_md) "
-                "values (%s, %s)",
-                (article_id, cur["content_md"]),
-            )
+    cur = get_article(db, article_id)
+    changes_fm = any(
+        k in fields and cur and fields[k] != cur.get(k) for k in FRONTMATTER_FIELDS
+    )
+    if cur and (
+        ("content_md" in fields and fields["content_md"] != cur.get("content_md"))
+        or changes_fm
+    ):
+        snapshot_version(db, cur)
     set_clauses = [f"{k} = %s" for k in fields]
     set_clauses.append("updated_at = now()")
-    params = [*fields.values(), article_id]
+    # A cleared faq is SQL NULL, not jsonb 'null'.
+    params = [
+        Json(v) if k == "faq" and v is not None else v for k, v in fields.items()
+    ]
+    params.append(article_id)
     return db.fetch_one(
         f"update public.articles set {', '.join(set_clauses)} "
         f"where id = %s returning {_ARTICLE_COLUMNS}",
         tuple(params),
     )
+
+
+def revert_last(db: Database, article_id: UUID) -> dict[str, Any] | None:
+    """Restore the newest version whose body OR frontmatter differs from now; None
+    when no version differs. The current state is versioned first (by _restore),
+    so revert is undoable — and a second revert re-applies the change (it toggles:
+    the newest differing version is then the snapshot the first revert took). Only
+    the latest 20 versions are scanned; an older differing one is not reached."""
+    cur = get_article(db, article_id)
+    if cur is None:
+        return None
+    rows = db.fetch_all(
+        "select id, content_md, frontmatter from public.article_versions "
+        "where article_id = %s order by created_at desc limit 20",
+        (article_id,),
+    )
+    for v in rows:
+        fm = _snapshot_frontmatter(v.get("frontmatter"))
+        if v["content_md"] != cur.get("content_md") or any(
+            fm[k] != cur.get(k) for k in fm
+        ):
+            return _restore(db, article_id, cur, v["content_md"], fm)
+    return None
 
 
 def get_brief(db: Database, brief_id: UUID) -> dict[str, Any] | None:

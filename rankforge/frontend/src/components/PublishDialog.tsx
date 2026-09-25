@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, Copy, Download, Eye, Globe, Loader2, Undo2 } from "lucide-react";
+import { Check, Copy, Download, Eye, Globe, Loader2, Undo2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -13,9 +13,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { usePublications, usePublish, useUnpublish } from "@/lib/hooks/usePublish";
-import { useArticle, useUpdateArticle } from "@/lib/hooks/useArticles";
+import {
+  useArticle,
+  useGenerateFrontmatter,
+  useUpdateArticle,
+} from "@/lib/hooks/useArticles";
 import { useBrand } from "@/lib/hooks/useBrands";
-import { exportArticle } from "@/lib/api";
+import { exportArticle, ExportBlockedError } from "@/lib/api";
+import { describeFrontmatterResult } from "@/lib/frontmatterResult";
 
 function download(filename: string, content: string, type: string) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -52,9 +57,13 @@ export function PublishDialog({
   const { data: article } = useArticle(articleId);
   const { data: brand } = useBrand(brandId);
   const updateArticle = useUpdateArticle(articleId);
+  const generateFrontmatter = useGenerateFrontmatter(articleId);
 
   const [busy, setBusy] = useState<string | null>(null);
   const [urlValue, setUrlValue] = useState("");
+  // Set when an export or publish 422s on the blog profile's export rules
+  // (missing category, summary/FAQ out of range, title/description too long, …).
+  const [issues, setIssues] = useState<string[] | null>(null);
 
   // Where the article actually lives: an explicit override, else derived from the
   // brand's blog URL pattern. RankForge's own /p/{id} page is just a local preview.
@@ -76,6 +85,15 @@ export function PublishDialog({
     () => setUrlValue(article?.canonical_url || computed || ""),
     [article?.canonical_url, computed]
   );
+
+  // Clear a stale issues list from a previous export/publish attempt each time the
+  // dialog is (re)opened, so it doesn't show outdated results on the next visit.
+  useEffect(() => {
+    if (open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setIssues(null);
+    }
+  }, [open]);
   // "Dirty" means the field differs from the auto-derived value, so Save is disabled
   // when urlValue equals the brand-pattern URL — that's intentional, not a bug. The
   // derived URL is ephemeral by design: there's no need to persist it to canonical_url
@@ -93,11 +111,28 @@ export function PublishDialog({
         text,
         format === "markdown" ? "text/markdown" : "text/html"
       );
+      setIssues(null);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Export failed");
+      if (e instanceof ExportBlockedError) setIssues(e.issues);
+      else toast.error(e instanceof Error ? e.message : "Export failed");
     } finally {
       setBusy(null);
     }
+  }
+
+  function fixAutomatically() {
+    // No body: only fields failing the rules are regenerated.
+    generateFrontmatter.mutate(undefined, {
+      onSuccess: (result) => {
+        const { export_issues } = result;
+        setIssues(export_issues.length > 0 ? export_issues : null);
+        // Worded from `changed` + `flags` only (e.g. "category defaulted to rag").
+        const { kind, message } = describeFrontmatterResult(result, "fix");
+        toast[kind](message);
+      },
+      // A 409 detail (e.g. "blog profile is invalid: …") is shown as-is.
+      onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+    });
   }
 
   async function copyHtml() {
@@ -126,12 +161,15 @@ export function PublishDialog({
     publish.mutate(
       { target_type: "export" },
       {
-        onSuccess: (p) =>
-          p.status === "success"
-            ? toast.success("Marked as published")
-            : toast.error("Couldn’t mark published"),
-        onError: (e) =>
-          toast.error(e instanceof Error ? e.message : "Publish failed"),
+        onSuccess: (p) => {
+          setIssues(null);
+          if (p.status === "success") toast.success("Marked as published");
+          else toast.error("Couldn’t mark published");
+        },
+        onError: (e) => {
+          if (e instanceof ExportBlockedError) setIssues(e.issues);
+          else toast.error(e instanceof Error ? e.message : "Publish failed");
+        },
       }
     );
   }
@@ -160,6 +198,33 @@ export function PublishDialog({
           <DialogTitle>Publish &amp; export</DialogTitle>
         </DialogHeader>
         <div className="min-w-0 space-y-5">
+          {issues && issues.length > 0 && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
+              <p className="mb-1.5 font-semibold text-destructive">
+                Fix before exporting
+              </p>
+              <ul className="list-disc space-y-0.5 pl-4 text-destructive">
+                {issues.map((issue, i) => (
+                  <li key={i}>{issue}</li>
+                ))}
+              </ul>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-2"
+                onClick={fixAutomatically}
+                disabled={generateFrontmatter.isPending}
+              >
+                {generateFrontmatter.isPending ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <Wand2 />
+                )}
+                Fix automatically
+              </Button>
+            </div>
+          )}
+
           <section>
             <h3 className={h3}>Published on your blog</h3>
             <p className="mt-1 text-xs text-muted-foreground">

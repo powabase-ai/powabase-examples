@@ -10,6 +10,7 @@ from uuid import UUID
 from ..db import Database
 from ..powabase import PowabaseClient
 from ..util import extract_json
+from . import blog_rules
 from . import brief as brief_svc
 from . import business_profiles as brands
 from . import generation as gen_svc
@@ -132,6 +133,27 @@ async def build_faq_jsonld(
     return {"@type": "FAQPage", "mainEntity": entities}
 
 
+def faq_jsonld_from_items(items: list[dict] | None) -> dict[str, Any] | None:
+    """Convert stored FAQ items [{"q", "a"}, ...] to FAQPage JSON-LD schema.
+    Items without both q and a are filtered out; None list is treated as empty."""
+    entities = [
+        {
+            "@type": "Question",
+            "name": i["q"],
+            "acceptedAnswer": {"@type": "Answer", "text": i["a"]},
+        }
+        for i in (items or [])
+        if isinstance(i, dict) and i.get("q") and i.get("a")
+    ]
+    return {"@type": "FAQPage", "mainEntity": entities} if entities else None
+
+
+def _brand(db: Database, article: dict) -> dict[str, Any] | None:
+    """Get the brand dict for an article by its business_id."""
+    bid = article.get("business_id")
+    return brands.get_profile(db, bid) if bid else None
+
+
 async def optimize_and_store(
     client: PowabaseClient, db: Database, article_id: UUID
 ) -> dict[str, Any] | None:
@@ -141,11 +163,7 @@ async def optimize_and_store(
     brief = (
         brief_svc.get_brief(db, article["brief_id"]) if article.get("brief_id") else {}
     ) or {}
-    brand = (
-        brands.get_profile(db, article["business_id"])
-        if article.get("business_id")
-        else None
-    )
+    brand = _brand(db, article)
     author = brand["name"] if brand else None
     template = templates_svc.get_template(db, brief.get("article_type"))
     schema_type = template["schema_org_type"] if template else "BlogPosting"
@@ -160,7 +178,13 @@ async def optimize_and_store(
         ho = build_howto_jsonld(content_md, article.get("title"))
         if ho:
             graph.append(ho)
-    faq = await build_faq_jsonld(client, content_md)
+
+    prof = blog_rules.profile_of(brand)
+    if prof and prof.faq.enabled:
+        faq = faq_jsonld_from_items(article.get("faq"))
+    else:
+        faq = await build_faq_jsonld(client, content_md)
+
     if faq:
         graph.append(faq)
     json_ld = {"@context": "https://schema.org", "@graph": graph}

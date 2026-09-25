@@ -756,3 +756,129 @@ def test_em_dash_instruction_is_unchanged():
     """Em-dash handling is deliberately out of scope: the zero-tolerance backstop and
     its instruction must survive this refactor untouched."""
     assert "Do not leave a single em-dash" in revise._TELL_INSTRUCTION["em_dashes"]
+
+
+# --- legacy/targeted refine strips a body FAQ on a profile brand (final review #4) ---
+_FAQ_BODY = "# T\n\n## Intro\n\ntext\n\n## FAQ\n\n### Q?\n\nA.\n\n## End\n\nbye"
+_PROFILE_BRAND = {"name": "B", "blog_profile": {"categories": [{"key": "rag",
+                                                                 "label": "R"}]}}
+
+
+def _refine_env(monkeypatch, brand):
+    state = {"art": {"id": "aid", "business_id": "b", "brief_id": None,
+                     "seo_score": None, "content_md": _FAQ_BODY}}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda d, a: dict(state["art"]))
+    monkeypatch.setattr(revise.gen_svc, "_update",
+                        lambda d, a, **f: state["art"].update(f))
+    monkeypatch.setattr(revise.brands, "get_profile", lambda d, b: brand)
+    monkeypatch.setattr(revise, "_article_context", lambda d, a: (None, {}, None))
+    monkeypatch.setattr(revise, "_objective_loop", AsyncMock())
+    monkeypatch.setattr(revise, "_editorial_loop", AsyncMock())
+    monkeypatch.setattr(revise, "_targeted_loop", AsyncMock())
+    rescore = AsyncMock()
+    monkeypatch.setattr(scoring, "score_and_store", rescore)
+    return state, rescore
+
+
+async def test_refine_strips_body_faq_on_profile_brand(monkeypatch):
+    state, rescore = _refine_env(monkeypatch, _PROFILE_BRAND)
+    out = await revise.refine(MagicMock(), MagicMock(), "aid")
+    assert "## FAQ" not in state["art"]["content_md"]
+    assert "## Intro" in state["art"]["content_md"]
+    assert "## End" in state["art"]["content_md"]
+    assert "## FAQ" not in out["content_md"]
+    rescore.assert_awaited_once()
+
+
+async def test_targeted_refine_strips_body_faq_on_profile_brand(monkeypatch):
+    state, _ = _refine_env(monkeypatch, _PROFILE_BRAND)
+    await revise.refine(MagicMock(), MagicMock(), "aid",
+                        targets=["readability:em_dashes"])
+    assert "## FAQ" not in state["art"]["content_md"]
+
+
+async def test_refine_keeps_body_faq_without_profile(monkeypatch):
+    state, rescore = _refine_env(monkeypatch, {"name": "B", "blog_profile": None})
+    await revise.refine(MagicMock(), MagicMock(), "aid")
+    assert state["art"]["content_md"] == _FAQ_BODY
+    rescore.assert_not_awaited()
+
+
+# --- review r3 survivor G8: the strip respects faq.enabled ---
+async def test_refine_keeps_body_faq_when_profile_faq_is_disabled(monkeypatch):
+    brand = {"name": "B", "blog_profile": {
+        **_PROFILE_BRAND["blog_profile"], "faq": {"enabled": False}}}
+    state, rescore = _refine_env(monkeypatch, brand)
+    await revise.refine(MagicMock(), MagicMock(), "aid")
+    assert state["art"]["content_md"] == _FAQ_BODY
+    rescore.assert_not_awaited()
+
+
+# --- review r1 I2: refine() fits meta to the profile's limits ---
+async def test_refine_meta_uses_profile_limits_and_enforces(monkeypatch):
+    brand = {"name": "B", "blog_profile": {
+        "categories": [{"key": "rag", "label": "R"}],
+        "meta": {"title_max": 50, "description_max": 150}}}
+    state, _ = _refine_env(monkeypatch, brand)
+    state["art"]["title"] = "t" * 55
+    fm = AsyncMock()
+    monkeypatch.setattr(revise, "fix_meta", fm)
+    from rankforge_backend.services import frontmatter
+
+    enforce = MagicMock()
+    monkeypatch.setattr(frontmatter, "enforce_meta", enforce)
+    await revise.refine(MagicMock(), MagicMock(), "aid",
+                        targets=["seo:title_length"])
+    kw = fm.await_args.kwargs
+    assert kw["title_max"] == 50 and kw["description_max"] == 150
+    enforce.assert_called_once()
+    assert enforce.call_args.args[3].meta.title_max == 50
+
+
+async def test_refine_meta_without_profile_keeps_defaults(monkeypatch):
+    _refine_env(monkeypatch, {"name": "B", "blog_profile": None})
+    fm = AsyncMock()
+    monkeypatch.setattr(revise, "fix_meta", fm)
+    from rankforge_backend.services import frontmatter
+
+    enforce = MagicMock()
+    monkeypatch.setattr(frontmatter, "enforce_meta", enforce)
+    await revise.refine(MagicMock(), MagicMock(), "aid",
+                        targets=["seo:title_length"])
+    assert "title_max" not in fm.await_args.kwargs
+    enforce.assert_not_called()
+
+
+async def test_editorial_loop_gates_with_the_db_and_article(monkeypatch):
+    """The voice-rewrite gate must be profile-aware: _editorial_loop hands the db
+    and the article to _accept_revision, which resolves links and scores with the
+    brand's blog profile (a rewrite that drops an internal link then regresses)."""
+    art = {"content_md": "Body here.", "readability_score": None, "title": "T",
+           "meta_title": None, "meta_description": None, "business_id": "b1"}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda db, aid: art)
+    monkeypatch.setattr(revise, "ensure_editor_agent", AsyncMock(return_value="ed"))
+    monkeypatch.setattr(revise, "ensure_reviser_agent", AsyncMock(return_value="rv"))
+    monkeypatch.setattr(
+        revise, "_editor_review",
+        AsyncMock(return_value={
+            "verdict": "revise", "reads_human": 40,
+            "notes": [{"quote": "x", "problem": "p", "fix": "f"}],
+        }),
+    )
+    monkeypatch.setattr(revise, "_diverse_excerpts", AsyncMock(return_value="(none)"))
+    monkeypatch.setattr(
+        revise, "_revise_for_voice", AsyncMock(return_value="Body here, reworded.")
+    )
+    seen: dict = {}
+
+    def _gate(cur, new, title, meta, brief, **kw):
+        seen.update(kw)
+        return False  # rejected → the loop stops without writing
+
+    monkeypatch.setattr(revise, "_accept_revision", _gate)
+    upd = MagicMock()
+    monkeypatch.setattr(revise.gen_svc, "_update", upd)
+    db = MagicMock()
+    await revise._editorial_loop(MagicMock(), db, UUID(int=1), {}, None, None, {})
+    assert seen.get("db") is db and seen.get("article") is art
+    assert not any("content_md" in c.kwargs for c in upd.call_args_list)

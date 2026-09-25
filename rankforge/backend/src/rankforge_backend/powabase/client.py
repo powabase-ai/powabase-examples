@@ -185,6 +185,8 @@ class PowabaseClient:
 
         Consumes the SSE stream and returns the final assembled content plus tool
         activity and ids. Use this (not /run) whenever the agent has tools.
+        `incomplete` is True when no `complete` event arrived (a cut-off stream).
+        `error` is set by an `error` event or by a `complete` with status "failed".
         """
         result: dict[str, Any] = {
             "content": "",
@@ -192,6 +194,9 @@ class PowabaseClient:
             "session_id": session_id,
             "tool_results": [],
             "error": None,
+            # True until a `complete` event arrives: a stream that ends without one
+            # was cut off, and its content may be truncated.
+            "incomplete": True,
         }
         parts: list[str] = []
         async for line in self.run_agent_stream(
@@ -217,10 +222,15 @@ class PowabaseClient:
                     }
                 )
             elif kind == "complete":
+                result["incomplete"] = False
                 if evt.get("content"):
                     result["content"] = evt["content"]
                 result["run_id"] = evt.get("run_id", result["run_id"])
                 result["session_id"] = evt.get("session_id", result["session_id"])
+                # A run that failed after being handled still ends with `complete`
+                # (status "failed", message in `error`); it is an error, not content.
+                if evt.get("status") == "failed" and not result["error"]:
+                    result["error"] = evt
             elif kind == "error":
                 result["error"] = evt
         if not result["content"]:

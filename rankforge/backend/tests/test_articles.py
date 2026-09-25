@@ -418,3 +418,55 @@ async def test_refine_and_finish_marks_failed_when_refine_raises(monkeypatch):
     chk.assert_not_awaited()  # no link check on a failed refine
     assert updates[-1]["generation_status"] == "failed"
     assert updates[-1].get("generation_error")
+
+
+# --- review r1 C1 / K2: an instructed refine that produced nothing usable leaves the
+# article unchanged and 'done' (never 'failed', which offers Retry generation) ---
+async def test_refine_and_finish_instructed_error_is_done_with_reason(monkeypatch):
+    from rankforge_backend.routes import articles as art_routes
+
+    monkeypatch.setattr(
+        art_routes.revise_svc, "refine",
+        AsyncMock(side_effect=art_routes.revise_svc.InstructedRefineError(
+            "the revision dropped too much of the article")),
+    )
+    monkeypatch.setattr(
+        art_routes.svc, "get_article",
+        lambda db, aid: {"id": aid, "business_id": BID, "content_md": "the body"},
+    )
+    updates: list = []
+    monkeypatch.setattr(
+        art_routes.svc, "_update", lambda db, aid, **f: updates.append(f)
+    )
+    monkeypatch.setattr(art_routes.linkcheck_svc, "check_article", AsyncMock())
+    await art_routes._refine_and_finish(
+        MagicMock(), MagicMock(), UUID(ARTICLE["id"]), instructions="x", mode="rework"
+    )
+    assert updates[-1]["generation_status"] == "done"
+    assert updates[-1]["progress"] == {
+        "phase": "done", "mode": "rework", "word_count": 2,
+        "refine_error": "the revision dropped too much of the article",
+    }
+    assert "content_md" not in updates[-1]
+
+
+async def test_refine_and_finish_carries_frontmatter_flags(monkeypatch):
+    from rankforge_backend.routes import articles as art_routes
+
+    monkeypatch.setattr(art_routes.revise_svc, "refine", AsyncMock())
+    monkeypatch.setattr(
+        art_routes.svc, "get_article",
+        lambda db, aid: {"id": aid, "business_id": BID, "content_md": "the body",
+                         "progress": {"before": {"seo": 1}, "mode": "refine",
+                                      "frontmatter_flags": ["faq has 1 item(s)"]}},
+    )
+    updates: list = []
+    monkeypatch.setattr(
+        art_routes.svc, "_update", lambda db, aid, **f: updates.append(f)
+    )
+    monkeypatch.setattr(art_routes.linkcheck_svc, "check_article", AsyncMock())
+    await art_routes._refine_and_finish(MagicMock(), MagicMock(), UUID(ARTICLE["id"]))
+    assert updates[-1]["progress"] == {
+        "phase": "done", "word_count": 2, "before": {"seo": 1}, "mode": "refine",
+        "frontmatter_flags": ["faq has 1 item(s)"],
+    }

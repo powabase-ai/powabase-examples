@@ -1,8 +1,9 @@
 """GEO optimize — deterministic JSON-LD builder (hermetic)."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
-from rankforge_backend.services import geo_optimize
+from rankforge_backend.models.blog import BlogProfile  # noqa: E402
+from rankforge_backend.services import geo_optimize  # noqa: E402
 from rankforge_backend.services.geo_optimize import (
     build_article_jsonld,
     build_howto_jsonld,
@@ -54,3 +55,55 @@ async def test_build_faq_jsonld_survives_malformed_response(monkeypatch):
         return_value={"content": '{"faqs": ["just a string", 123]}'}
     )
     assert await geo_optimize.build_faq_jsonld(client, "# Article") is None
+
+
+_PROF = BlogProfile.model_validate({"categories": [{"key": "rag", "label": "R"}]})
+
+
+def test_faq_jsonld_from_items():
+    d = geo_optimize.faq_jsonld_from_items([{"q": "Q?", "a": "A."}, {"q": "", "a": "x"}])
+    assert d["@type"] == "FAQPage" and len(d["mainEntity"]) == 1
+    assert geo_optimize.faq_jsonld_from_items([]) is None
+
+
+async def test_optimize_uses_stored_faq_with_profile():
+    art = {
+        "id": "a",
+        "business_id": "b",
+        "title": "T",
+        "content_md": "# T\n\nx",
+        "faq": [{"q": "Q?", "a": "A."}],
+        "meta_description": "d",
+    }
+    with patch.object(geo_optimize.gen_svc, "get_article", return_value=art), patch.object(
+        geo_optimize, "_brand", return_value={"name": "Brand", "blog_profile": _PROF.model_dump()}
+    ), patch.object(
+        geo_optimize, "build_faq_jsonld", AsyncMock()
+    ) as extract, patch.object(
+        geo_optimize.gen_svc, "_update"
+    ) as upd:
+        await geo_optimize.optimize_and_store(MagicMock(), MagicMock(), "a")
+        extract.assert_not_called()
+        graph = upd.call_args.kwargs["json_ld"]["@graph"]
+        assert any(n.get("@type") == "FAQPage" for n in graph)
+
+
+async def test_optimize_extracts_when_faq_disabled():
+    off = _PROF.model_copy(update={"faq": _PROF.faq.model_copy(update={"enabled": False})})
+    art = {
+        "id": "a",
+        "business_id": "b",
+        "title": "T",
+        "content_md": "# T\n\nx",
+        "faq": None,
+        "meta_description": "d",
+    }
+    with patch.object(geo_optimize.gen_svc, "get_article", return_value=art), patch.object(
+        geo_optimize, "_brand", return_value={"name": "Brand", "blog_profile": off.model_dump()}
+    ), patch.object(
+        geo_optimize, "build_faq_jsonld", AsyncMock(return_value=None)
+    ) as extract, patch.object(
+        geo_optimize.gen_svc, "_update"
+    ):
+        await geo_optimize.optimize_and_store(MagicMock(), MagicMock(), "a")
+        extract.assert_awaited_once()

@@ -138,12 +138,14 @@ export function BrandFields({
         <p className="text-xs text-muted-foreground">
           Tokens: <code>{"{slug}"}</code>, <code>{"{id}"}</code>. Required for
           internal linking — links point here.
-          {value.url_pattern.includes("{slug}") && (
+          {/(\{slug\}|\{id\})/.test(value.url_pattern) && (
             <>
               {" "}
               e.g.{" "}
               <span className="font-data">
-                {value.url_pattern.replace("{slug}", "my-article")}
+                {value.url_pattern
+                  .replaceAll("{slug}", "my-article")
+                  .replaceAll("{id}", "3f2b8c1e-5a7d-4e2b-9c61-0d4e7a8b9f10")}
               </span>
             </>
           )}

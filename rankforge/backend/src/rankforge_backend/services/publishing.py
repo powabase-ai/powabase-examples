@@ -22,8 +22,9 @@ import markdown as md
 import nh3
 
 from ..db import Database
+from ..models.blog import BlogProfile
+from . import blog_rules, linking
 from . import generation as gen_svc
-from . import linking
 
 _MD_EXTENSIONS = ["extra", "sane_lists", "toc"]
 
@@ -105,6 +106,24 @@ def render_standalone_html(article: dict[str, Any]) -> str:
 """
 
 
+class ExportBlocked(Exception):
+    """The article would fail the target blog's build — carries the issue list."""
+
+    def __init__(self, issues: list[str]):
+        super().__init__("; ".join(issues))
+        self.issues = issues
+
+
+def _export_profile(brand: dict[str, Any] | None) -> BlogProfile | None:
+    """The brand's blog profile for an export gate. A stored profile that fails
+    validation blocks the export rather than silently exporting in legacy mode
+    (which would also switch the export rules off)."""
+    reason = blog_rules.invalid_profile_reason(brand)
+    if reason:
+        raise ExportBlocked([f"blog profile is invalid: {reason}"])
+    return blog_rules.profile_of(brand)
+
+
 def _fm_date(val: Any) -> str:
     """YYYY-MM-DD from a datetime (psycopg) or an ISO-ish string."""
     if hasattr(val, "date"):
@@ -112,7 +131,9 @@ def _fm_date(val: Any) -> str:
     return str(val or "")[:10]
 
 
-def render_markdown(article: dict[str, Any]) -> str:
+def render_markdown(
+    article: dict[str, Any], profile: BlogProfile | None = None
+) -> str:
     """Export as a blog `.mdx`: YAML frontmatter + the Markdown body.
 
     Matches the target blog's `content/blog/<slug>.mdx` shape — title, description,
@@ -122,12 +143,22 @@ def render_markdown(article: dict[str, Any]) -> str:
     The title is the frontmatter `title` (the blog renders it as the page <h1>), so the
     body's own leading '# Title' is stripped — otherwise the page shows two H1s. `draft`
     is false once the article is approved/published (so an export actually seeds the live
-    blog), true only for genuine drafts/in-review pieces."""
-    fm = [
-        "---",
-        f"title: {json.dumps(article.get('title') or '')}",
-        f"description: {json.dumps(article.get('meta_description') or '')}",
-    ]
+    blog), true only for genuine drafts/in-review pieces.
+
+    Without a `profile` (the legacy path — no brand blog profile configured), the output
+    is byte-identical to before: no category/summary/faq/metaTitle fields. With a profile,
+    a short `metaTitle` is added only when the plain `title` would overflow the target
+    blog's title budget, plus `category` (right after `description`) and `summary`/`faq`
+    (before `draft`) when the profile enables them and the article has them."""
+    title = article.get("title") or ""
+    fm = ["---", f"title: {json.dumps(title)}"]
+    if profile is not None:
+        mt = (article.get("meta_title") or "").strip()
+        if len(title) > profile.meta.title_max and mt and mt != title:
+            fm.append(f"metaTitle: {json.dumps(mt)}")
+    fm.append(f"description: {json.dumps(article.get('meta_description') or '')}")
+    if profile is not None and article.get("category"):
+        fm.append(f"category: {article['category']}")
     published = _fm_date(
         article.get("published_date")
         or article.get("updated_at")
@@ -141,10 +172,24 @@ def render_markdown(article: dict[str, Any]) -> str:
     if tags:
         fm.append("tags:")
         fm.extend(f"  - {json.dumps(t)}" for t in tags)
+    if profile is not None:
+        if profile.summary.enabled and article.get("summary"):
+            fm.append(f"summary: {json.dumps(article['summary'])}")
+        faq = blog_rules.clean_faq(article.get("faq")) if profile.faq.enabled else []
+        if faq:
+            fm.append("faq:")
+            for it in faq:
+                fm.append(f"  - q: {json.dumps(it['q'])}")
+                fm.append(f"    a: {json.dumps(it['a'])}")
     is_draft = article.get("status") not in _PUBLISHABLE_STATUSES
     fm.append(f"draft: {'true' if is_draft else 'false'}")
     fm.append("---")
     body = _strip_leading_h1(article.get("content_md") or "")
+    if profile is not None and profile.faq.enabled:
+        # Belt-and-braces: the FAQ now lives in frontmatter, so a body FAQ section
+        # would duplicate it. export_issues() already blocks this earlier — this is
+        # just a safety net in case render_markdown is ever called directly.
+        body = blog_rules.strip_body_faq(body)
     return "\n".join(fm) + "\n\n" + body
 
 
@@ -230,6 +275,12 @@ async def publish(
         if article.get("business_id")
         else None
     )
+    # Pre-flight: if the brand has a blog profile, block BEFORE any side effect
+    # (webhook delivery, flipping status to published) rather than publishing
+    # something that would fail the target blog's build.
+    profile = _export_profile(brand)
+    if profile and (issues := blog_rules.export_issues(article, profile)):
+        raise ExportBlocked(issues)
     public_url = linking.canonical_url(brand, article) or (
         f"{public_base_url.rstrip('/')}/p/{article_id}" if public_base_url else None
     )
@@ -271,6 +322,9 @@ async def publish(
             "content_html": render_body_html(resolved_md),
             "json_ld": article.get("json_ld"),
             "public_url": public_url,
+            "category": article.get("category"),
+            "summary": article.get("summary"),
+            "faq": article.get("faq"),
         }
         try:
             async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
@@ -467,8 +521,13 @@ def export(db: Database, article_id: UUID, fmt: str) -> tuple[str, str] | None:
         # date. Only a not-yet-published article (first export) defaults to today.
         "published_date": _export_published_date(db, article_id, article.get("status")),
     }
+    profile = _export_profile(brand) if fmt == "markdown" else None
     if fmt == "markdown":
-        return render_markdown(article), "text/markdown"
+        if profile is not None:
+            issues = blog_rules.export_issues(article, profile)
+            if issues:
+                raise ExportBlocked(issues)
+        return render_markdown(article, profile), "text/markdown"
     if fmt == "html":
         return render_standalone_html(article), "text/html"
     return None

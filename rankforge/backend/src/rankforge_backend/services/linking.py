@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from ..db import Database
+from . import blog_rules
 from . import business_profiles as brands
 from . import generation as gen_svc
 from .agents import ensure_agent
@@ -58,15 +59,92 @@ def canonical_url(brand: dict[str, Any] | None, article: dict[str, Any]) -> str 
 
     Resolution: the article's explicit canonical_url override → the brand's url_pattern
     rendered with the article's tokens → None (we REQUIRE a pattern, so there is no
-    /p/{id} fallback for internal-link targets)."""
+    /p/{id} fallback for internal-link targets). On a profile brand with
+    trailing_slash, either result gets the trailing slash."""
     override = (article.get("canonical_url") or "").strip()
-    if override:
-        return override
     pattern = (brand or {}).get("url_pattern")
-    return _render_pattern(pattern, article) if pattern else None
+    url = override or (_render_pattern(pattern, article) if pattern else None)
+    prof = blog_rules.profile_of(brand)
+    if url and prof and prof.links.trailing_slash:
+        url = blog_rules.with_trailing_slash(url)
+    return url
 
 
-_TARGET_COLS = "id, title, slug, keywords, canonical_url"
+def max_links(brand: dict[str, Any] | None) -> int:
+    prof = blog_rules.profile_of(brand)
+    return prof.links.max if prof else _MAX_PER_ARTICLE
+
+
+def hub_targets(brand: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The brand's hub pages as link targets (not articles: id is None)."""
+    prof = blog_rules.profile_of(brand)
+    if not prof:
+        return []
+    dom = (brand or {}).get("domain")
+    return [
+        {"id": None, "hub": True, "title": h.title, "topics": h.topics,
+         "keywords": h.topics,
+         "url": blog_rules.hub_url(dom, h.path, prof.links.trailing_slash)}
+        for h in prof.links.hub_pages
+    ]
+
+
+def _overlap(terms: list[str], text: str) -> int:
+    low = text.lower()
+    return sum(1 for t in terms if t and t.lower() in low)
+
+
+def link_candidates(
+    db: Database, brand: dict[str, Any] | None, article: dict[str, Any],
+    brief: dict[str, Any] | None, limit: int = 8,
+    *, pool: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Internal-link targets offered to the writer: structural first, then hub pages
+    matching the brief, then published technical-category articles ranked by keyword
+    overlap, at most 2 per category. `pool` is the brand's other published articles
+    when the caller already has them (else they are fetched here)."""
+    prof = blog_rules.profile_of(brand)
+    if not prof:
+        return []
+    brief = brief or {}
+    terms = [
+        brief.get("primary_keyword") or "", *(brief.get("secondary_keywords") or [])
+    ]
+    probe = " ".join([*terms, article.get("title") or "", brief.get("topic") or ""])
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _add(title: str, target: str, category: str | None) -> None:
+        if target not in seen and len(out) < limit:
+            seen.add(target)
+            out.append({"title": title, "target": target, "category": category})
+
+    if article.get("id") is not None:
+        for t, _kind in _structural_targets(db, article):
+            _add(t.get("title") or "", link_ref(t["id"]), t.get("category"))
+    for h in hub_targets(brand):
+        if _overlap(h["topics"], probe) or _overlap(terms, " ".join(h["topics"])):
+            _add(h["title"], h["url"], None)
+    technical = {c.key for c in prof.categories if c.technical}
+    if pool is None:
+        pool = _link_targets(db, article.get("business_id"), article.get("id"))
+    rows = [r for r in pool if r.get("category") in technical]
+    rows.sort(
+        key=lambda r: _overlap(terms, " ".join(map(str, r.get("keywords") or []))
+                               + " " + (r.get("title") or "")),
+        reverse=True,
+    )
+    per_cat: dict[str, int] = {}
+    for r in rows:
+        cat = r.get("category")
+        if per_cat.get(cat, 0) >= 2:
+            continue
+        per_cat[cat] = per_cat.get(cat, 0) + 1
+        _add(r.get("title") or "", link_ref(r["id"]), cat)
+    return out
+
+
+_TARGET_COLS = "id, title, slug, keywords, canonical_url, category"
 
 
 # --- stable internal-link references (resolved to live URLs only at render time) ---
@@ -140,12 +218,12 @@ def resolve_links(
 
 
 def _link_targets(
-    db: Database, business_id: UUID, exclude_id: UUID
+    db: Database, business_id: UUID, exclude_id: UUID | None = None
 ) -> list[dict[str, Any]]:
     """The brand's OTHER published articles — the candidate link targets."""
     return db.fetch_all(
         f"select {_TARGET_COLS} from public.articles "
-        "where business_id = %s and status = 'published' and id <> %s",
+        "where business_id = %s and status = 'published' and id is distinct from %s",
         (business_id, exclude_id),
     )
 
@@ -345,22 +423,54 @@ def _insert_suggestion(
 ) -> dict[str, Any] | None:
     """Stage one suggestion (anchor=None → a gap). None on conflict (already staged
     or dismissed/accepted)."""
+    tid = target.get("id")
     if anchor is not None:
         # A real anchored link supersedes any still-pending GAP to the same target
         # (the prose now mentions it), so the editor doesn't see both.
-        db.execute(
-            "delete from public.link_suggestions where article_id = %s "
-            "and target_article_id = %s and anchor_text is null and status = 'pending'",
-            (article_id, target["id"]),
-        )
+        if tid is not None:
+            db.execute(
+                "delete from public.link_suggestions where article_id = %s "
+                "and target_article_id = %s and anchor_text is null "
+                "and status = 'pending'",
+                (article_id, tid),
+            )
+        else:
+            # A hub page has no target article — key the supersede-delete off its URL.
+            db.execute(
+                "delete from public.link_suggestions where article_id = %s "
+                "and target_article_id is null and target_url = %s "
+                "and anchor_text is null and status = 'pending'",
+                (article_id, target_url),
+            )
     return db.fetch_one(
         "insert into public.link_suggestions "
         "(business_id, article_id, target_article_id, anchor_text, target_url, "
         " target_title, reason, kind) "
         "values (%s, %s, %s, %s, %s, %s, %s, %s) "
         f"on conflict do nothing returning {_COLUMNS}",
-        (business_id, article_id, target["id"], anchor, target_url,
+        (business_id, article_id, tid, anchor, target_url,
          target.get("title"), reason, kind),
+    )
+
+
+def _suggestion_key(row: dict[str, Any]) -> str | None:
+    """A suggestion's target key: the `rf:article/<id>` ref, or a hub's URL."""
+    if row.get("target_article_id"):
+        return link_ref(row["target_article_id"])
+    return row.get("target_url")
+
+
+def _open_suggestions(
+    db: Database, business_id: UUID, article_id: UUID
+) -> list[dict[str, Any]]:
+    """The article's pending AND dismissed suggestions (anchored and gaps) from any
+    run. Accepted rows are left out: an accepted link is in the body (or was removed
+    from it by the editor, who may want it suggested again)."""
+    return db.fetch_all(
+        "select target_article_id, target_url, anchor_text, status "
+        "from public.link_suggestions where article_id = %s and business_id = %s "
+        "and status in ('pending', 'dismissed')",
+        (article_id, business_id),
     )
 
 
@@ -386,6 +496,7 @@ def suggest_links(
     brand = brands.get_profile(db, business_id)
     if not (brand and brand.get("url_pattern")):
         return []
+    cap = max_links(brand)
     md = art.get("content_md") or ""
     mask = _linkable_mask(md)
     chosen: list[tuple[int, int]] = []  # spans already claimed (avoid overlaps)
@@ -393,14 +504,15 @@ def suggest_links(
     done: set[Any] = set()
 
     def _consider(target: dict[str, Any], kind: str) -> None:
-        if len(out) >= _MAX_PER_ARTICLE or target["id"] in done:
+        key = target.get("id") or target.get("url")
+        if len(out) >= cap or key in done:
             return
-        target_url = canonical_url(brand, target)
+        target_url = target.get("url") or canonical_url(brand, target)
         if not target_url:
             return
-        done.add(target["id"])
+        done.add(key)
         anchor = _first_anchor(md, mask, target, chosen)
-        title = target.get("title") or target["id"]
+        title = target.get("title") or target.get("id")
         if anchor:
             (a, b), span = anchor
             chosen.append((a, b))
@@ -435,6 +547,68 @@ def suggest_links(
     )
     for target in targets:
         _consider(target, _MENTION)
+    # 3) Hub pages: verbatim mentions of a hub topic (profile brands only).
+    for hub in hub_targets(brand):
+        _consider(hub, _MENTION)
+    # 4) Minimum: if the body still has fewer internal links than the profile asks,
+    # stage GAPS (LLM-filled on accept) toward the best remaining candidates.
+    prof = blog_rules.profile_of(brand)
+    if prof:
+        have = len(_LINK_REF_RE.findall(md)) + sum(
+            1 for h in hub_targets(brand) if h["url"] in md
+        )
+        # Article targets are keyed by their `rf:article/<id>` ref (compare ids, not
+        # rendered URLs), hubs by URL. An earlier run's rows matter too: re-inserting
+        # them hits ON CONFLICT and returns None, so `out` alone would miss them.
+        # - `staged`: targets with a PENDING suggestion (this run or earlier). Each
+        #   counts toward the minimum once.
+        # - `blocked`: `staged` plus targets the editor DISMISSED. A dismissed row
+        #   doesn't count toward the minimum, but its target never gets a gap here —
+        #   the gap's key (target, '') differs from the dismissed anchor's key, so
+        #   the unique index wouldn't stop it re-suggesting a rejected link.
+        prior = _open_suggestions(db, business_id, article_id)
+        staged = {
+            k for k in map(_suggestion_key, [
+                *out, *(r for r in prior if r.get("status") == "pending"),
+            ]) if k
+        }
+        blocked = staged | {k for k in map(_suggestion_key, prior) if k}
+        need = prof.links.min - have - len([k for k in staged if k not in md])
+        ranked: list[dict[str, Any]] = []
+        if need > 0 and len(out) < cap:
+            brief = (
+                gen_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
+            )
+            # Reuse the library already in hand (step 2) instead of re-fetching it.
+            ranked = link_candidates(db, brand, art, brief or {}, pool=targets)
+        for c in ranked:
+            if need <= 0 or len(out) >= cap:
+                break
+            key = c["target"]
+            # Skip a target that already has a pending or dismissed suggestion, or
+            # that the body already links (the ref for an article, the URL for a hub).
+            if key in blocked or key in md:
+                continue
+            is_hub = not key.startswith("rf:article/")
+            tgt = (
+                {"id": None, "title": c["title"], "url": key} if is_hub
+                else {"id": key.removeprefix("rf:article/"), "title": c["title"]}
+            )
+            url = (
+                key if is_hub
+                else canonical_url(brand, _published(db, tgt["id"]) or {})
+            )
+            if not url:
+                continue
+            row = _insert_suggestion(
+                db, business_id, article_id, tgt, None, url, _MENTION,
+                f'Below the {prof.links.min}-link minimum — add a contextual link to '
+                f'"{c["title"]}".',
+            )
+            if row:
+                out.append(row)
+                blocked.add(key)
+                need -= 1
     return out
 
 
@@ -453,8 +627,6 @@ def apply_suggestion(
     )
     if s is None or s["status"] != "pending" or not s.get("anchor_text"):
         return None  # a gap (null anchor) has nothing to apply — use generate_gap_link
-    if not s.get("target_article_id"):
-        return None  # defensive: a null target would store a `rf:article/None` ref
     art = gen_svc.get_article(db, s["article_id"])
     if not art:
         return None
@@ -463,25 +635,23 @@ def apply_suggestion(
     if not found:
         return _set_status(db, business_id, suggestion_id, "dismissed")
     (a, b), span_text = found
-    # Store a stable REF, not the URL — so the link follows the target's slug forever.
-    new_md = f"{md[:a]}[{span_text}]({link_ref(s['target_article_id'])}){md[b:]}"
+    # Store a stable REF for an article target — so the link follows its slug
+    # forever; a hub page has no target article, so it gets a real URL instead.
+    href = (
+        link_ref(s["target_article_id"]) if s.get("target_article_id")
+        else s["target_url"]  # hub page: a real URL, not an article ref
+    )
+    new_md = f"{md[:a]}[{span_text}]({href}){md[b:]}"
     gen_svc._update(db, s["article_id"], content_md=new_md)
     # Re-score SEO DETERMINISTICALLY (no LLM): a single internal link only moves the
     # on-page link signals, so re-judging GEO/readability with the model on every
     # "Add" click would be pure latency + token cost. Local imports avoid a cycle.
-    from . import brief as brief_svc
     from . import scoring
 
-    brief = (
-        brief_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
-    ) or {}
-    # Score the RESOLVED body so link signals see real URLs, not the ref token.
-    seo = scoring.score_seo(
-        resolve_links(db, business_id, new_md),
-        art.get("meta_title") or art.get("title") or "",
-        art.get("meta_description"),
-        brief,
-    )
+    # Score the RESOLVED body so link signals see real URLs, not the ref token;
+    # score_seo_for keeps the brand's profile (internal_links, limits) and
+    # competitor hosts, exactly as the full score does.
+    seo = scoring.score_seo_for(db, art, resolve_links(db, business_id, new_md))
     gen_svc._update(db, s["article_id"], seo_score=seo)
     return _set_status(db, business_id, suggestion_id, "accepted")
 
@@ -554,20 +724,14 @@ async def generate_gap_link(
     if not sentence or s["target_url"] not in sentence:
         return None
     # The model writes a real URL (natural); swap it for the stable ref before storing
-    # so the link follows the target's slug forever.
-    sentence = sentence.replace(s["target_url"], link_ref(s["target_article_id"]))
+    # so the link follows the target's slug forever. A hub page has no target
+    # article, so its URL is left as written (there's no ref to swap in).
+    if s.get("target_article_id"):
+        sentence = sentence.replace(s["target_url"], link_ref(s["target_article_id"]))
     new_md = _insert_after_intro(md, sentence)
     gen_svc._update(db, s["article_id"], content_md=new_md)
-    from . import brief as brief_svc
     from . import scoring
 
-    brief = (
-        brief_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
-    ) or {}
-    seo = scoring.score_seo(
-        resolve_links(db, business_id, new_md),
-        art.get("meta_title") or art.get("title") or "",
-        art.get("meta_description"), brief,
-    )
+    seo = scoring.score_seo_for(db, art, resolve_links(db, business_id, new_md))
     gen_svc._update(db, s["article_id"], seo_score=seo)
     return _set_status(db, business_id, suggestion_id, "accepted")

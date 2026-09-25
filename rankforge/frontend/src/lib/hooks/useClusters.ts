@@ -49,7 +49,7 @@ export function useUpdateCluster(businessId: string) {
       data,
     }: {
       clusterId: string;
-      data: { label?: string; theme?: string };
+      data: { label?: string; theme?: string; category?: string | null };
     }) => clustersApi.update(clusterId, data),
     onSuccess: (_data, { clusterId }) => {
       // label/theme (and pillar_title/member_count enrichment) changed → refresh the

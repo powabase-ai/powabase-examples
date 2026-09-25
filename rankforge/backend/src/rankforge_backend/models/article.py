@@ -4,7 +4,15 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
+
+from .blog import FaqItem
 
 
 class ArticleGenerate(BaseModel):
@@ -12,12 +20,35 @@ class ArticleGenerate(BaseModel):
 
 
 class RefineRequest(BaseModel):
-    """Which flagged issues the user picked to fix. Each selector is `axis:signal_key`
-    (e.g. `readability:em_dashes`, `seo:internal_links`) or `grounding:<index>`. When
-    omitted (None), refine drives every below-target axis automatically (legacy / the
-    post-generation auto-refine)."""
+    """Which flagged issues the user picked to fix — OR free-text `instructions` with
+    a `mode`, for an instruction-driven refine/rework. Each `targets` selector is
+    `axis:signal_key` (e.g. `readability:em_dashes`, `seo:internal_links`) or
+    `grounding:<index>`. When both are omitted, refine drives every below-target axis
+    automatically (legacy / the post-generation auto-refine)."""
 
     targets: list[str] | None = None
+    instructions: str | None = None
+    mode: Literal["refine", "rework"] | None = None
+
+    @field_validator("instructions")
+    @classmethod
+    def _instr(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("instructions must not be blank")
+        if len(v) > 4000:
+            raise ValueError("instructions must be at most 4000 characters")
+        return v
+
+    @model_validator(mode="after")
+    def _exclusive(self):
+        if self.instructions and self.targets:
+            raise ValueError("send either targets or instructions, not both")
+        if self.mode and not self.instructions:
+            raise ValueError("mode requires instructions")
+        return self
 
 
 class ArticleUpdate(BaseModel):
@@ -28,6 +59,9 @@ class ArticleUpdate(BaseModel):
     status: str | None = None  # draft|in_review|approved|published|archived
     canonical_url: str | None = None  # override for where this article lives
     author: str | None = None  # per-article override of the brand's default author
+    category: str | None = Field(default=None, max_length=60)
+    summary: str | None = Field(default=None, max_length=2000)
+    faq: list[FaqItem] | None = Field(default=None, max_length=20)
 
 
 class Article(BaseModel):
@@ -61,6 +95,9 @@ class Article(BaseModel):
     og_image_url: str | None = None
     cluster_id: UUID | None = None
     cluster_role: str | None = None
+    category: str | None = None
+    summary: str | None = None
+    faq: list[dict] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -79,6 +116,34 @@ class ArticleVersion(BaseModel):
     article_id: UUID
     created_at: datetime
     word_count: int | None = None
+
+
+class FrontmatterRequest(BaseModel):
+    """POST /api/articles/{id}/frontmatter body (optional). `force` ("Generate
+    summary & FAQ") regenerates the summary and FAQ even when they pass the rules;
+    false ("Fix automatically") touches only failing fields."""
+
+    # Strict: "yes"/1/"true" are a 422, not silently coerced to a forced run.
+    force: StrictBool = False
+
+
+FRONTMATTER_CHANGE_FIELDS = (
+    "category", "summary", "faq", "meta_title", "meta_description", "content_md",
+)
+
+
+class FrontmatterResult(BaseModel):
+    """POST /api/articles/{id}/frontmatter: the article after the fix, the export
+    issues still open (`blog_rules.export_issues`; [] = exportable), the fields
+    the fix actually changed (subset of FRONTMATTER_CHANGE_FIELDS; [] = nothing;
+    `content_md` = a body FAQ section was removed), and the frontmatter step's
+    flags (`frontmatter.complete`; e.g. "category defaulted to rag", "model's
+    summary was 3 words (needs 40-60) — kept the stored one"; [] = none)."""
+
+    article: Article
+    export_issues: list[str]
+    changed: list[str] = Field(default_factory=list)
+    flags: list[str] = Field(default_factory=list)
 
 
 class RemoveLinkResult(BaseModel):

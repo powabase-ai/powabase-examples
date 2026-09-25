@@ -97,3 +97,77 @@ async def test_gives_up_after_max_retries_on_persistent_503():
         await client.aclose()
     assert exc.value.status_code == 503
     assert route.call_count == 3  # initial + 2 retries
+
+
+# --- review r1 I6: a stream with no `complete` event is marked incomplete ---
+def _sse(*events):
+    import json as _json
+
+    return "".join(f"data: {_json.dumps(e)}\n\n" for e in events).encode()
+
+
+@respx.mock
+async def test_run_agent_collect_marks_cut_off_stream_incomplete():
+    respx.post(f"{BASE}/api/agents/ag/run/stream").mock(
+        return_value=httpx.Response(200, content=_sse(
+            {"event": "start", "run_id": "r"},
+            {"event": "content_delta", "delta": "# Half"},
+        ))
+    )
+    client = PowabaseClient(BASE, KEY)
+    try:
+        res = await client.run_agent_collect("ag", "hi")
+    finally:
+        await client.aclose()
+    assert res["incomplete"] is True and res["content"] == "# Half"
+
+
+@respx.mock
+async def test_run_agent_collect_complete_stream_is_not_incomplete():
+    respx.post(f"{BASE}/api/agents/ag/run/stream").mock(
+        return_value=httpx.Response(200, content=_sse(
+            {"event": "content_delta", "delta": "# Whole"},
+            {"event": "complete", "content": "# Whole", "run_id": "r"},
+        ))
+    )
+    client = PowabaseClient(BASE, KEY)
+    try:
+        res = await client.run_agent_collect("ag", "hi")
+    finally:
+        await client.aclose()
+    assert res["incomplete"] is False and res["content"] == "# Whole"
+
+
+# --- review r2 minor: a `complete` event with status "failed" is an error ---
+@respx.mock
+async def test_run_agent_collect_failed_complete_is_an_error():
+    respx.post(f"{BASE}/api/agents/ag/run/stream").mock(
+        return_value=httpx.Response(200, content=_sse(
+            {"event": "content_delta", "delta": "partial"},
+            {"event": "complete", "content": "partial", "run_id": "r",
+             "status": "failed", "error": "model overloaded"},
+        ))
+    )
+    client = PowabaseClient(BASE, KEY)
+    try:
+        res = await client.run_agent_collect("ag", "hi")
+    finally:
+        await client.aclose()
+    assert res["error"] and res["error"]["error"] == "model overloaded"
+    assert res["incomplete"] is False
+
+
+@respx.mock
+async def test_run_agent_collect_completed_status_is_not_an_error():
+    respx.post(f"{BASE}/api/agents/ag/run/stream").mock(
+        return_value=httpx.Response(200, content=_sse(
+            {"event": "complete", "content": "# Ok", "run_id": "r",
+             "status": "completed", "error": None},
+        ))
+    )
+    client = PowabaseClient(BASE, KEY)
+    try:
+        res = await client.run_agent_collect("ag", "hi")
+    finally:
+        await client.aclose()
+    assert res["error"] is None and res["content"] == "# Ok"

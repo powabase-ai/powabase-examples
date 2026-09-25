@@ -32,7 +32,9 @@ import { ArticleEditor } from "@/components/ArticleEditor";
 import { CommentsPanel } from "@/components/CommentsPanel";
 import { InternalLinksPanel } from "@/components/InternalLinksPanel";
 import { Markdown } from "@/components/Markdown";
+import { PostPanel } from "@/components/PostPanel";
 import { PublishDialog } from "@/components/PublishDialog";
+import { RefineInstructionsDialog } from "@/components/RefineInstructionsDialog";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import {
   useArticle,
@@ -45,6 +47,8 @@ import {
   useRetryArticle,
   useUpdateArticle,
 } from "@/lib/hooks/useArticles";
+import { useBrands } from "@/lib/hooks/useBrands";
+import { useRunCurrent } from "@/lib/hooks/useRunCurrent";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -52,6 +56,7 @@ import {
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { ARTICLE_STATUSES, canApprove } from "@/lib/api";
+import { blogProfileState } from "@/lib/blogProfile";
 import type { Article, GroundingReport, Score, ScoreSignal } from "@/lib/api";
 
 const GATED_STATUSES = new Set(["approved", "published"]);
@@ -362,6 +367,51 @@ function GenerationProgress({ a }: { a: Article }) {
   );
 }
 
+/** Shown when `generation_status` is "failed". The wording depends on whether a
+ *  body exists: an empty body means generation never produced a draft; a non-empty
+ *  one means the run failed after writing a draft (or during post-processing), so
+ *  the article may be only partly processed. `generation_error` is always shown,
+ *  and Retry is offered in both cases (the caller confirms first for a non-empty
+ *  body). */
+function FailedRunNotice({
+  article,
+  retrying,
+  onRetry,
+}: {
+  article: Article;
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  const hasBody = !!article.content_md?.trim();
+  return (
+    <Card className="mt-6">
+      <CardContent className="flex items-center justify-between gap-4 py-5">
+        <div className="space-y-1 text-sm">
+          <p className="text-destructive">
+            {hasBody
+              ? "The last run failed after writing a draft; the article may be " +
+                "partially processed."
+              : "Generation failed"}
+          </p>
+          {article.generation_error && (
+            <p className="text-muted-foreground">{article.generation_error}</p>
+          )}
+        </div>
+        <Button
+          variant={hasBody ? "outline" : "gold"}
+          size="sm"
+          className="shrink-0"
+          onClick={onRetry}
+          disabled={retrying}
+        >
+          {retrying ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+          Retry generation
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function ArticleView({
   params,
 }: {
@@ -370,9 +420,14 @@ export default function ArticleView({
   const { id, articleId } = use(params);
   const router = useRouter();
   const { data: a, isLoading } = useArticle(articleId);
+  const { data: brands } = useBrands();
+  const brand = brands?.find((b) => b.id === id);
   const optimize = useOptimizeArticle(articleId);
   const refine = useRefineArticle(articleId);
   const retry = useRetryArticle(articleId);
+  // Hide the last run's score strip / frontmatter flags once the article changes.
+  const runCurrent = useRunCurrent(a);
+  const profileState = blogProfileState(brand?.blog_profile);
   const update = useUpdateArticle(articleId);
   const del = useDeleteArticle(id);
   const versions = useArticleVersions(articleId);
@@ -410,10 +465,11 @@ export default function ArticleView({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [tab, setTab] = useState<
-    "SEO" | "GEO" | "Readability" | "Grounding" | "Links" | "Comments"
+    "SEO" | "GEO" | "Readability" | "Grounding" | "Links" | "Comments" | "Post"
   >("SEO");
   const [showHistory, setShowHistory] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
+  const [showRefine, setShowRefine] = useState(false);
   // Flagged issues the user has ticked to fix (axis:signal / grounding:i), across tabs.
   const [refineTargets, setRefineTargets] = useState<Set<string>>(new Set());
   const toggleTarget = (tid: string) =>
@@ -445,6 +501,7 @@ export default function ArticleView({
     setTab("SEO");
     setShowHistory(false);
     setShowPublish(false);
+    setShowRefine(false);
     setRefineTargets(new Set());
     setLocateUrl(null);
   }, [articleId]);
@@ -583,7 +640,9 @@ export default function ArticleView({
       <ResizablePanel defaultSize={26} minSize={16} maxSize={45}>
         <aside className="flex h-full w-full flex-col bg-card">
         <div className="flex border-b border-border">
-          {(["SEO", "GEO", "Readability", "Grounding", "Links", "Comments"] as const).map((t) => {
+          {(
+            ["SEO", "GEO", "Readability", "Grounding", "Links", "Post", "Comments"] as const
+          ).map((t) => {
             const sc =
               t === "SEO"
                 ? a?.seo_score
@@ -650,6 +709,21 @@ export default function ArticleView({
               onLocate={locate}
             />
           </div>
+        ) : tab === "Post" ? (
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            {a ? (
+              <PostPanel
+                article={a}
+                profile={profileState.kind === "valid" ? profileState.profile : null}
+                profileInvalid={profileState.kind === "invalid"}
+                brandId={id}
+                busy={!!generating}
+                runCurrent={runCurrent}
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">Loading…</p>
+            )}
+          </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
             {tab === "Grounding" ? (
@@ -689,7 +763,7 @@ export default function ArticleView({
                   className="w-full"
                   onClick={() => {
                     const targets = Array.from(refineTargets);
-                    refine.mutate(targets, {
+                    refine.mutate({ targets }, {
                       onSuccess: () => {
                         toast.success(
                           `Refining ${targets.length} selected issue${
@@ -773,6 +847,14 @@ export default function ArticleView({
                 <Button
                   variant="outline"
                   size="sm"
+                  onClick={() => setShowRefine(true)}
+                  disabled={!!generating || !a.content_md?.trim()}
+                >
+                  <Sparkles /> Refine with instructions
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => setShowHistory(true)}
                 >
                   <History /> History
@@ -846,35 +928,27 @@ export default function ArticleView({
               {generating && <GenerationProgress a={a} />}
 
               {a.generation_status === "failed" && (
-                <Card className="mt-6">
-                  <CardContent className="flex items-center justify-between gap-4 py-5">
-                    <p className="text-sm text-destructive">
-                      Generation failed: {a.generation_error}
-                    </p>
-                    <Button
-                      variant="gold"
-                      size="sm"
-                      className="shrink-0"
-                      onClick={() =>
-                        retry.mutate(undefined, {
-                          onSuccess: () => toast.success("Retrying generation…"),
-                          onError: (e) =>
-                            toast.error(
-                              e instanceof Error ? e.message : "Retry failed"
-                            ),
-                        })
-                      }
-                      disabled={retry.isPending}
-                    >
-                      {retry.isPending ? (
-                        <Loader2 className="animate-spin" />
-                      ) : (
-                        <RefreshCw />
-                      )}
-                      Retry generation
-                    </Button>
-                  </CardContent>
-                </Card>
+                <FailedRunNotice
+                  article={a}
+                  retrying={retry.isPending}
+                  onRetry={() => {
+                    // A non-empty body is re-drafted from the brief; the server saves
+                    // a version of it first, so it can be restored from History.
+                    if (
+                      a.content_md.trim() &&
+                      !window.confirm(
+                        "Retry generation? This re-drafts the article from its " +
+                          "brief. A version of the current article is saved first."
+                      )
+                    )
+                      return;
+                    retry.mutate(undefined, {
+                      onSuccess: () => toast.success("Retrying generation…"),
+                      onError: (e) =>
+                        toast.error(e instanceof Error ? e.message : "Retry failed"),
+                    });
+                  }}
+                />
               )}
 
               {editing ? (
@@ -944,6 +1018,15 @@ export default function ArticleView({
           brandId={id}
           slug={a.slug}
           published={a.status === "published"}
+        />
+      )}
+
+      {a && (
+        <RefineInstructionsDialog
+          key={articleId}
+          open={showRefine}
+          onOpenChange={setShowRefine}
+          articleId={articleId}
         />
       )}
 

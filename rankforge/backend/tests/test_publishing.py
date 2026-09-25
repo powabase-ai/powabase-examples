@@ -232,6 +232,45 @@ async def test_publish_webhook_delivery_failure_does_not_go_live(monkeypatch):
     assert "status = 'published'" not in update_sql
 
 
+async def test_publish_webhook_payload_carries_the_frontmatter(monkeypatch):
+    """Review r3 X5: the webhook payload's category/summary/faq are the article's."""
+    from rankforge_backend.services import business_profiles as brands_svc
+
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        "id": "p1", "article_id": AID, "target_type": "webhook",
+        "status": "success", "created_at": "2026-06-20T00:00:00Z",
+    }
+    art = {**ARTICLE, "business_id": BID, "category": "rag", "summary": "S.",
+           "faq": [{"q": "Q?", "a": "A."}]}
+    monkeypatch.setattr(svc.gen_svc, "get_article", lambda db, aid: art)
+    monkeypatch.setattr(brands_svc, "get_profile",
+                        lambda d, b: {"id": BID, "blog_profile": None})
+    monkeypatch.setattr(svc, "validate_webhook_url", lambda u: None)
+    monkeypatch.setattr(svc.linking, "resolve_links", lambda *a, **k: "# body")
+    monkeypatch.setattr(svc.linking, "canonical_url", lambda *a, **k: None)
+    sent: dict = {}
+
+    class _Ok:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            sent.update(json)
+            return MagicMock()
+
+    monkeypatch.setattr(svc.httpx, "AsyncClient", lambda *a, **k: _Ok())
+    await svc.publish(
+        db, AID, target_type="webhook",
+        config={"url": "https://example.com/hook"}, public_base_url="http://x",
+    )
+    assert sent["category"] == "rag" and sent["summary"] == "S."
+    assert sent["faq"] == [{"q": "Q?", "a": "A."}]
+
+
 def _brand_db() -> MagicMock:
     """db whose fetch_one yields an article in the caller's org (passes the
     gen_svc.get_article lookup + assert_brand_access in the publish routes)."""
@@ -436,3 +475,167 @@ def test_export_route_sets_slug_mdx_filename(monkeypatch):
     cd = resp.headers.get("content-disposition", "")
     assert "attachment" in cd
     assert 'filename="title.mdx"' in cd  # <slug>.mdx
+
+
+# --- profile frontmatter + pre-export check ---
+from rankforge_backend.models.blog import BlogProfile  # noqa: E402
+
+_BP = BlogProfile.model_validate({"categories": [{"key": "rag", "label": "R"}]})
+_S = " ".join(["word"] * 44) + " end."
+_FAQ = [{"q": f"Q{i}?", "a": "A."} for i in range(3)]
+
+
+def _pa(**over):
+    return {**ARTICLE, "category": "rag", "summary": _S, "faq": _FAQ,
+            "status": "approved", **over}
+
+
+def test_render_markdown_profile_fields_in_order():
+    out = svc.render_markdown(_pa(), _BP)
+    fm = out.split("---")[1]
+    keys = ["title:", "description:", "category:", "summary:", "faq:", "draft:"]
+    positions = [fm.index(k) for k in keys]
+    assert positions == sorted(positions)
+    assert '  - q: "Q0?"\n    a: "A."' in fm
+    assert "metaTitle" not in fm  # short title
+
+
+def test_render_markdown_meta_title_only_when_title_too_long():
+    out = svc.render_markdown(_pa(title="x" * 70, meta_title="Short one"), _BP)
+    assert 'metaTitle: "Short one"' in out
+    out = svc.render_markdown(_pa(title="Fits", meta_title="Other"), _BP)
+    assert "metaTitle" not in out
+
+
+def test_render_markdown_profile_yaml_safety():
+    tricky = 'Line: "quoted" # not a comment\nnext — ünïcode'
+    out = svc.render_markdown(
+        _pa(summary=tricky, faq=[{"q": 'What: "x"?', "a": "a # b"}] * 3), _BP
+    )
+    import json as _j
+
+    assert f"summary: {_j.dumps(tricky)}" in out
+    assert "\\n" in out.split("summary:")[1].split("\n")[0]  # newline escaped
+
+
+def test_render_markdown_faq_disabled():
+    off = _BP.model_copy(update={"faq": _BP.faq.model_copy(update={"enabled": False})})
+    out = svc.render_markdown(_pa(), off)
+    assert "faq:" not in out and "summary:" in out
+
+
+def test_render_markdown_no_profile_unchanged():
+    assert svc.render_markdown(_pa()) == svc.render_markdown(_pa(), None)
+    assert "category:" not in svc.render_markdown(_pa())
+
+
+def test_export_blocked_on_issues(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(svc.gen_svc, "get_article",
+                        lambda _db, _id: {**_pa(category=None), "business_id": BID})
+    from rankforge_backend.services import business_profiles as bp
+
+    monkeypatch.setattr(bp, "get_profile",
+                        lambda _db, _id: {"name": "B", "blog_profile": _BP.model_dump()})
+    db.fetch_one.return_value = {"keywords": []}
+    with pytest.raises(svc.ExportBlocked) as e:
+        svc.export(db, AID, "markdown")
+    assert any("category" in i for i in e.value.issues)
+
+
+def test_export_route_422_with_export_issues(monkeypatch):
+    monkeypatch.setattr(
+        svc, "export",
+        MagicMock(side_effect=svc.ExportBlocked(["x"])),
+    )
+    resp = _client(_brand_db()).get(f"/api/articles/{AID}/export?format=markdown")
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["export_issues"] == ["x"]
+
+
+def test_publish_route_422_with_export_issues(monkeypatch):
+    async def fake_publish(db, aid, **k):
+        raise svc.ExportBlocked(["x"])
+
+    monkeypatch.setattr(svc, "publish", fake_publish)
+    resp = _client(_brand_db()).post(
+        f"/api/articles/{AID}/publish", json={"target_type": "export"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["export_issues"] == ["x"]
+
+
+def test_export_issue_422s_use_non_deprecated_status(monkeypatch):
+    import warnings
+
+    async def fake_publish(db, aid, **k):
+        raise svc.ExportBlocked(["x"])
+
+    monkeypatch.setattr(svc, "publish", fake_publish)
+    def blocked(*a, **k):
+        raise svc.ExportBlocked(["x"])
+
+    monkeypatch.setattr(svc, "export", blocked)
+    monkeypatch.setattr(svc.gen_svc, "get_article",
+                        lambda _db, _id: {**ARTICLE, "business_id": BID})
+    client = _client(_brand_db())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        r1 = client.post(f"/api/articles/{AID}/publish", json={"target_type": "export"})
+        r2 = client.get(f"/api/articles/{AID}/export")
+    assert r1.status_code == 422 and r2.status_code == 422
+    assert not [w for w in caught if "HTTP_422_UNPROCESSABLE_ENTITY" in str(w.message)]
+
+
+# --- instruction-driven refine/rework: route wiring (Task 10) ---
+def _refine_db() -> MagicMock:
+    """A db whose fetch_one returns a full Article-shaped row (unlike _brand_db,
+    which only carries the fields the publish/export routes need) — the /refine
+    route's response_model=Article requires status/generation_status/timestamps."""
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        **ARTICLE, "business_id": BID, "org_id": UUID(ADMIN_ORG),
+        "status": "draft", "generation_status": "grounding", "progress": {},
+        "created_at": "2026-06-19T00:00:00Z", "updated_at": "2026-06-19T00:00:00Z",
+    }
+    return db
+
+
+def test_refine_route_blank_instructions_422_without_starting(monkeypatch):
+    """Pydantic rejects the body before the route runs — try_begin_refine (the
+    generation-claim guard) must never fire for an invalid request."""
+    from rankforge_backend.services import generation as gen_svc
+
+    claim = MagicMock()
+    monkeypatch.setattr(gen_svc, "try_begin_refine", claim)
+    resp = _client(_refine_db()).post(
+        f"/api/articles/{AID}/refine", json={"instructions": "   "}
+    )
+    assert resp.status_code == 422
+    claim.assert_not_called()
+
+
+def test_refine_route_instructed_pass_spawns(monkeypatch):
+    from rankforge_backend.routes import articles as articles_route
+    from rankforge_backend.services import generation as gen_svc
+
+    monkeypatch.setattr(gen_svc, "try_begin_refine", lambda db, aid, total: True)
+    spawned = MagicMock()
+    monkeypatch.setattr(articles_route, "spawn", spawned)
+    resp = _client(_refine_db()).post(
+        f"/api/articles/{AID}/refine",
+        json={"instructions": "tighten the intro", "mode": "rework"},
+    )
+    assert resp.status_code == 200
+    spawned.assert_called_once()
+    # spawn is mocked, so the coroutine it was handed is never awaited — close it
+    # explicitly to avoid a "coroutine was never awaited" warning from the real one.
+    spawned.call_args.args[0].close()
+
+
+def test_render_markdown_omits_blank_faq_items():
+    faq = _FAQ + [{"q": "  ", "a": " "}]
+    out = svc.render_markdown(_pa(faq=faq), _BP)
+    fm = out.split("---")[1]
+    assert fm.count("  - q:") == 3
+    assert '"  "' not in fm

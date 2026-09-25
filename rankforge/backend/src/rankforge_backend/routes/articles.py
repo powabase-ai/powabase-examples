@@ -9,11 +9,14 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
 from ..models.article import (
+    FRONTMATTER_CHANGE_FIELDS,
     Article,
     ArticleGenerate,
     ArticleSummary,
     ArticleUpdate,
     ArticleVersion,
+    FrontmatterRequest,
+    FrontmatterResult,
     RefineRequest,
     RemoveLinkResult,
 )
@@ -23,7 +26,10 @@ from ..models.linking import BrokenLink, LinkSuggestion, RemoveLinkRequest
 from ..models.profile import CurrentUser
 from ..powabase import PowabaseClient, PowabaseError
 from ..ratelimit import rate_limit
+from ..services import blog_rules
+from ..services import business_profiles as brands_svc
 from ..services import comments as comments_svc
+from ..services import frontmatter as frontmatter_svc
 from ..services import generation as svc
 from ..services import geo_optimize as geo_svc
 from ..services import linkcheck as linkcheck_svc
@@ -175,23 +181,109 @@ async def optimize_article(
     return svc.get_article(db, article_id)
 
 
+@router.post(
+    "/{article_id}/frontmatter",
+    response_model=FrontmatterResult,
+    dependencies=[Depends(rate_limit("article:optimize"))],
+)
+async def generate_frontmatter(
+    article_id: UUID,
+    body: FrontmatterRequest | None = None,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Generate summary + FAQ + category (and fit meta) for a blog-profile brand.
+    `force` regenerates a passing summary/FAQ too (see frontmatter.complete).
+    Returns the article, the export issues still open after the fix (so the UI never
+    claims "fixed" over a step that left problems), the fields it changed and the
+    step's flags (so the UI can say what it kept or defaulted)."""
+    force = bool(body and body.force)
+    article = _guard_article(db, article_id, user)
+    brand = brands_svc.get_profile(db, article["business_id"])
+    if reason := blog_rules.invalid_profile_reason(brand):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"blog profile is invalid: {reason}"
+        )
+    profile = blog_rules.profile_of(brand)
+    if not profile:
+        raise HTTPException(status.HTTP_409_CONFLICT, "brand has no blog profile")
+    # Claim the article so the fix can't race a refine/generation writing the same
+    # fields; always released below.
+    if not svc.try_begin_refine(db, article_id, total=1):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "generation already in progress"
+        )
+    flags: list[str] = []
+    try:
+        before = svc.get_article(db, article_id) or article
+        flags = await frontmatter_svc.complete(pb, db, article_id, force=force)
+        if flags:
+            log.info("frontmatter flags for %s: %s", article_id, flags)
+    finally:
+        # Release the claim. A previously failed article stays 'failed' (its progress
+        # restored) so the UI still offers Retry generation for an empty draft.
+        if article.get("generation_status") == "failed":
+            svc._update(
+                db, article_id, generation_status="failed",
+                progress=article.get("progress") or {"phase": "failed"},
+            )
+        else:
+            after = svc.get_article(db, article_id) or article
+            svc._update(
+                db, article_id,
+                generation_status="done",
+                progress={"phase": "done",
+                          "word_count": len((after.get("content_md") or "").split())},
+            )
+    final = svc.get_article(db, article_id)
+    if final is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "article not found")
+    # Compared by value (jsonb returns FAQ items with sorted keys; dict equality
+    # ignores key order), so a rewrite to the same value is not a change.
+    changed = [
+        f for f in FRONTMATTER_CHANGE_FIELDS if before.get(f) != final.get(f)
+    ]
+    return {"article": final, "export_issues": blog_rules.export_issues(final, profile),
+            "changed": changed, "flags": flags}
+
+
 async def _refine_and_finish(
     pb: PowabaseClient, db: Database, article_id: UUID,
     targets: list[str] | None = None,
+    instructions: str | None = None,
+    mode: str = "refine",
 ) -> None:
     failed = False
+    refine_error: str | None = None
     try:
-        await revise_svc.refine(pb, db, article_id, targets=targets)
+        await revise_svc.refine(
+            pb, db, article_id, targets=targets, instructions=instructions, mode=mode
+        )
+    except revise_svc.InstructedRefineError as e:
+        # The instructed pass produced nothing usable and left the article unchanged.
+        # Not a failure of the article: report it and keep the status 'done', so the
+        # UI never offers "Retry generation" (which would re-draft over the article).
+        refine_error = str(e) or "the revision was unusable"
+        log.warning("instructed refine not applied for %s: %s", article_id, e)
     except Exception:  # noqa: BLE001 — surface an infra failure, don't report a no-op
         # refine() only propagates when a pass raised before doing ANY work (e.g. the
         # reviser agent is misconfigured / unreachable). That's a real failure — mark it
         # so the user sees an error instead of "refine complete" over an unchanged draft.
         log.exception("refine pipeline failed for %s", article_id)
         failed = True
-    # Return the article to a terminal status. Empty content (bailed on a broken article)
-    # or a propagated infra failure → 'failed'; otherwise 'done'.
     final = svc.get_article(db, article_id)
     words = ((final or {}).get("content_md") or "").split()
+    if refine_error is not None:
+        svc._update(
+            db, article_id,
+            generation_status="done",
+            progress={"phase": "done", "refine_error": refine_error, "mode": mode,
+                      "word_count": len(words)},
+        )
+        return
+    # Return the article to a terminal status. Empty content (bailed on a broken
+    # article) or a propagated infra failure → 'failed'; otherwise 'done'.
     if failed or not words:
         svc._update(
             db, article_id,
@@ -208,10 +300,19 @@ async def _refine_and_finish(
             await linkcheck_svc.check_article(db, final["business_id"], article_id)
         except Exception:  # noqa: BLE001 — link check is advisory
             log.exception("post-refine link check failed for %s", article_id)
+    # An instructed pass records {"before": {...}, "mode": ...} in progress when it
+    # starts (see revise.refine) — carry it into the terminal state so the UI can show
+    # the before/after change instead of losing it the moment the pipeline finishes.
+    # Likewise any frontmatter flags the pass left (revise.instructed_pass).
+    prev = (final or {}).get("progress") or {}
     svc._update(
         db, article_id,
         generation_status="done",
-        progress={"phase": "done", "word_count": len(words)},
+        progress={"phase": "done", "word_count": len(words),
+                  **({"before": prev["before"], "mode": prev.get("mode")}
+                     if prev.get("before") else {}),
+                  **({"frontmatter_flags": prev["frontmatter_flags"]}
+                     if prev.get("frontmatter_flags") else {})},
     )
 
 
@@ -227,13 +328,19 @@ async def refine_article(
     pb: PowabaseClient = Depends(get_powabase),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Refine the draft (async). With `body.targets`, fix exactly the selected flagged
-    issues; without it, auto-iterate every below-target axis."""
+    """Refine the draft (async). With `body.instructions`, run one instruction-driven
+    pass (`body.mode` "refine" or "rework"); with `body.targets`, fix exactly the
+    selected flagged issues; with neither, auto-iterate every below-target axis."""
     _guard_article(db, article_id, user)
+    targets = (body.targets or None) if body else None
+    instructions = body.instructions if body else None
+    mode = (body.mode or "refine") if body else "refine"
     # Atomically claim the article; refuse if a generation/refine is already running
     # so a double-submit can't launch two concurrent pipelines on the same article.
+    # An instructed pass is a single pass (total=1); the legacy/targeted loops cap at
+    # MAX_REVISIONS.
     if not svc.try_begin_refine(
-        db, article_id, total=revise_svc.MAX_REVISIONS
+        db, article_id, total=1 if instructions else revise_svc.MAX_REVISIONS
     ):
         raise HTTPException(
             status.HTTP_409_CONFLICT, "generation already in progress"
@@ -241,8 +348,7 @@ async def refine_article(
     # Normalize an empty selection (`{"targets": []}`) to None so it runs the legacy
     # auto-refine instead of taking the targeted path into a guaranteed no-op (which
     # would still burn a rate-limit token for zero work).
-    targets = (body.targets or None) if body else None
-    spawn(_refine_and_finish(pb, db, article_id, targets))
+    spawn(_refine_and_finish(pb, db, article_id, targets, instructions, mode))
     return svc.get_article(db, article_id)
 
 
@@ -407,6 +513,58 @@ def restore_version(
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "version not found")
     return row
+
+
+async def _rescore_after_revert(
+    pb: PowabaseClient, db: Database, article_id: UUID
+) -> None:
+    try:
+        await quality_svc.reflect(pb, db, article_id)
+        await geo_svc.optimize_and_store(pb, db, article_id)
+        await scoring_svc.score_and_store(pb, db, article_id)
+        final = svc.get_article(db, article_id)
+        if final and final.get("business_id"):
+            await linkcheck_svc.check_article(db, final["business_id"], article_id)
+    except Exception:  # noqa: BLE001 — scores are advisory; the revert already landed
+        log.exception("post-revert rescore failed for %s", article_id)
+    svc._update(db, article_id, generation_status="done", progress={"phase": "done"})
+
+
+@router.post(
+    "/{article_id}/revert",
+    response_model=Article,
+    dependencies=[Depends(rate_limit("article:refine"))],
+)
+async def revert_article(
+    article_id: UUID,
+    db: Database = Depends(get_db),
+    pb: PowabaseClient = Depends(get_powabase),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Undo the last change (body + frontmatter), then re-score in the background."""
+    _guard_article(db, article_id, user)
+    if not svc.try_begin_refine(db, article_id, total=1):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "generation already in progress"
+        )
+    try:
+        row = svc.revert_last(db, article_id)
+    except Exception:
+        # revert_last raised before landing a change — release the claim so a
+        # transient failure doesn't permanently 409 every later refine/revert.
+        svc._update(
+            db, article_id, generation_status="done", progress={"phase": "done"}
+        )
+        raise
+    if row is None:
+        svc._update(
+            db, article_id, generation_status="done", progress={"phase": "done"}
+        )
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "no earlier version to revert to"
+        )
+    spawn(_rescore_after_revert(pb, db, article_id))
+    return svc.get_article(db, article_id)
 
 
 # --- internal links (M6 / Phase 12.1) ---

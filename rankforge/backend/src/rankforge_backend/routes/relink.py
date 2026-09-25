@@ -8,7 +8,7 @@ suggestions for review (services.relink); the in-process scheduler drives the ca
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 
 from ..auth import assert_brand_access, get_current_user, require_editor
 from ..db import Database
@@ -57,3 +57,13 @@ async def run_relink_now(
     # run_relink is sync (pure DB) — off-load to a thread so the request returns fast.
     spawn(asyncio.to_thread(svc.run_relink, db, business_id))
     return {"status": "started"}
+
+
+@router.get("/{business_id}/relink/patch-notes")
+def relink_patch_notes(
+    business_id: UUID,
+    db: Database = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    assert_brand_access(db, business_id, user)
+    return Response(svc.patch_notes(db, business_id), media_type="text/markdown")

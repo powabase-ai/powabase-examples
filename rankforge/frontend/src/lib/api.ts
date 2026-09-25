@@ -4,6 +4,7 @@
  */
 
 import { getAccessToken, getSession, refresh } from "./auth/session";
+import { validationMessage } from "./validationMessage";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -17,6 +18,33 @@ export class ApiError extends Error {
     this.status = status;
   }
 }
+
+/** A 422 whose `detail.export_issues` is set — export/publish is blocked until
+ *  the listed issues are fixed. Thrown by `request()` and `exportArticle()`. */
+export class ExportBlockedError extends ApiError {
+  issues: string[];
+  constructor(issues: string[]) {
+    super(422, `Fix before exporting: ${issues.join("; ")}`);
+    this.name = "ExportBlockedError";
+    this.issues = issues;
+  }
+}
+
+/** Pull `detail.export_issues` out of a parsed error body, if present. Kept as a
+ *  narrow type guard (rather than `any`) so a malformed/unexpected body just
+ *  falls through to the generic ApiError path instead of throwing here. */
+function exportIssuesFrom(body: unknown): string[] | null {
+  if (!body || typeof body !== "object") return null;
+  const detail = (body as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object") return null;
+  const issues = (detail as { export_issues?: unknown }).export_issues;
+  return Array.isArray(issues) ? (issues as string[]) : null;
+}
+
+// A FastAPI/pydantic 422 `detail` ({loc, msg} errors) → "location: message; …".
+// Lives in lib/validationMessage.ts so it can be tested without this module's
+// runtime imports.
+export { validationMessage };
 
 /** Turn a backend error into a user-facing message. The expensive AI routes can
  * now return 429 (rate limited) and 409 (a generation/refine already running);
@@ -36,6 +64,39 @@ export interface Competitor {
   domain: string;
 }
 
+// --- Blog profile (per-brand export/frontmatter rules) ---
+export interface BlogCategory {
+  key: string;
+  label: string;
+  description: string;
+  technical: boolean;
+}
+
+export interface HubPage {
+  path: string;
+  title: string;
+  topics: string[];
+}
+
+export interface FaqItem {
+  q: string;
+  a: string;
+}
+
+export interface BlogProfile {
+  categories: BlogCategory[];
+  summary: { enabled: boolean; min_words: number; max_words: number };
+  faq: { enabled: boolean; min: number; max: number };
+  meta: { title_max: number; description_max: number };
+  links: {
+    min: number;
+    max: number;
+    trailing_slash: boolean;
+    hub_pages: HubPage[];
+  };
+  stance: "neutral" | "favor_brand";
+}
+
 export interface BusinessProfile {
   id: string;
   name: string;
@@ -51,10 +112,17 @@ export interface BusinessProfile {
   url_pattern?: string | null;
   default_author?: string | null;
   logo_url?: string | null;
+  // An invalid *stored* profile is returned as-is, so this is untyped: read it
+  // only through `asBlogProfile` (null = absent or invalid).
+  blog_profile?: unknown;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
 }
+
+// Runtime guard for `BusinessProfile.blog_profile` (typed `unknown`): every read
+// must go through it. Lives in lib/blogProfile.ts next to the defaults and repair.
+export { asBlogProfile } from "@/lib/blogProfile";
 
 export interface BusinessProfileInput {
   name: string;
@@ -70,6 +138,7 @@ export interface BusinessProfileInput {
   url_pattern?: string | null;
   default_author?: string | null;
   logo_url?: string | null;
+  blog_profile?: BlogProfile | null;
 }
 
 async function request<T>(
@@ -95,12 +164,19 @@ async function request<T>(
   }
   if (!res.ok) {
     let detail = `${res.status}`;
+    let body: unknown = null;
     try {
-      const body = await res.json();
-      detail = body.detail ?? JSON.stringify(body);
+      body = await res.json();
+      const bodyDetail = (body as { detail?: unknown } | null)?.detail;
+      detail =
+        typeof bodyDetail === "string"
+          ? bodyDetail
+          : validationMessage(bodyDetail) ?? JSON.stringify(body);
     } catch {
       /* ignore */
     }
+    const exportIssues = res.status === 422 ? exportIssuesFrom(body) : null;
+    if (exportIssues) throw new ExportBlockedError(exportIssues);
     throw new ApiError(res.status, friendlyMessage(res.status, detail));
   }
   if (res.status === 204) return undefined as T;
@@ -494,6 +570,13 @@ export interface ArticleSummary {
     word_count?: number;
     iteration?: number;
     step?: string;
+    // Set (with generation_status "done") when an instructed refine/rework produced
+    // nothing usable — the article is unchanged, and `mode` is the pass that failed.
+    refine_error?: string;
+    mode?: "refine" | "rework";
+    // Frontmatter issues (title/description/summary/FAQ length or count) left
+    // unresolved after a generation or instructed-refine's frontmatter step ran.
+    frontmatter_flags?: string[];
   };
   updated_at: string;
 }
@@ -554,10 +637,26 @@ export interface Article extends ArticleSummary {
   og_image_url?: string | null;
   cluster_id?: string | null;
   cluster_role?: "pillar" | "member" | null;
+  category?: string | null;
+  summary?: string | null;
+  faq?: FaqItem[] | null;
   created_at: string;
 }
 
 export const TERMINAL_GENERATION: GenerationStatus[] = ["done", "failed"];
+
+/** Response of `POST /articles/{id}/frontmatter`: the updated article, any
+ *  export-blocking issues still outstanding after the fix (empty when fully fixed),
+ *  the names of the fields actually written (empty = nothing changed; `content_md`
+ *  = the body's FAQ section was removed), and what the step declined or defaulted
+ *  (e.g. "category defaulted to rag"; always present, may be empty). Toasts are
+ *  worded from `changed` + `flags` by lib/frontmatterResult.ts. */
+export interface FrontmatterResult {
+  article: Article;
+  export_issues: string[];
+  changed: string[];
+  flags: string[];
+}
 
 export type ArticleStatus =
   | "draft"
@@ -630,10 +729,32 @@ export const articlesApi = {
     request<Article>(`/api/articles/${id}/score`, { method: "POST" }),
   optimize: (id: string) =>
     request<Article>(`/api/articles/${id}/optimize`, { method: "POST" }),
-  refine: (id: string, targets?: string[]) =>
+  refine: (
+    id: string,
+    opts: {
+      targets?: string[];
+      instructions?: string;
+      mode?: "refine" | "rework";
+    } = {}
+  ) =>
     request<Article>(`/api/articles/${id}/refine`, {
       method: "POST",
-      body: JSON.stringify({ targets: targets ?? null }),
+      body: JSON.stringify({
+        targets: opts.targets ?? null,
+        instructions: opts.instructions ?? null,
+        mode: opts.instructions ? opts.mode ?? "refine" : null,
+      }),
+    }),
+  revert: (id: string) =>
+    request<Article>(`/api/articles/${id}/revert`, { method: "POST" }),
+  /** `force: true` ("Generate summary & FAQ") regenerates summary/FAQ even when
+   *  they already pass the rules; without it ("Fix automatically") only failing
+   *  fields are regenerated. A 409 carries the reason as-is (no profile, or
+   *  "blog profile is invalid: …"). */
+  generateFrontmatter: (id: string, opts?: { force?: boolean }) =>
+    request<FrontmatterResult>(`/api/articles/${id}/frontmatter`, {
+      method: "POST",
+      ...(opts?.force ? { body: JSON.stringify({ force: true }) } : {}),
     }),
   retry: (id: string) =>
     request<Article>(`/api/articles/${id}/retry`, { method: "POST" }),
@@ -737,7 +858,8 @@ export interface LinkSuggestion {
   id: string;
   business_id: string;
   article_id: string;
-  target_article_id: string;
+  // null for a structural hub-page suggestion (the target isn't another article).
+  target_article_id: string | null;
   anchor_text?: string | null; // null = a structural gap (no natural anchor yet)
   target_url: string;
   target_title?: string | null;
@@ -774,7 +896,30 @@ export const relinkApi = {
       `/api/business-profiles/${businessId}/relink/run`,
       { method: "POST" }
     ),
+  patchNotes: (businessId: string) => fetchRelinkPatchNotes(businessId),
 };
+
+/** Fetch the relink scout's latest patch notes as markdown text. Mirrors
+ *  exportArticle's Bearer auth + 401→refresh→retry. */
+async function fetchRelinkPatchNotes(
+  businessId: string,
+  retry = false
+): Promise<string> {
+  const token = getAccessToken();
+  const res = await fetch(
+    `${API_BASE_URL}/api/business-profiles/${businessId}/relink/patch-notes`,
+    {
+      cache: "no-store",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }
+  );
+  if (res.status === 401 && !retry && getSession()) {
+    const ns = await refresh();
+    if (ns) return fetchRelinkPatchNotes(businessId, true);
+  }
+  if (!res.ok) throw new ApiError(res.status, `Patch notes failed (${res.status})`);
+  return res.text();
+}
 
 // --- Auth / membership ---
 export type Role = "writer" | "editor" | "admin";
@@ -1000,6 +1145,7 @@ export interface ContentCluster {
   pillar_locked: boolean;
   pillar_title?: string | null;
   member_count: number;
+  category?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -1017,9 +1163,12 @@ export const clustersApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  // Edit a cluster's label/theme. An empty-string theme clears it; omit a field to
-  // leave it unchanged. The server re-indexes the cluster on a change.
-  update: (clusterId: string, data: { label?: string; theme?: string }) =>
+  // Edit a cluster's label/theme/category. An empty-string theme clears it; omit
+  // a field to leave it unchanged. The server re-indexes the cluster on a change.
+  update: (
+    clusterId: string,
+    data: { label?: string; theme?: string; category?: string | null }
+  ) =>
     request<ContentCluster>(`/api/clusters/${clusterId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
@@ -1098,18 +1247,32 @@ export async function exportArticle(
     const ns = await refresh();
     if (ns) return exportArticle(id, format, true);
   }
-  if (!res.ok) throw new ApiError(res.status, `Export failed (${res.status})`);
+  if (!res.ok) {
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      /* ignore */
+    }
+    const exportIssues = res.status === 422 ? exportIssuesFrom(body) : null;
+    if (exportIssues) throw new ExportBlockedError(exportIssues);
+    throw new ApiError(res.status, `Export failed (${res.status})`);
+  }
   return res.text();
 }
 
 export interface ArticleUpdate {
   title?: string;
   content_md?: string;
-  meta_title?: string;
+  // Explicit null clears the field server-side; an omitted key is left unchanged.
+  meta_title?: string | null;
   meta_description?: string;
   status?: string;
   canonical_url?: string;
   author?: string;
+  category?: string | null;
+  summary?: string | null;
+  faq?: FaqItem[] | null;
 }
 
 // --- Brief (Stage B) ---

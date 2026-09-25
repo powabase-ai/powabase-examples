@@ -131,3 +131,141 @@ async def test_draft_article_keeps_brand_profile_distinct_from_grounding(monkeyp
     assert len(body) >= 500
     # The brand PROFILE drove the brand-context line (not the grounding list).
     assert "**Acme**'s own blog" in captured["msg"]
+
+
+from rankforge_backend.models.blog import BlogProfile  # noqa: E402
+from rankforge_backend.services import generation as _g  # noqa: E402
+
+_BP = BlogProfile.model_validate({"categories": [{"key": "rag", "label": "R"}],
+                                  "stance": "favor_brand"})
+
+
+def test_writer_rules_profile_blocks():
+    r = _g._writer_rules(_BP, "Powabase")
+    assert "Do not write an FAQ" in r
+    assert "Never state a Powabase gap" in r
+    assert _g._writer_rules(None, "Powabase") == ""
+
+
+def test_outline_drops_faq_heading_with_profile():
+    heads = ["H2: Intro", "H2: FAQ", "H3: Is it safe?", "H2: Conclusion"]
+    assert _g._outline_for(heads, _BP) == ["H2: Intro", "H2: Conclusion"]
+    assert _g._outline_for(heads, None) == heads
+
+
+def test_link_block_lists_targets():
+    c = [{"title": "Vector DB", "target": "https://powabase.ai/vector-database/",
+          "category": None}]
+    b = _g._link_block(c, _BP)
+    assert "https://powabase.ai/vector-database/" in b and "3-5" in b
+    assert _g._link_block([], _BP) == ""
+
+
+# --- review r1 C1/K4 + K3: a re-draft versions the old body first; generation-time
+# frontmatter flags land in the final progress ---
+from unittest.mock import AsyncMock  # noqa: E402
+
+import pytest  # noqa: E402
+
+from rankforge_backend.services import frontmatter as _fm  # noqa: E402
+from rankforge_backend.services import geo_optimize as _geo  # noqa: E402
+from rankforge_backend.services import linkcheck as _lc  # noqa: E402
+from rankforge_backend.services import linking as _linking  # noqa: E402
+from rankforge_backend.services import quality as _quality  # noqa: E402
+from rankforge_backend.services import revise as _revise  # noqa: E402
+from rankforge_backend.services import scoring as _scoring  # noqa: E402
+
+
+@pytest.fixture
+def gen_env(monkeypatch):
+    st = {"art": {"id": "A", "business_id": "B", "cluster_id": "C",
+                  "content_md": "# Old\n\nhand-edited body", "title": "T"},
+          "events": [], "updates": []}
+    monkeypatch.setattr(gen, "get_article", lambda d, a: dict(st["art"]))
+
+    def _upd(d, a, **f):
+        st["events"].append(("update", sorted(f)))
+        st["updates"].append(f)
+        st["art"].update(f)
+
+    monkeypatch.setattr(gen, "_update", _upd)
+    monkeypatch.setattr(
+        gen, "snapshot_version",
+        lambda d, art: st["events"].append(("snapshot", art.get("content_md"))),
+    )
+    monkeypatch.setattr(
+        gen.brands, "get_profile",
+        lambda d, b: {"name": "B", "blog_profile": _BP.model_dump()},
+    )
+    monkeypatch.setattr(gen, "ensure_writer_agent", AsyncMock(return_value="w"))
+    monkeypatch.setattr(gen, "_cluster_context", lambda *a: None)
+    monkeypatch.setattr(gen, "_draft_article", AsyncMock(return_value="new body"))
+    monkeypatch.setattr(_linking, "link_candidates", lambda *a: [])
+    monkeypatch.setattr(_fm, "complete", AsyncMock(return_value=[]))
+    for mod, name in ((_quality, "reflect"), (_geo, "optimize_and_store"),
+                      (_scoring, "score_and_store"), (_revise, "refine"),
+                      (_lc, "check_article")):
+        monkeypatch.setattr(mod, name, AsyncMock())
+    return st
+
+
+async def _run_gen():
+    await gen.run_generation_task(
+        MagicMock(), MagicMock(), article_id="A",
+        brief={"business_id": "B", "research_run_id": None, "topic": "t"},
+    )
+
+
+async def test_redraft_snapshots_existing_body_before_overwrite(gen_env):
+    await _run_gen()
+    ev = gen_env["events"]
+    first_body_write = next(i for i, e in enumerate(ev)
+                            if e[0] == "update" and "content_md" in e[1])
+    assert ("snapshot", "# Old\n\nhand-edited body") in ev[:first_body_write]
+
+
+async def test_first_draft_does_not_snapshot_empty_body(gen_env):
+    gen_env["art"]["content_md"] = "  "
+    await _run_gen()
+    assert not any(e[0] == "snapshot" for e in gen_env["events"])
+
+
+async def test_generation_stores_frontmatter_flags_in_progress(gen_env, monkeypatch):
+    monkeypatch.setattr(_fm, "complete", AsyncMock(return_value=["faq has 1 item(s)"]))
+    await _run_gen()
+    final = gen_env["updates"][-1]
+    assert final["generation_status"] == "done"
+    assert final["progress"]["frontmatter_flags"] == ["faq has 1 item(s)"]
+
+
+async def test_generation_flags_a_frontmatter_step_that_raised(gen_env, monkeypatch):
+    """Review r3 N35: the step raising never fails generation, but it must say so."""
+    monkeypatch.setattr(_fm, "complete", AsyncMock(side_effect=RuntimeError("x")))
+    await _run_gen()
+    final = gen_env["updates"][-1]
+    assert final["generation_status"] == "done"
+    assert final["progress"]["frontmatter_flags"] == [
+        "the frontmatter step failed; run it again"
+    ]
+
+
+async def test_generation_progress_has_no_flags_when_clean(gen_env):
+    await _run_gen()
+    assert "frontmatter_flags" not in gen_env["updates"][-1]["progress"]
+
+
+# --- review r2 N2 / K9: an invalid stored profile is surfaced, not silent ---
+async def test_generation_flags_an_invalid_blog_profile(gen_env, monkeypatch):
+    bad = {**_BP.model_dump(), "link": {"min": 1}}  # misspelled key
+    monkeypatch.setattr(
+        gen.brands, "get_profile", lambda d, b: {"name": "B", "blog_profile": bad}
+    )
+    fm_complete = AsyncMock(return_value=[])
+    monkeypatch.setattr(_fm, "complete", fm_complete)
+    await _run_gen()
+    final = gen_env["updates"][-1]
+    assert final["generation_status"] == "done"
+    flags = final["progress"]["frontmatter_flags"]
+    assert len(flags) == 1 and flags[0].startswith("blog profile is invalid: ")
+    assert "link" in flags[0]
+    fm_complete.assert_not_awaited()  # runs without the profile rules

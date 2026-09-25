@@ -30,9 +30,13 @@ from .agents import ensure_agent
 log = logging.getLogger("rankforge.clusters")
 
 _COLUMNS = (
-    "id, business_id, label, theme, pillar_article_id, pillar_locked, "
+    "id, business_id, label, theme, category, pillar_article_id, pillar_locked, "
     "index_doc_id, created_at, updated_at"
 )
+
+# Sentinel distinguishing "category not passed" (leave unchanged) from an explicit
+# `category=None` (clear it) in update_cluster's keyword-only category argument.
+_UNSET = object()
 
 # full_document: each cluster's pillar summary is ONE short doc → one embedding, so
 # search returns nearest CLUSTERS (not chunk fragments). The docs are tiny, so the
@@ -271,24 +275,41 @@ async def update_cluster(
     *,
     label: str | None = None,
     theme: str | None = None,
+    category: Any = _UNSET,
 ) -> dict[str, Any] | None:
-    """Edit a cluster's label/theme (partial: an omitted field is left as-is; an empty
-    theme clears it). When the text actually changes, refresh the cluster-index doc so
-    the architect keeps matching future topics on the CURRENT label/theme, not a stale
-    embedding. Remote index steps are best-effort (retrieval degrades to pass-all
-    without the doc). Returns the updated row, or None if the cluster is gone."""
+    """Edit a cluster's label/theme/category (partial: an omitted field is left as-is;
+    an empty theme or a `category=None` clears it). When the label/theme text actually
+    changes, refresh the cluster-index doc so the architect keeps matching future topics
+    on the CURRENT label/theme, not a stale embedding — a category-only edit never
+    touches the (remote) index, since the category doesn't feed the architect's matching
+    text. Remote index steps are best-effort (retrieval degrades to pass-all without the
+    doc). Returns the updated row, or None if the cluster is gone."""
     current = get_cluster(db, cluster_id)
     if current is None:
         return None
     new_label = current["label"] if label is None else label[:120]
     new_theme = (current.get("theme") or "") if theme is None else (theme or "")
-    if new_label == current["label"] and new_theme == (current.get("theme") or ""):
+    new_cat = current.get("category") if category is _UNSET else category
+    label_theme_changed = new_label != current["label"] or new_theme != (
+        current.get("theme") or ""
+    )
+    cat_changed = new_cat != current.get("category")
+    if not label_theme_changed and not cat_changed:
         return current  # nothing changed → skip the write + re-index entirely
 
+    if not label_theme_changed:
+        # Category-only change: write it and return — skip the re-index block entirely
+        # (label/theme are unchanged, so the index doc's text is still current).
+        return db.fetch_one(
+            "update public.content_clusters set category = %s, "
+            f"updated_at = now() where id = %s returning {_COLUMNS}",
+            (new_cat, cluster_id),
+        )
+
     row = db.fetch_one(
-        "update public.content_clusters set label = %s, theme = %s, "
+        "update public.content_clusters set label = %s, theme = %s, category = %s, "
         f"updated_at = now() where id = %s returning {_COLUMNS}",
-        (new_label, new_theme, cluster_id),
+        (new_label, new_theme, new_cat, cluster_id),
     )
     if row is None:
         return None

@@ -7,8 +7,10 @@ feeds the failing signals' concrete fixes and the flagged grounding claims to a
 then re-runs fact-check → JSON-LD → scoring. Capped so it always terminates.
 """
 
+import json
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -173,10 +175,14 @@ def _meta_failing(seo: dict | None) -> bool:
 
 
 async def fix_meta(
-    client: PowabaseClient, db: Database, article_id: UUID, article: dict, brief: dict
+    client: PowabaseClient, db: Database, article_id: UUID, article: dict, brief: dict,
+    *, title_max: int = 60, description_max: int = 160,
+    before_write: Callable[[], None] | None = None,
 ) -> None:
-    """Rewrite meta_title / meta_description to satisfy the title/meta SEO signals."""
+    """Rewrite meta_title / meta_description to satisfy the title/meta SEO signals.
+    `before_write` runs just before a write (none when the model gave nothing)."""
     pk = brief.get("primary_keyword") or ""
+    desc_min = min(120, description_max - 20)
     msg = (
         "Write SEO metadata for the article.\n\n"
         "## Context\n"
@@ -185,9 +191,10 @@ async def fix_meta(
         "- Stay faithful to what the working title says the article is about; sharpen "
         "it, don't change the subject.\n\n"
         "## Requirements\n"
-        "- `meta_title`: at most 60 characters, includes the primary keyword.\n"
-        "- `meta_description`: 120–160 characters, compelling, includes the primary "
+        f"- `meta_title`: at most {title_max} characters, includes the primary "
         "keyword.\n"
+        f"- `meta_description`: {desc_min}–{description_max} characters, compelling, "
+        "includes the primary keyword.\n"
         "- Front-load the primary keyword, read naturally (no stuffing), and make the "
         "description earn the click.\n\n"
         "## Output\n"
@@ -201,11 +208,18 @@ async def fix_meta(
     except Exception:  # noqa: BLE001 — advisory
         return
     fields: dict[str, Any] = {}
-    if (mt := (data.get("meta_title") or "").strip()):
+    # A value equal to the stored one is no change: no write, no version.
+    if (mt := (data.get("meta_title") or "").strip()) and mt != article.get(
+        "meta_title"
+    ):
         fields["meta_title"] = mt
-    if (md := (data.get("meta_description") or "").strip()):
+    if (md := (data.get("meta_description") or "").strip()) and md != article.get(
+        "meta_description"
+    ):
         fields["meta_description"] = md
     if fields:
+        if before_write:
+            before_write()
         gen_svc._update(db, article_id, **fields)
 
 
@@ -230,7 +244,8 @@ def _decide(cur: list[dict], new: list[dict]) -> bool:
 
 
 def _det_scores(
-    md: str, title: str, meta: str | None, brief: dict
+    md: str, title: str, meta: str | None, brief: dict,
+    seo_kwargs: dict | None = None,
 ) -> list[dict]:
     """Cheap deterministic SEO + GEO scores (no LLM) for the commit gate.
 
@@ -238,22 +253,34 @@ def _det_scores(
     loop's LLM editor, not a deterministic tell-count. The commit gate only protects
     the OBJECTIVE axes — so an SEO/GEO-preserving rewrite (whether for SEO fixes or
     for voice) is judged on those, and a good de-AI rewrite can't be vetoed by a
-    tell-counter."""
+    tell-counter. `seo_kwargs` (scoring.seo_kwargs_for) scores SEO with the
+    brand's blog profile, as the stored score does."""
     from . import scoring
 
     return [
-        scoring.score_seo(md, title, meta, brief),
+        scoring.score_seo(md, title, meta, brief, **(seo_kwargs or {})),
         scoring.score_geo(md, brief, None, has_structured_data=True),
     ]
 
 
 def _accept_revision(
-    cur_md: str, new_md: str, title: str, meta: str | None, brief: dict
+    cur_md: str, new_md: str, title: str, meta: str | None, brief: dict,
+    *, db: Database | None = None, article: dict | None = None,
 ) -> bool:
-    """True if `new_md` doesn't regress the objective SEO/GEO axes vs `cur_md`."""
+    """True if `new_md` doesn't regress the objective SEO/GEO axes vs `cur_md`.
+    Given the db and article, both bodies are link-resolved and scored with the
+    brand's profile (so dropping an internal link counts against the rewrite)."""
+    kw = None
+    if db is not None and article and article.get("business_id"):
+        from . import linking, scoring
+
+        kw = scoring.seo_kwargs_for(db, article)
+        bid = article["business_id"]
+        cur_md = linking.resolve_links(db, bid, cur_md)
+        new_md = linking.resolve_links(db, bid, new_md)
     return _decide(
-        _det_scores(cur_md, title, meta, brief),
-        _det_scores(new_md, title, meta, brief),
+        _det_scores(cur_md, title, meta, brief, seo_kwargs=kw),
+        _det_scores(new_md, title, meta, brief, seo_kwargs=kw),
     )
 
 
@@ -695,7 +722,9 @@ async def _editorial_loop(
             # Guard the OBJECTIVE axes only — the editor owns human-ness.
             title = article.get("meta_title") or article.get("title") or ""
             meta = article.get("meta_description")
-            if not _accept_revision(cur_md, new_md, title, meta, brief):
+            if not _accept_revision(
+                cur_md, new_md, title, meta, brief, db=db, article=article
+            ):
                 break
             gen_svc._update(db, article_id, content_md=new_md)
             await quality.reflect(client, db, article_id)
@@ -890,7 +919,7 @@ def _selected_total(article: dict, targets: list[str]) -> float:
 _LOCALIZED_TELL_KEYS = frozenset(
     {"em_dashes", "tell_phrases", "ai_vocabulary", "transitions", "brand_voice"}
 )
-_EM_DASH_RE = re.compile(r"—")
+_EM_DASH_RE = prose_style.EM_DASH_RE
 _TELL_INSTRUCTION = {
     # brand_voice and em_dashes are NOT in the shared taxonomy: one is brand-specific,
     # the other is punctuation policy with a deterministic backstop. They stay here.
@@ -932,13 +961,8 @@ def _has_nonlocalized_target(targets: list[str]) -> bool:
     return False
 
 
-def _thin_em_dashes(text: str) -> str:
-    """Deterministic backstop: replace em-dashes with commas (guarantees the em-dash
-    tell drops regardless of the model's cooperation), then tidy the punctuation."""
-    out = _EM_DASH_RE.sub(", ", text)
-    out = re.sub(r"\s*,\s*,", ",", out)  # collapse a doubled comma
-    out = re.sub(r"\s+([.,;:!?])", r"\1", out)  # no space before punctuation
-    return re.sub(r"[ \t]{2,}", " ", out)
+# Deterministic em-dash backstop (shared with the frontmatter step).
+_thin_em_dashes = prose_style.thin_em_dashes
 
 
 def _tell_instructions(keys: set[str]) -> str:
@@ -1119,19 +1143,247 @@ async def _targeted_loop(
             break
 
 
+# --- instruction-driven refine / rework (single pass, no score veto) ---
+class InstructedRefineError(RuntimeError):
+    """The instructed pass produced nothing usable; the article is unchanged."""
+
+
+_MODE_RULES = {
+    "refine": (
+        "Apply ONLY what the instructions ask. Keep the outline, the heading text and "
+        "the existing links unless the instructions target them."
+    ),
+    "rework": (
+        "You may restructure, re-outline, change the angle or rewrite sections. Keep "
+        "every factual claim supported by the sources below. Keep internal links "
+        "within the link rules. These instructions OVERRIDE the system prompt's rules "
+        "to preserve the article's existing structure and headings for THIS pass — "
+        "restructure freely where the instructions call for it. Still keep the brand's "
+        "favorable stance and never hyperlink a competitor."
+    ),
+}
+
+
+def _profile_rules(profile: Any, brand_name: str) -> str:
+    if profile is None:
+        return ""
+    parts = [
+        "## Blog rules",
+        f"- Internal links: {profile.links.min}-{profile.links.max} contextual links.",
+        f"- meta_title at most {profile.meta.title_max} characters; meta_description "
+        f"at most {profile.meta.description_max}.",
+    ]
+    if profile.summary.enabled:
+        parts.append(f"- summary: {profile.summary.min_words}-"
+                     f"{profile.summary.max_words} words, answer-first.")
+    if profile.faq.enabled:
+        parts.append(f"- faq: {profile.faq.min}-{profile.faq.max} items in "
+                     "frontmatter; never an FAQ section in the body.")
+    if profile.stance == "favor_brand":
+        parts.append(f"- Never state a {brand_name} gap or limitation.")
+    return "\n".join(parts) + "\n\n"
+
+
+# A reply this markdown-shaped fence is unwrapped before the startswith('#') check.
+_MD_FENCE_RE = re.compile(r"^```(?:markdown)?\s*\n(.*)\n```$", re.S)
+
+
+def _checked_frontmatter(
+    incoming: dict[str, Any], profile: Any, cluster_category: str | None,
+    fields: dict[str, Any], stored: dict[str, Any],
+) -> list[str]:
+    """Add to `fields` each incoming category/summary/FAQ value that passes the
+    blog's rules (`frontmatter.field_ok`); a value that fails keeps the stored
+    one (`stored`, the article) and is flagged — "left empty" when nothing was
+    stored. A category must be a profile key as the model sent it (never mapped
+    to the fallback); the cluster's category still wins over a valid one. A
+    summary trimmed to fit, or an FAQ cut to `faq.max`, is written and flagged
+    for review. Returns the flags."""
+    from . import blog_rules, frontmatter
+
+    clean, vflags = blog_rules.validate_frontmatter(
+        incoming, profile, cluster_category=cluster_category
+    )
+    keys = {c.key for c in profile.categories}
+    flags: list[str] = []
+    for k in ("category", "summary", "faq"):
+        if k not in incoming or (k != "category" and not getattr(profile, k).enabled):
+            continue
+        ok = (
+            incoming[k] in keys if k == "category"
+            else frontmatter.field_ok(k, clean[k], profile)
+        )
+        if not ok:
+            value = incoming[k] if k == "category" else clean[k]
+            flags.append(
+                frontmatter.rejected_flag(k, value, profile, stored.get(k))
+            )
+            continue
+        fields[k] = clean[k]
+        if k == "summary":
+            flags += [f for f in vflags if f.startswith("summary trimmed")]
+        if k == "faq" and (sent := len(blog_rules.clean_faq(incoming[k]))) > len(
+            clean[k]
+        ):
+            flags.append(f"faq cut to {len(clean[k])} of the model's {sent} items; "
+                         "review it")
+    return flags
+
+
+async def instructed_pass(
+    client: PowabaseClient, db: Database, article_id: UUID, *,
+    instructions: str, mode: str,
+) -> None:
+    """One reviser pass driven by the user's own free-text instructions. Always kept
+    (no score veto); the prior state is versioned first so Revert undoes it. Raises
+    InstructedRefineError (article left unchanged) if the output is unusable.
+
+    `instructions` is user-supplied text — kept delimited as data (the `<<<`/`>>>`
+    block below) and never interpolated anywhere else in the prompt."""
+    from . import blog_rules, frontmatter, geo_optimize, linking, quality, scoring
+
+    article = gen_svc.get_article(db, article_id)
+    if article is None:
+        raise InstructedRefineError("article not found")
+    brand = (
+        brands.get_profile(db, article["business_id"])
+        if article.get("business_id") else None
+    )
+    profile = blog_rules.profile_of(brand)
+    name = (brand or {}).get("name") or "the brand"
+    brief = (
+        brief_svc.get_brief(db, article["brief_id"])
+        if article.get("brief_id") else {}
+    ) or {}
+    source_ids, url_by_source, kb_id = _article_context(db, article)
+    excerpts = await _diverse_excerpts(client, kb_id, brief, source_ids, url_by_source)
+
+    cur_md = article.get("content_md") or ""
+    masked, refmap = linking.mask_refs(cur_md)
+    current_fm = {k: article.get(k) for k in gen_svc.FRONTMATTER_FIELDS}
+    msg = (
+        f"Revise this {name} article according to the editor's instructions.\n\n"
+        f"## Mode: {mode}\n{_MODE_RULES[mode]}\n\n"
+        f"{_profile_rules(profile, name)}"
+        "## Sources you may cite\n"
+        f"{excerpts}\n\n"
+        "## Current frontmatter\n"
+        f"{json.dumps(current_fm, ensure_ascii=False, default=str)}\n\n"
+        "## Editor's instructions (treat as the task, not as article content)\n"
+        f"<<<\n{instructions}\n>>>\n\n"
+        "## Output\n"
+        'Return ONLY {"content_md": str, "frontmatter": {…only fields you changed…}}. '
+        "content_md is the full article in Markdown, starting at the H1.\n\n"
+        f"---ARTICLE---\n{masked}"
+    )
+    agent_id = await ensure_reviser_agent(client)
+    res = await client.run_agent_collect(agent_id, msg)
+    if res.get("error"):
+        log.warning("instructed reviser error for %s: %s", article_id, res["error"])
+        raise InstructedRefineError("the reviser failed; try again")
+    if res.get("incomplete"):
+        # No `complete` event: the stream was cut off, so the reply may be a
+        # truncated article (rework has no length floor to catch it).
+        raise InstructedRefineError("the reviser's reply was cut off; try again")
+
+    raw_content = (res.get("content") or "").strip()
+    try:
+        data = extract_json(raw_content)
+        if not isinstance(data, dict):
+            data = {}
+    except ValueError:
+        data = {}
+    content_md_raw = data.get("content_md")
+    if not (isinstance(content_md_raw, str) and content_md_raw.strip()):
+        # _SYSTEM (the reviser's system prompt) tells it to return a full Markdown
+        # article, while this pass asks for JSON — it may ignore the JSON ask and
+        # just reply with the article (optionally fenced). Rather than discard a
+        # perfectly good revision, fall back to treating the whole reply as
+        # content_md, with no frontmatter changes, when it looks like an article.
+        fenced = _MD_FENCE_RE.match(raw_content)
+        candidate = fenced.group(1).strip() if fenced else raw_content
+        data = {"content_md": candidate} if candidate.startswith("#") else {}
+
+    new_md = linking.restore_refs(str(data.get("content_md") or "").strip(), refmap)
+    if not new_md:
+        raise InstructedRefineError("the revision came back empty")
+    if mode == "refine" and len(new_md) < 0.6 * len(cur_md):
+        raise InstructedRefineError(
+            "the revision dropped too much of the article (refine keeps at least 60%)"
+        )
+    new_md = linking.strip_competitor_links(new_md, linking.competitor_hosts(brand))
+    if profile and profile.faq.enabled:
+        new_md = blog_rules.strip_body_faq(new_md)
+
+    fm_in = data.get("frontmatter") if isinstance(data.get("frontmatter"), dict) else {}
+    fields: dict[str, Any] = {"content_md": new_md}
+    for k in ("title", "meta_title", "meta_description"):
+        if isinstance(fm_in.get(k), str) and fm_in[k].strip():
+            fields[k] = fm_in[k].strip()
+    fm_flags: list[str] = []
+    # Only real values count as changes: a blank category, "" summary or empty FAQ
+    # from the model keeps what is stored.
+    incoming: dict[str, Any] = {}
+    if isinstance(fm_in.get("category"), str) and fm_in["category"].strip():
+        incoming["category"] = fm_in["category"].strip()
+    if isinstance(fm_in.get("summary"), str) and fm_in["summary"].strip():
+        incoming["summary"] = fm_in["summary"]
+    if blog_rules.clean_faq(fm_in.get("faq")):
+        incoming["faq"] = fm_in["faq"]
+    if profile and incoming:
+        fm_flags = _checked_frontmatter(
+            incoming, profile, frontmatter._cluster_category(db, article), fields,
+            article,
+        )
+        if fm_flags:
+            log.warning("instructed pass frontmatter flags for %s: %s",
+                        article_id, fm_flags)
+
+    snap = {k: article.get(k) for k in (
+        "content_md", *gen_svc.FRONTMATTER_FIELDS, "seo_score", "geo_score",
+        "grounding_report", "readability_score", "json_ld",
+    )}
+    gen_svc.snapshot_version(db, article)
+    gen_svc._update(db, article_id, **fields)
+    try:
+        if profile:
+            frontmatter.enforce_meta(
+                db, article_id,
+                gen_svc.get_article(db, article_id) or {**article, **fields},
+                profile,
+            )
+        await quality.reflect(client, db, article_id)
+        await geo_optimize.optimize_and_store(client, db, article_id)
+        await scoring.score_and_store(client, db, article_id)
+    except Exception:
+        gen_svc._update(db, article_id, **snap)
+        raise
+    if fm_flags:
+        # Kept in progress so the refine finisher carries them into the done state.
+        prog = (gen_svc.get_article(db, article_id) or {}).get("progress") or {}
+        gen_svc._update(
+            db, article_id, progress={**prog, "frontmatter_flags": fm_flags}
+        )
+
+
 async def refine(
     client: PowabaseClient,
     db: Database,
     article_id: UUID,
     *,
     targets: list[str] | None = None,
+    instructions: str | None = None,
+    mode: str = "refine",
 ) -> dict[str, Any] | None:
     """Improve the article, then return it.
+
+    With `instructions` (free-text, `mode` "refine" or "rework"): a single instructed
+    reviser pass — always kept, no score veto (see `instructed_pass`).
 
     With `targets` (a user-picked set of `axis:signal` / `grounding:i` selectors): fix
     EXACTLY those issues and nothing else — including deterministic readability tells.
 
-    Without `targets` (legacy / post-generation auto-refine): two distinct loops —
+    With neither (legacy / post-generation auto-refine): two distinct loops —
     1. OBJECTIVE — drive SEO / GEO / Grounding to target (deterministic-scored).
     2. EDITORIAL — make the prose read like a human wrote it, judged by an LLM editor
        (not a tell-count), guarded so it can't regress the objective axes.
@@ -1144,6 +1396,19 @@ async def refine(
     article = gen_svc.get_article(db, article_id)
     if article is None:
         return None
+    if instructions:
+        before = {
+            "seo": (article.get("seo_score") or {}).get("total"),
+            "geo": (article.get("geo_score") or {}).get("total"),
+            "readability": (article.get("readability_score") or {}).get("total"),
+        }
+        gen_svc._update(db, article_id, progress={
+            "phase": "refining", "iteration": 0, "total": 1, "step": "revising",
+            "mode": mode, "before": before,
+        })
+        await instructed_pass(client, db, article_id,
+                              instructions=instructions, mode=mode)
+        return gen_svc.get_article(db, article_id)
     brief = (
         brief_svc.get_brief(db, article["brief_id"])
         if article.get("brief_id")
@@ -1157,7 +1422,24 @@ async def refine(
         t in _SEO_META_SELECTORS for t in targets
     )
     if _meta_failing(article.get("seo_score")) or meta_selected:
-        await fix_meta(client, db, article_id, article, brief)
+        from . import blog_rules, frontmatter  # local: avoid import cycle
+
+        profile = blog_rules.profile_of(
+            brands.get_profile(db, article["business_id"])
+            if article.get("business_id") else None
+        )
+        if profile:
+            await fix_meta(
+                client, db, article_id, article, brief,
+                title_max=profile.meta.title_max,
+                description_max=profile.meta.description_max,
+            )
+            frontmatter.enforce_meta(
+                db, article_id, gen_svc.get_article(db, article_id) or article,
+                profile,
+            )
+        else:
+            await fix_meta(client, db, article_id, article, brief)
         await scoring.score_and_store(client, db, article_id)
 
     if targets is not None:
@@ -1171,4 +1453,24 @@ async def refine(
         await _editorial_loop(
             client, db, article_id, brief, kb_id, source_ids, url_by_source
         )
+    await _strip_profile_body_faq(client, db, article_id)
     return gen_svc.get_article(db, article_id)
+
+
+async def _strip_profile_body_faq(
+    client: PowabaseClient, db: Database, article_id: UUID
+) -> None:
+    """The legacy/targeted loops know nothing of the blog profile, so a GEO fix
+    ("answer the remaining questions") can add a body FAQ section. On a brand whose
+    profile puts the FAQ in frontmatter, remove it and re-score."""
+    from . import blog_rules, scoring  # local: avoid import cycle
+
+    art = gen_svc.get_article(db, article_id)
+    if not art or not art.get("business_id"):
+        return
+    profile = blog_rules.profile_of(brands.get_profile(db, art["business_id"]))
+    md = art.get("content_md") or ""
+    if not (profile and profile.faq.enabled and blog_rules.BODY_FAQ_RE.search(md)):
+        return
+    gen_svc._update(db, article_id, content_md=blog_rules.strip_body_faq(md))
+    await scoring.score_and_store(client, db, article_id)

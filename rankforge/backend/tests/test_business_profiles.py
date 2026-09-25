@@ -220,3 +220,157 @@ def test_delete_without_powabase_still_returns_204(monkeypatch):
 
     assert resp.status_code == 204
     assert deleted.get("pid") is not None  # the row delete still ran
+
+
+def test_list_tolerates_an_invalid_stored_blog_profile():
+    """One brand with a corrupt stored blog_profile must not 500 the whole list; the
+    raw value is returned so the settings page can show and fix it."""
+    db = MagicMock()
+    bad = {"categories": "nope"}
+    db.fetch_all.return_value = [{**ROW, "blog_profile": bad}]
+    resp = make_client(db).get("/api/business-profiles")
+    assert resp.status_code == 200
+    assert resp.json()[0]["blog_profile"] == bad
+
+
+def test_update_still_validates_the_blog_profile_strictly():
+    db = MagicMock()
+    resp = make_client(db).patch(
+        f"/api/business-profiles/{ROW['id']}",
+        json={"blog_profile": {"categories": [{"key": "rag", "label": "R"}],
+                               "link": {"min": 1}}},
+    )
+    assert resp.status_code == 422
+    db.fetch_one.assert_not_called()
+
+
+# --- url_pattern is validated when saved (PR #26 review round 2) ---
+_BAD_PATTERNS = {
+    "blog.acme.com/{slug}": "http(s)",  # no scheme and not a site path
+    "//acme.com/{slug}": "http(s)",  # protocol-relative
+    "ftp://acme.com/{slug}": "http(s)",
+    "https:///{slug}": "http(s)",  # no host
+    "https://acme.com/blog/": "{slug}",  # no token
+    "https://acme.com/blog/{slug}#top": "#",
+    "https://acme.com/blog/ {slug}": "whitespace",
+    # Browsers read '\\' as '/': these render as off-site links (round 3, F2).
+    "/\\evil.com/{slug}": "'\\'",
+    "https://acme.com/\\evil/{slug}": "'\\'",
+}
+
+
+def test_create_rejects_a_bad_url_pattern_with_a_clear_422():
+    for pattern, hint in _BAD_PATTERNS.items():
+        db = MagicMock()
+        resp = make_client(db).post(
+            "/api/business-profiles", json={"name": "Acme", "url_pattern": pattern}
+        )
+        assert resp.status_code == 422, pattern
+        msg = " ".join(e["msg"] for e in resp.json()["detail"])
+        assert "url_pattern" in msg and hint in msg, (pattern, msg)
+        db.fetch_one.assert_not_called()
+
+
+def _patch_db(stored: str | None, org: str = ADMIN_ORG) -> MagicMock:
+    """A db whose brand read returns a row with `stored` as its url_pattern; the
+    update echoes the row back."""
+    db = MagicMock()
+    row = {**ROW, "url_pattern": stored, "org_id": UUID(org)}
+    db.fetch_one.side_effect = lambda q, p=None: row
+    return db
+
+
+def _updates(db: MagicMock) -> list:
+    return [c for c in db.fetch_one.call_args_list
+            if "update public.business_profiles" in c.args[0]]
+
+
+def test_update_rejects_a_bad_url_pattern():
+    for pattern, hint in _BAD_PATTERNS.items():
+        db = _patch_db("https://acme.com/blog/{slug}")
+        resp = make_client(db).patch(
+            f"/api/business-profiles/{ROW['id']}", json={"url_pattern": pattern},
+        )
+        assert resp.status_code == 422, pattern
+        err = resp.json()["detail"][0]
+        assert err["loc"] == ["body", "url_pattern"]
+        assert "url_pattern" in err["msg"] and hint in err["msg"], (pattern, err)
+        assert _updates(db) == []
+
+
+# --- review r3 minor: a legacy pattern, sent back unchanged, doesn't block the
+# rest of the settings form (create stays strict) ---
+def test_update_accepts_the_unchanged_legacy_url_pattern():
+    legacy = "blog/{slug}#x"
+    db = _patch_db(legacy)
+    resp = make_client(db).patch(
+        f"/api/business-profiles/{ROW['id']}",
+        json={"name": "Acme 2", "url_pattern": f"  {legacy} "},
+    )
+    assert resp.status_code == 200
+    assert len(_updates(db)) == 1
+    # A legacy value stored with stray spaces compares by its stripped form.
+    db = _patch_db(f" {legacy}\n")
+    resp = make_client(db).patch(
+        f"/api/business-profiles/{ROW['id']}", json={"url_pattern": legacy},
+    )
+    assert resp.status_code == 200
+
+
+def test_update_rejects_a_changed_bad_url_pattern_even_with_a_legacy_one():
+    db = _patch_db("blog/{slug}#x")
+    resp = make_client(db).patch(
+        f"/api/business-profiles/{ROW['id']}", json={"url_pattern": "blog/{slug}#y"},
+    )
+    assert resp.status_code == 422 and _updates(db) == []
+
+
+def test_update_never_compares_against_another_orgs_pattern():
+    legacy = "blog/{slug}#x"
+    db = _patch_db(legacy, org="99999999-9999-9999-9999-999999999999")
+    resp = make_client(db).patch(
+        f"/api/business-profiles/{ROW['id']}", json={"url_pattern": legacy},
+    )
+    assert resp.status_code == 422 and _updates(db) == []
+
+
+def test_update_without_url_pattern_skips_the_check():
+    db = _patch_db("blog/{slug}#x")
+    resp = make_client(db).patch(
+        f"/api/business-profiles/{ROW['id']}", json={"name": "Acme 2"},
+    )
+    assert resp.status_code == 200 and len(_updates(db)) == 1
+
+
+def test_create_rejects_a_legacy_style_pattern():
+    db = MagicMock()
+    resp = make_client(db).post(
+        "/api/business-profiles", json={"name": "Acme", "url_pattern": "blog/{slug}#x"}
+    )
+    assert resp.status_code == 422
+    db.fetch_one.assert_not_called()
+
+
+def test_good_url_patterns_are_accepted():
+    from rankforge_backend.models.business import BusinessProfileCreate as C
+    from rankforge_backend.models.business import BusinessProfileUpdate as U
+
+    for pattern in ["https://blog.acme.com/{slug}", "http://acme.com/p/{id}/",
+                    "/blog/{slug}/", "https://acme.com/blog/{slug}?ref=rf"]:
+        assert C(name="A", url_pattern=pattern).url_pattern == pattern
+        db = _patch_db(None)
+        resp = make_client(db).patch(
+            f"/api/business-profiles/{ROW['id']}", json={"url_pattern": pattern},
+        )
+        assert resp.status_code == 200, pattern
+    assert U(url_pattern="  /blog/{slug}  ").url_pattern == "/blog/{slug}"
+    assert U(url_pattern=None).url_pattern is None
+    assert U(url_pattern="  ").url_pattern is None  # blank clears it
+
+
+def test_list_still_reads_a_legacy_url_pattern():
+    db = MagicMock()
+    db.fetch_all.return_value = [{**ROW, "url_pattern": "blog/{slug}#x"}]
+    resp = make_client(db).get("/api/business-profiles")
+    assert resp.status_code == 200
+    assert resp.json()[0]["url_pattern"] == "blog/{slug}#x"

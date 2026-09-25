@@ -481,6 +481,19 @@ def judge_taxonomy() -> str:
     return "\n".join(lines)
 
 
+EM_DASH_RE = re.compile(r"—")
+
+
+def thin_em_dashes(text: str) -> str:
+    """Deterministic backstop: replace em-dashes with commas (guarantees the em-dash
+    tell drops regardless of the model's cooperation), then tidy the punctuation.
+    Used by the reviser's surgical em-dash fix and on generated frontmatter."""
+    out = EM_DASH_RE.sub(", ", text)
+    out = re.sub(r"\s*,\s*,", ",", out)  # collapse a doubled comma
+    out = re.sub(r"\s+([.,;:!?])", r"\1", out)  # no space before punctuation
+    return re.sub(r"[ \t]{2,}", " ", out)
+
+
 # The reviser runs in a loop that chases a score, and loops like that sand prose smooth:
 # each pass has a local reason to rewrite one more sentence. This rule is what keeps a
 # slop fix from becoming a rewrite — it rides on every instruction the reviser gets.

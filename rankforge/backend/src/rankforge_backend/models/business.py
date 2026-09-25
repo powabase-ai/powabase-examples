@@ -2,13 +2,50 @@
 
 from datetime import datetime
 from typing import Annotated
+from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from .blog import BlogProfile
 
 # Bounded so a typo/hostile client can't store unbounded blobs (cost/DoS/bloat) —
 # mirrors the ScoutPlan max_length precedent.
 _Tag = Annotated[str, Field(max_length=120)]
+
+
+def normalize_url_pattern(v: str | None) -> str | None:
+    """Stripped; blank means cleared (None)."""
+    if v is None or not v.strip():
+        return None
+    return v.strip()
+
+
+def check_url_pattern(v: str | None) -> str | None:
+    """A saved url_pattern must render to a real article URL: an absolute http(s)
+    URL or a site path starting with '/', with a {slug} or {id} token, no fragment
+    and no whitespace, control characters or '\\'. Blank clears it. Only request
+    models run this, so a legacy stored value still reads back as it is."""
+    v = normalize_url_pattern(v)
+    if v is None:
+        return None
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in v):
+        raise ValueError("url_pattern must not contain whitespace")
+    # Browsers read a backslash as '/', so '/\evil.com/{slug}' is '//evil.com/…', an
+    # off-site link in every canonical URL and resolved internal link.
+    if "\\" in v:
+        raise ValueError("url_pattern must not contain '\\'")
+    parts = urlsplit(v)
+    absolute = parts.scheme in ("http", "https") and bool(parts.netloc)
+    if not (absolute or (v.startswith("/") and not v.startswith("//"))):
+        raise ValueError(
+            "url_pattern must be an absolute http(s) URL or a path starting with '/'"
+        )
+    if "#" in v:
+        raise ValueError("url_pattern must not contain a '#' fragment")
+    if "{slug}" not in v and "{id}" not in v:
+        raise ValueError("url_pattern must contain {slug} or {id}")
+    return v
 
 
 class Competitor(BaseModel):
@@ -32,6 +69,13 @@ class BusinessProfileCreate(BaseModel):
     # Public storage URL for the brand logo (set via POST /{id}/logo). Client can also
     # clear it by PATCHing null.
     logo_url: str | None = Field(default=None, max_length=2_000)
+    # Target-blog conventions (see models/blog.py). None = legacy behavior.
+    blog_profile: BlogProfile | None = None
+
+    @field_validator("url_pattern")
+    @classmethod
+    def _url_pattern(cls, v: str | None) -> str | None:
+        return check_url_pattern(v)
 
 
 class BusinessProfileUpdate(BaseModel):
@@ -50,6 +94,16 @@ class BusinessProfileUpdate(BaseModel):
     # Public storage URL for the brand logo (set via POST /{id}/logo). Client can also
     # clear it by PATCHing null.
     logo_url: str | None = Field(default=None, max_length=2_000)
+    # Target-blog conventions (see models/blog.py). None = legacy behavior.
+    blog_profile: BlogProfile | None = None
+
+    @field_validator("url_pattern")
+    @classmethod
+    def _url_pattern(cls, v: str | None) -> str | None:
+        # Normalised only: the PATCH route validates strictly (check_url_pattern)
+        # unless the value equals the brand's stored one, so a brand with a legacy
+        # pattern can still save its other settings.
+        return normalize_url_pattern(v)
 
 
 class BusinessProfile(BaseModel):
@@ -67,6 +121,11 @@ class BusinessProfile(BaseModel):
     url_pattern: str | None = None
     default_author: str | None = None
     logo_url: str | None = None
+    # Target-blog conventions (see models/blog.py). None = legacy behavior. Typed
+    # loosely on the RESPONSE so one brand with a stored profile that no longer
+    # validates can't 500 the brand list; the request models stay strict, and
+    # export/publish refuse an invalid profile (services/publishing.py).
+    blog_profile: dict | None = None
     materials_progress: dict = {}
     created_by: UUID | None = None
     created_at: datetime
