@@ -1,12 +1,17 @@
-"""Write the Powabase website's blog conventions onto a RankForge brand.
+"""Write the Powabase website's blog conventions onto ONE RankForge brand.
 
-    uv run python scripts/seed_powabase_blog_profile.py --brand-name Powabase
+    uv run python scripts/seed_powabase_blog_profile.py --brand-id <uuid>
 
-Idempotent: overwrites blog_profile only; sets url_pattern to the trailing-slash
-blog URL if it's empty. Rules mirror website lib/blog.ts, content/blog-categories.ts
+Targets the brand by id (names are only unique within an org). Idempotent:
+overwrites blog_profile with the validated profile, sets url_pattern to the
+trailing-slash blog URL if it's empty, and rolls back and exits non-zero unless
+exactly one row was updated. Rules mirror website lib/blog.ts,
+content/blog-categories.ts
 and scripts/check-meta.ts (Sept 2026)."""
 
 import argparse
+import sys
+from uuid import UUID
 
 from psycopg.types.json import Json
 
@@ -58,25 +63,39 @@ PROFILE = {
 }
 
 
-def main() -> None:
+class _NotExactlyOne(Exception):
+    pass
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--brand-name", required=True)
-    args = ap.parse_args()
-    BlogProfile.model_validate(PROFILE)  # fail fast on a typo
+    ap.add_argument("--brand-id", required=True, type=UUID)
+    args = ap.parse_args(argv)
+    # Fail fast on a typo, and store the validated dump (defaults filled in).
+    profile = BlogProfile.model_validate(PROFILE).model_dump()
     db = Database(get_settings().powabase_database_url)
     db.open()
     try:
-        row = db.fetch_one(
-            "update public.business_profiles set blog_profile = %s, "
-            "url_pattern = coalesce(nullif(url_pattern, ''), "
-            "'https://powabase.ai/blog/{slug}/'), updated_at = now() "
-            "where lower(name) = lower(%s) returning id, name, url_pattern",
-            (Json(PROFILE), args.brand_name),
-        )
-        print(row or f"no brand named {args.brand_name!r}")
+        # One transaction: raising inside it rolls the update back.
+        with db.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "update public.business_profiles set blog_profile = %s, "
+                "url_pattern = coalesce(nullif(url_pattern, ''), "
+                "'https://powabase.ai/blog/{slug}/'), updated_at = now() "
+                "where id = %s returning id, name, url_pattern",
+                (Json(profile), args.brand_id),
+            )
+            rows = cur.fetchall()
+            if len(rows) != 1:
+                raise _NotExactlyOne(f"{len(rows)} brands matched {args.brand_id}")
+        print(rows[0])
+        return 0
+    except _NotExactlyOne as e:
+        print(f"aborted, nothing written: {e}", file=sys.stderr)
+        return 1
     finally:
         db.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
