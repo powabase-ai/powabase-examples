@@ -520,3 +520,134 @@ def test_dismiss_link_route(monkeypatch):
     resp = _client().post(f"/api/articles/{AID}/links/{SID}/dismiss")
     assert resp.status_code == 200
     assert resp.json()["status"] == "dismissed"
+
+
+# --- blog-profile-aware linking: trailing slash, hub pages, candidate pool, gaps ---
+from unittest.mock import MagicMock  # noqa: E402
+
+from rankforge_backend.models.blog import BlogProfile  # noqa: E402
+from rankforge_backend.services import linking as lk  # noqa: E402
+
+_PROF = BlogProfile.model_validate({
+    "categories": [
+        {"key": "rag", "label": "R", "technical": True},
+        {"key": "agents", "label": "A", "technical": True},
+        {"key": "enterprise", "label": "E", "technical": False},
+    ],
+    "links": {"min": 3, "max": 5, "hub_pages": [
+        {"path": "/vector-database/", "title": "Vector DB",
+         "topics": ["vector database", "pgvector"]},
+        {"path": "/free-mvp/", "title": "Free MVP", "topics": ["free mvp"]},
+    ]},
+}).model_dump()
+BRAND = {"id": "b", "domain": "powabase.ai",
+         "url_pattern": "https://powabase.ai/blog/{slug}", "blog_profile": _PROF}
+
+
+def test_canonical_url_slash_only_with_profile():
+    art = {"slug": "a"}
+    assert lk.canonical_url(BRAND, art) == "https://powabase.ai/blog/a/"
+    legacy = {**BRAND, "blog_profile": None}
+    assert lk.canonical_url(legacy, art) == "https://powabase.ai/blog/a"
+
+
+def test_hub_targets():
+    hubs = lk.hub_targets(BRAND)
+    assert [h["url"] for h in hubs] == [
+        "https://powabase.ai/vector-database/", "https://powabase.ai/free-mvp/",
+    ]
+    assert lk.hub_targets({**BRAND, "blog_profile": None}) == []
+
+
+def _row(i, cat, kw):
+    return {"id": f"00000000-0000-0000-0000-00000000000{i}", "title": f"T{i}",
+            "slug": f"t{i}", "keywords": kw, "canonical_url": None, "category": cat}
+
+
+def test_link_candidates_order_and_caps():
+    db = MagicMock()
+    art = {"id": "00000000-0000-0000-0000-0000000000aa", "business_id": "b",
+           "cluster_id": None, "cluster_role": None}
+    db.fetch_all.return_value = [
+        _row(1, "rag", ["pgvector index"]), _row(2, "rag", ["pgvector tuning"]),
+        _row(3, "rag", ["pgvector hnsw"]), _row(4, "agents", ["pgvector agents"]),
+        _row(5, "enterprise", ["pgvector buying"]),
+    ]
+    brief = {"primary_keyword": "pgvector", "secondary_keywords": []}
+    c = lk.link_candidates(db, BRAND, art, brief)
+    targets = [x["target"] for x in c]
+    assert targets[0] == "https://powabase.ai/vector-database/"  # hub topic match
+    rag = [x for x in c if x.get("category") == "rag"]
+    assert len(rag) == 2  # per-category cap
+    assert not any(x.get("category") == "enterprise" for x in c)  # non-technical
+    assert any(t.startswith("rf:article/") for t in targets)
+
+
+def test_max_links():
+    assert lk.max_links(BRAND) == 5
+    assert lk.max_links({**BRAND, "blog_profile": None}) == lk._MAX_PER_ARTICLE
+
+
+def test_suggest_links_stages_hub_mention(monkeypatch):
+    """A verbatim mention of a hub topic ("pgvector") stages a hub-page suggestion:
+    no target article, target_url is the hub's URL."""
+    db = MagicMock()
+    monkeypatch.setattr(
+        lk.gen_svc, "get_article",
+        lambda d, aid: {"content_md": "We rely on pgvector for retrieval.",
+                        "cluster_id": None, "cluster_role": None, "brief_id": None},
+    )
+    monkeypatch.setattr(lk.brands, "get_profile", lambda d, bid: BRAND)
+    db.fetch_all.return_value = []  # no other published articles to mention-match
+    db.fetch_one.return_value = {
+        **SUGGESTION, "target_article_id": None, "anchor_text": "pgvector",
+        "target_url": "https://powabase.ai/vector-database/",
+    }
+    lk.suggest_links(db, BID, AID)
+    hub_inserts = [
+        c.args[1] for c in db.fetch_one.call_args_list
+        if "insert into public.link_suggestions" in c.args[0]
+        and c.args[1][4] == "https://powabase.ai/vector-database/"
+    ]
+    assert hub_inserts, "expected a staged suggestion targeting the hub page"
+    params = hub_inserts[0]
+    assert params[2] is None  # target_article_id: hub pages have no target article
+    assert params[4] == "https://powabase.ai/vector-database/"
+
+
+def test_suggest_links_stages_min_gaps(monkeypatch):
+    """No anchors found anywhere in the body, but 2 published technical articles
+    exist. links.min=3 → the linker stages gap suggestions (anchor None) toward the
+    best remaining candidates to close the gap."""
+    db = MagicMock()
+    monkeypatch.setattr(
+        lk.gen_svc, "get_article",
+        lambda d, aid: {"content_md": "Nothing here matches any keyword at all.",
+                        "cluster_id": None, "cluster_role": None, "brief_id": None},
+    )
+    monkeypatch.setattr(lk.brands, "get_profile", lambda d, bid: BRAND)
+    tech_rows = [
+        {"id": "aaaaaaaa-0000-0000-0000-000000000001", "title": "Tech1",
+         "slug": "tech1", "keywords": [], "canonical_url": None, "category": "rag"},
+        {"id": "aaaaaaaa-0000-0000-0000-000000000002", "title": "Tech2",
+         "slug": "tech2", "keywords": [], "canonical_url": None, "category": "rag"},
+    ]
+    db.fetch_all.return_value = tech_rows
+
+    def _fetch_one(query, params=()):
+        if "insert into public.link_suggestions" in query:
+            return {
+                **SUGGESTION, "target_article_id": None, "anchor_text": None,
+                "target_url": "https://powabase.ai/blog/whatever/",
+            }
+        # _published lookup for a gap candidate — a resolvable article.
+        return {"id": params[0], "title": "T", "slug": "t", "keywords": [],
+                "canonical_url": None, "category": "rag"}
+
+    db.fetch_one.side_effect = _fetch_one
+    lk.suggest_links(db, BID, AID)
+    gap_inserts = [
+        c.args[1] for c in db.fetch_one.call_args_list
+        if "insert into public.link_suggestions" in c.args[0] and c.args[1][3] is None
+    ]
+    assert len(gap_inserts) == 2  # both technical candidates staged as gaps
