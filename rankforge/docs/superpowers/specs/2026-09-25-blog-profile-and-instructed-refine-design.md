@@ -117,9 +117,13 @@ where `blog_profile` is optional and nullable.
 
 The same routes validate `url_pattern` when it is saved (422 with the reason): it
 must be an absolute `http(s)` URL with a host or a path starting with `/` (not
-`//`), with a `{slug}` or `{id}` token, no `#` fragment and no whitespace. A blank
-value clears it. The response model doesn't re-validate, so a legacy stored
-pattern still reads back unchanged.
+`//`), with a `{slug}` or `{id}` token, no `#` fragment, no whitespace or control
+characters, and no `\` anywhere (browsers read it as `/`, so `/\evil.com/{slug}`
+would link off-site). A blank value clears it. Create is always strict; update
+skips the check when the submitted value (stripped) equals the brand's stored
+one, so a brand with an invalid legacy pattern can still save its other
+settings (the form always sends `url_pattern`). The response model doesn't
+re-validate, so a legacy stored pattern still reads back unchanged.
 
 ### Powabase seed (`scripts/seed_powabase_blog_profile.py`)
 
@@ -206,7 +210,12 @@ post-generation step never touch a field that already passes. When neither the
 cluster nor the model names a real key, the fallback category is written (if the
 category is being regenerated) with the flag `category defaulted to <key>` — but
 a valid stored category is never swapped for the fallback: it is kept and
-flagged `category kept as <key> (the model's was not a listed key)`.
+flagged `category kept as <key> (the model's was not a listed key)`. A requested
+summary or FAQ that still fails after the retry is not written, and its flag
+says so: `model's summary was 3 words (needs 40-60) — kept the stored one`
+(or `— left empty` when nothing was stored; same form for `model's FAQ had N
+item(s)`). A value equal to the stored one is not a change: no write, no
+version (`fix_meta` likewise skips a meta value equal to the stored one).
 
 A flagged field shows as a warning on the article and **blocks export** (§4). It
 never blocks generation.
@@ -217,9 +226,11 @@ FAQ" / "Fix automatically": it touches only what's wrong — `fix_meta` +
 `failing_fields()`, and stripping a body FAQ section when one exists under an
 FAQ-enabled profile — and snapshots the article once, right before its first
 write, so the whole fix is one undo point. With `force=True` ("Generate summary
-& FAQ") it also regenerates the summary and FAQ (when enabled) even if they pass,
-and the category unless the cluster's category (a profile key) fixes it; a new
-value is still written only when it passes the rules.
+& FAQ") it also regenerates the summary and FAQ (when enabled) even if they pass.
+The category is regenerated only when it fails the rules, forced or not: a
+valid stored category (possibly picked by hand) is never replaced, since the
+button only promises summary and FAQ. A new value is still written only when it
+passes the rules.
 
 ### Meta (`revise.fix_meta` + `frontmatter.enforce_meta`)
 
@@ -320,6 +331,10 @@ mandatory.
     `pending` suggestion (anchored or gap), whether this run or an earlier one
     staged it. Such a target never gets a second (gap) row, so re-running suggest
     or the relink sweep stages nothing new once the minimum is covered.
+  - A target whose suggestion the editor **dismissed** never gets a gap either
+    (the gap's unique key differs from the dismissed anchor's, so the index
+    alone wouldn't stop it). A dismissed row does not count toward the minimum;
+    an accepted row neither counts nor blocks.
 - **Trailing slash:** `canonical_url` and hub rendering append `/` to the path
   when `trailing_slash` is on and the path has no file extension.
   - Link check and relink use the same functions, so they stay consistent.
@@ -417,12 +432,16 @@ step and `fix_meta` on demand. This is the "Generate summary & FAQ" button; see
   running), runs `frontmatter.complete()`, releases the claim in a `finally`
   (a previously `failed` article stays `failed`, so "Retry generation" is
   still offered for an empty draft), and returns
-  `{ "article": <Article>, "export_issues": [str, ...], "changed": [str, ...] }`
+  `{ "article": <Article>, "export_issues": [str, ...], "changed": [str, ...],
+  "flags": [str, ...] }`
   — the issues still open **after** the fix, computed from the fresh row, so
-  the UI never claims "fixed" over a step that left problems; and the fields
+  the UI never claims "fixed" over a step that left problems; the fields
   whose value actually changed (compared by value, a subset of `category`,
-  `summary`, `faq`, `meta_title`, `meta_description`, `content_md`). An empty
-  `changed` means the UI says "Nothing changed".
+  `summary`, `faq`, `meta_title`, `meta_description`, `content_md` — the last
+  meaning a body FAQ section was removed); and the flags `complete()` returned
+  (§2; always present, may be empty), so the UI can say what it kept or
+  defaulted. An empty `changed` means the UI says "Nothing changed"; the UI
+  never claims a field was generated unless it is in `changed`.
 - `POST /api/articles/{id}/revert`:
   - Restores the newest `article_versions` row whose body **or** frontmatter
     (title, meta, category, summary, FAQ — nulls included) differs from the
@@ -496,8 +515,9 @@ This is a single pass, not a loop:
      cluster's category still wins over a valid one;
    - a summary or FAQ out of bounds keeps the stored value.
    Each dropped field adds a flag (e.g. `model's summary was 3 words (needs
-   40-60) — kept the stored one`); a trimmed summary keeps
-   `summary trimmed to fit; review it`.
+   40-60) — kept the stored one`, or `— left empty` when nothing was stored);
+   a trimmed summary keeps `summary trimmed to fit; review it`, and an FAQ cut
+   to `faq.max` is flagged `faq cut to 6 of the model's 9 items; review it`.
 7. **Write:** the article is versioned first (so the whole pass is one undo
    point), then body + any validated frontmatter fields are written together,
    `enforce_meta` clamps meta to the profile's limits, and fact-check, GEO and

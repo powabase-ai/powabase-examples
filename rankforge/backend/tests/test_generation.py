@@ -238,6 +238,17 @@ async def test_generation_stores_frontmatter_flags_in_progress(gen_env, monkeypa
     assert final["progress"]["frontmatter_flags"] == ["faq has 1 item(s)"]
 
 
+async def test_generation_flags_a_frontmatter_step_that_raised(gen_env, monkeypatch):
+    """Review r3 N35: the step raising never fails generation, but it must say so."""
+    monkeypatch.setattr(_fm, "complete", AsyncMock(side_effect=RuntimeError("x")))
+    await _run_gen()
+    final = gen_env["updates"][-1]
+    assert final["generation_status"] == "done"
+    assert final["progress"]["frontmatter_flags"] == [
+        "the frontmatter step failed; run it again"
+    ]
+
+
 async def test_generation_progress_has_no_flags_when_clean(gen_env):
     await _run_gen()
     assert "frontmatter_flags" not in gen_env["updates"][-1]["progress"]

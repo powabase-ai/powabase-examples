@@ -171,7 +171,7 @@ async def test_generate_keeps_the_better_first_attempt(deps):
     first = {**GOOD, "summary": "too short"}  # 1 flag
     flags = await fm.generate(_client(first, {}), MagicMock(), "a")  # retry: 2 flags
     w = _written(deps)
-    assert flags == ["summary is 2 words (needs 40-60)"]
+    assert flags == ["model's summary was 2 words (needs 40-60) — left empty"]
     assert len(w["faq"]) == 4  # the first attempt's valid FAQ is kept
     assert "summary" not in w  # an out-of-bounds summary is never written
 
@@ -239,7 +239,7 @@ async def test_complete_returns_flags(monkeypatch):
     monkeypatch.setattr(fm.gen_svc, "snapshot_version", MagicMock())
     c = _client({"summary": "short"}, {"summary": "short"})
     assert await fm.complete(c, MagicMock(), "a") == [
-        "summary is 1 words (needs 40-60)"
+        "model's summary was 1 words (needs 40-60) — left empty"
     ]
 
 
@@ -449,8 +449,10 @@ async def test_complete_force_regenerates_valid_summary_and_faq(monkeypatch):
     )
     assert flags == []
     assert state["art"]["summary"] == NEW_S and state["art"]["faq"] == _faq(5)
-    assert state["art"]["category"] == "agents"  # no cluster: category too
-    assert calls[0][0] == "snapshot"
+    # A valid stored category (perhaps picked by hand) is never replaced by a
+    # forced Generate, whose button only mentions summary and FAQ.
+    assert state["art"]["category"] == "rag"
+    assert calls == [("snapshot", None), ("update", ["faq", "summary"])]
 
 
 async def test_complete_force_never_writes_invalid_values(monkeypatch):
@@ -461,8 +463,11 @@ async def test_complete_force_never_writes_invalid_values(monkeypatch):
     )
     assert calls == []  # nothing passed the rules: no write, no version
     assert state["art"]["summary"] == S45 and state["art"]["faq"] == GOOD["faq"]
-    assert state["art"]["category"] == "agents"  # never swapped for the fallback
-    assert "category kept as agents (the model's was not a listed key)" in flags
+    assert state["art"]["category"] == "agents"  # a valid category isn't redone
+    assert flags == [
+        "model's summary was 2 words (needs 40-60) — kept the stored one",
+        "model's FAQ had 1 item(s) (needs 3-6) — kept the stored one",
+    ]
 
 
 async def test_complete_force_leaves_category_to_the_cluster(monkeypatch):
@@ -577,3 +582,175 @@ def test_frontmatter_route_rejects_a_non_bool_force(monkeypatch, force):
     resp = client.post(f"/api/articles/{AID}/frontmatter", json={"force": force})
     assert resp.status_code == 422
     complete.assert_not_awaited()
+
+
+# --- review r3 I-1 / K12: POST /frontmatter returns the step's flags ---
+def test_frontmatter_route_returns_the_flags(monkeypatch):
+    complete = AsyncMock(return_value=["category defaulted to rag"])
+    client, _ = _fm_route(monkeypatch, VALID, complete=complete)
+    resp = client.post(f"/api/articles/{AID}/frontmatter")
+    assert resp.status_code == 200
+    assert resp.json()["flags"] == ["category defaulted to rag"]
+
+
+def test_frontmatter_route_flags_are_empty_when_none(monkeypatch):
+    client, _ = _fm_route(monkeypatch, VALID)
+    resp = client.post(f"/api/articles/{AID}/frontmatter")
+    assert resp.status_code == 200 and resp.json()["flags"] == []
+
+
+def _real_route(monkeypatch, art, pb):
+    """The route with the REAL complete(): only the agents and the DB are faked,
+    and writes land in the article state so `changed` sees them."""
+    from rankforge_backend.routes.deps import get_powabase
+    from rankforge_backend.services import generation as g
+
+    client, _ = _fm_route(monkeypatch, art, complete=fm.complete)
+    state = _ROUTE["state"]
+    monkeypatch.setattr(g, "_update", lambda d, a, **f: state["art"].update(f))
+    monkeypatch.setattr(g, "snapshot_version", lambda d, article: None)
+    monkeypatch.setattr(fm, "ensure_agent", AsyncMock(return_value="agent"))
+    client.app.dependency_overrides[get_powabase] = lambda: pb
+    return client
+
+
+def test_forced_generate_reports_a_kept_summary(monkeypatch):
+    """Review probe: stored summary valid, the model returns 3 words twice. The
+    stored summary is kept, `changed` doesn't claim it, and the flag says why."""
+    c = _client({"summary": "Too short here.", "faq": _faq(5)},
+                {"summary": "Too short here.", "faq": _faq(5)})
+    client = _real_route(monkeypatch, VALID, c)
+    resp = client.post(f"/api/articles/{AID}/frontmatter", json={"force": True})
+    body = resp.json()
+    assert resp.status_code == 200 and body["changed"] == ["faq"]
+    assert body["flags"] == [
+        "model's summary was 3 words (needs 40-60) — kept the stored one"
+    ]
+    assert body["article"]["summary"] == S45
+
+
+def test_fix_automatically_reports_a_defaulted_category(monkeypatch):
+    c = _raw_client(json.dumps({"category": "AI agents"}),
+                    json.dumps({"category": "AI agents"}))
+    client = _real_route(monkeypatch, {**VALID, "category": None}, c)
+    resp = client.post(f"/api/articles/{AID}/frontmatter")
+    body = resp.json()
+    key = fm.blog_rules.fallback_category(P, None)
+    assert body["changed"] == ["category"] and body["article"]["category"] == key
+    assert body["flags"] == [f"category defaulted to {key}"]
+
+
+# --- review r3 K13 / F12: a body-FAQ-only fix reports content_md ---
+def test_frontmatter_route_reports_a_body_faq_strip(monkeypatch):
+    client = _real_route(monkeypatch, {**VALID, "content_md": FAQ_BODY}, _client())
+    resp = client.post(f"/api/articles/{AID}/frontmatter")
+    body = resp.json()
+    assert body["changed"] == ["content_md"] and body["flags"] == []
+    assert "Frequently asked" not in body["article"]["content_md"]
+
+
+# --- review r3 minors ---
+async def test_forced_generate_that_changes_nothing_writes_nothing(monkeypatch):
+    """The model returns exactly the stored summary and FAQ: no write, no version."""
+    same = {"category": "rag", "summary": S45,
+            "faq": [{"a": x["a"], "q": x["q"]} for x in GOOD["faq"]]}
+    state, calls, flags = await _run_complete_real(
+        monkeypatch, VALID, _client(same), force=True
+    )
+    assert calls == [] and flags == []
+
+
+async def test_fix_meta_equal_to_the_stored_meta_writes_nothing(monkeypatch):
+    from rankforge_backend.services import revise
+
+    monkeypatch.setattr(revise, "ensure_meta_agent", AsyncMock(return_value="m"))
+    upd, before = MagicMock(), MagicMock()
+    monkeypatch.setattr(revise.gen_svc, "_update", upd)
+    art = {**ART, "meta_title": "Stored meta", "meta_description": "Stored desc."}
+    c = _client({"meta_title": "Stored meta", "meta_description": "Stored desc."})
+    await revise.fix_meta(c, MagicMock(), "a", art, {}, before_write=before)
+    upd.assert_not_called()
+    before.assert_not_called()
+    c2 = _client({"meta_title": "Stored meta", "meta_description": "New desc."})
+    await revise.fix_meta(c2, MagicMock(), "a", art, {}, before_write=before)
+    assert upd.call_args.kwargs == {"meta_description": "New desc."}
+
+
+async def test_generate_keeps_a_valid_stored_category_over_the_fallback(deps):
+    deps_art = {**ART, "category": "agents"}
+    with patch.object(fm.gen_svc, "get_article", return_value=deps_art):
+        flags = await fm.generate(_raw_client("nope", "nope"), MagicMock(), "a")
+    assert "category kept as agents (the model's was not a listed key)" in flags
+    assert "category" not in _written(deps)
+
+
+async def test_complete_regenerates_a_failing_category_when_forced(monkeypatch):
+    c = _client(NEW)
+    art = {**VALID, "category": "AI agents"}
+    state, _, _ = await _run_complete_real(monkeypatch, art, c, force=True)
+    assert state["art"]["category"] == "agents"
+
+
+@pytest.mark.parametrize("stored,tail", [
+    (None, "left empty"), ("", "left empty"), ("   ", "left empty"),
+    ([], "left empty"), ("old summary", "kept the stored one"),
+    (_faq(1), "kept the stored one"),
+])
+def test_rejected_flag_says_kept_only_when_something_was_stored(stored, tail):
+    assert fm.rejected_flag("summary", "a b c", P, stored).endswith(f"— {tail}")
+
+
+# --- review r3 N13 / F2 / F3: disabled summary/FAQ are never failing or forced ---
+NO_SUMMARY_BRAND = {**BRAND, "blog_profile": {**PROF, "summary": {"enabled": False}}}
+
+
+@pytest.mark.parametrize("brand,off", [(NO_SUMMARY_BRAND, "summary"),
+                                       (NO_FAQ_BRAND, "faq")])
+def test_failing_fields_skips_a_disabled_field(brand, off):
+    prof = BlogProfile.model_validate(brand["blog_profile"])
+    art = {**VALID, "summary": None, "faq": None}
+    on = {"summary", "faq"} - {off}
+    assert fm.failing_fields(art, prof) == on
+
+
+@pytest.mark.parametrize("brand,off", [(NO_SUMMARY_BRAND, "summary"),
+                                       (NO_FAQ_BRAND, "faq")])
+async def test_force_leaves_a_disabled_field_alone(monkeypatch, brand, off):
+    art = {**VALID, off: None}
+    state, calls, flags = await _run_complete_real(
+        monkeypatch, art, _client(NEW), brand, force=True
+    )
+    on = ({"summary", "faq"} - {off}).pop()
+    assert state["art"][off] is None and state["art"][on] == NEW[on]
+    assert ("update", [on]) in calls and flags == []
+
+
+def test_enabled_fields_follow_the_profile():
+    both_off = BlogProfile.model_validate({
+        **PROF, "summary": {"enabled": False}, "faq": {"enabled": False}})
+    assert fm.enabled_fields(P) == {"category", "summary", "faq"}
+    assert fm.enabled_fields(both_off) == {"category"}
+
+
+async def test_force_with_summary_and_faq_disabled_calls_no_model(monkeypatch):
+    brand = {**BRAND, "blog_profile": {
+        **PROF, "summary": {"enabled": False}, "faq": {"enabled": False}}}
+    c = _client(NEW)
+    state, calls, flags = await _run_complete_real(
+        monkeypatch, {**VALID, "summary": None, "faq": None}, c, brand, force=True
+    )
+    c.run_agent.assert_not_called()
+    assert calls == [] and flags == []
+
+
+async def test_generate_never_flags_a_disabled_field(monkeypatch):
+    """Even when a caller asks for it, a disabled summary is neither written nor
+    flagged (the profile doesn't use it)."""
+    upd = MagicMock()
+    with patch.object(fm.gen_svc, "get_article", return_value=dict(ART)), \
+         patch.object(fm.brands, "get_profile", return_value=NO_SUMMARY_BRAND), \
+         patch.object(fm.gen_svc, "_update", upd), \
+         patch.object(fm, "ensure_agent", AsyncMock(return_value="agent")):
+        flags = await fm.generate(_client(GOOD), MagicMock(), "a",
+                                  fields={"summary", "faq"})
+    assert flags == [] and "summary" not in _written(upd)

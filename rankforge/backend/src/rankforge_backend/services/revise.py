@@ -208,9 +208,14 @@ async def fix_meta(
     except Exception:  # noqa: BLE001 — advisory
         return
     fields: dict[str, Any] = {}
-    if (mt := (data.get("meta_title") or "").strip()):
+    # A value equal to the stored one is no change: no write, no version.
+    if (mt := (data.get("meta_title") or "").strip()) and mt != article.get(
+        "meta_title"
+    ):
         fields["meta_title"] = mt
-    if (md := (data.get("meta_description") or "").strip()):
+    if (md := (data.get("meta_description") or "").strip()) and md != article.get(
+        "meta_description"
+    ):
         fields["meta_description"] = md
     if fields:
         if before_write:
@@ -1190,13 +1195,15 @@ _MD_FENCE_RE = re.compile(r"^```(?:markdown)?\s*\n(.*)\n```$", re.S)
 
 def _checked_frontmatter(
     incoming: dict[str, Any], profile: Any, cluster_category: str | None,
-    fields: dict[str, Any],
+    fields: dict[str, Any], stored: dict[str, Any],
 ) -> list[str]:
     """Add to `fields` each incoming category/summary/FAQ value that passes the
     blog's rules (`frontmatter.field_ok`); a value that fails keeps the stored
-    one and is flagged. A category must be a profile key as the model sent it
-    (never mapped to the fallback); the cluster's category still wins over a
-    valid one. Returns the flags."""
+    one (`stored`, the article) and is flagged — "left empty" when nothing was
+    stored. A category must be a profile key as the model sent it (never mapped
+    to the fallback); the cluster's category still wins over a valid one. A
+    summary trimmed to fit, or an FAQ cut to `faq.max`, is written and flagged
+    for review. Returns the flags."""
     from . import blog_rules, frontmatter
 
     clean, vflags = blog_rules.validate_frontmatter(
@@ -1204,28 +1211,27 @@ def _checked_frontmatter(
     )
     keys = {c.key for c in profile.categories}
     flags: list[str] = []
-    kept = "kept the stored one"
-    if "category" in incoming:
-        if incoming["category"] in keys:
-            fields["category"] = clean["category"]
-        else:
-            flags.append(f'model\'s category "{incoming["category"]}" is not one '
-                         f"of this blog's keys — {kept}")
-    if "summary" in incoming and profile.summary.enabled:
-        rule = profile.summary
-        if frontmatter.field_ok("summary", clean["summary"], profile):
-            fields["summary"] = clean["summary"]
+    for k in ("category", "summary", "faq"):
+        if k not in incoming or (k != "category" and not getattr(profile, k).enabled):
+            continue
+        ok = (
+            incoming[k] in keys if k == "category"
+            else frontmatter.field_ok(k, clean[k], profile)
+        )
+        if not ok:
+            value = incoming[k] if k == "category" else clean[k]
+            flags.append(
+                frontmatter.rejected_flag(k, value, profile, stored.get(k))
+            )
+            continue
+        fields[k] = clean[k]
+        if k == "summary":
             flags += [f for f in vflags if f.startswith("summary trimmed")]
-        else:
-            n = blog_rules.word_count(clean["summary"])
-            flags.append(f"model's summary was {n} words "
-                         f"(needs {rule.min_words}-{rule.max_words}) — {kept}")
-    if "faq" in incoming and profile.faq.enabled:
-        if frontmatter.field_ok("faq", clean["faq"], profile):
-            fields["faq"] = clean["faq"]
-        else:
-            flags.append(f"model's FAQ had {len(clean['faq'])} item(s) "
-                         f"(needs {profile.faq.min}-{profile.faq.max}) — {kept}")
+        if k == "faq" and (sent := len(blog_rules.clean_faq(incoming[k]))) > len(
+            clean[k]
+        ):
+            flags.append(f"faq cut to {len(clean[k])} of the model's {sent} items; "
+                         "review it")
     return flags
 
 
@@ -1331,7 +1337,8 @@ async def instructed_pass(
         incoming["faq"] = fm_in["faq"]
     if profile and incoming:
         fm_flags = _checked_frontmatter(
-            incoming, profile, frontmatter._cluster_category(db, article), fields
+            incoming, profile, frontmatter._cluster_category(db, article), fields,
+            article,
         )
         if fm_flags:
             log.warning("instructed pass frontmatter flags for %s: %s",

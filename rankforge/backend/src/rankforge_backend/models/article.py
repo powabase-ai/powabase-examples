@@ -134,12 +134,16 @@ FRONTMATTER_CHANGE_FIELDS = (
 
 class FrontmatterResult(BaseModel):
     """POST /api/articles/{id}/frontmatter: the article after the fix, the export
-    issues still open (`blog_rules.export_issues`; [] = exportable), and the fields
-    the fix actually changed (subset of FRONTMATTER_CHANGE_FIELDS; [] = nothing)."""
+    issues still open (`blog_rules.export_issues`; [] = exportable), the fields
+    the fix actually changed (subset of FRONTMATTER_CHANGE_FIELDS; [] = nothing;
+    `content_md` = a body FAQ section was removed), and the frontmatter step's
+    flags (`frontmatter.complete`; e.g. "category defaulted to rag", "model's
+    summary was 3 words (needs 40-60) — kept the stored one"; [] = none)."""
 
     article: Article
     export_issues: list[str]
     changed: list[str] = Field(default_factory=list)
+    flags: list[str] = Field(default_factory=list)
 
 
 class RemoveLinkResult(BaseModel):

@@ -175,3 +175,29 @@ def test_export_issues_ignores_blank_faq_items():
 def test_clean_faq_is_public_and_drops_blank_items():
     raw = [{"q": " Q? ", "a": " A. "}, {"q": " ", "a": "x"}, "junk"]
     assert br.clean_faq(raw) == [{"q": "Q?", "a": "A."}]
+
+
+# --- review r3 survivors B20 / B2 ---
+def test_an_h3_faqs_subsection_is_not_a_body_faq():
+    """Only an H2 is the FAQ section: an H3 "FAQs" subsection inside a normal
+    section is content, kept as written (it would otherwise be stripped up to the
+    next H2)."""
+    md = ("# T\n\n## Setup\n\ntext\n\n### FAQs about setup\n\nQ and A.\n\n"
+          "More setup text.\n\n## Next\n\nend")
+    assert br.BODY_FAQ_RE.search(md) is None
+    assert br.strip_body_faq(md) == md
+
+
+def test_an_h3_inside_the_faq_section_does_not_end_it():
+    md = "# T\n\n## FAQ\n\n### Q one?\n\nA.\n\n### Q two?\n\nB.\n\n## End\n\nbye"
+    assert br.strip_body_faq(md) == "# T\n\n## End\n\nbye"
+
+
+def test_trim_to_words_never_cuts_inside_a_dotted_word():
+    """'Node.js' holds a '.', but no sentence ends there: the boundary needs
+    whitespace or the end of the text after the punctuation."""
+    s = "Intro sentence here. We use Node.js for the backend today"
+    assert br.trim_to_words(s, 7) == "Intro sentence here."
+    assert br.trim_to_words("See e.g. Node.js docs. Then more words", 4) == (
+        "See e.g. Node.js docs."
+    )

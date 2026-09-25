@@ -804,6 +804,16 @@ async def test_refine_keeps_body_faq_without_profile(monkeypatch):
     rescore.assert_not_awaited()
 
 
+# --- review r3 survivor G8: the strip respects faq.enabled ---
+async def test_refine_keeps_body_faq_when_profile_faq_is_disabled(monkeypatch):
+    brand = {"name": "B", "blog_profile": {
+        **_PROFILE_BRAND["blog_profile"], "faq": {"enabled": False}}}
+    state, rescore = _refine_env(monkeypatch, brand)
+    await revise.refine(MagicMock(), MagicMock(), "aid")
+    assert state["art"]["content_md"] == _FAQ_BODY
+    rescore.assert_not_awaited()
+
+
 # --- review r1 I2: refine() fits meta to the profile's limits ---
 async def test_refine_meta_uses_profile_limits_and_enforces(monkeypatch):
     brand = {"name": "B", "blog_profile": {
