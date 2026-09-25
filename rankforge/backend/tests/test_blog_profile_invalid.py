@@ -135,3 +135,10 @@ async def test_publish_proceeds_when_the_article_passes(monkeypatch):
     out = await svc.publish(db, AID, target_type="export")
     assert out == {"status": "success"}
     assert "status = 'published'" in db.execute.call_args.args[0]
+
+
+@pytest.mark.parametrize("path", ["/\t/evil.com", "/\n/evil.com", "/ /evil.com",
+                                  "/a b/", "/x\\y/", "/x\x00/", "/x\x7f/"])
+def test_hub_path_rejects_whitespace_controls_and_backslashes(path):
+    with pytest.raises(ValidationError):
+        HubPage(path=path, title="t", topics=["vector database"])

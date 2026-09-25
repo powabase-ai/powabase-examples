@@ -103,7 +103,9 @@ Validation:
   rules switched off.
 - `min ≤ max` everywhere.
 - `hub_pages[].path` starts with `/` and is rejected if it starts with `//` or
-  `/\` (protocol-relative — the link would leave the brand's site).
+  `/\` (protocol-relative — the link would leave the brand's site), or if it
+  contains whitespace, a control character or a backslash anywhere (browsers
+  drop tabs and newlines, so `/\t/evil.com` would be `//evil.com`).
 - `topics` holds 1–10 phrases, each 4–80 characters. The same minimum as the
   linker's `_MIN_ANCHOR_LEN` keeps generic matches out.
 
@@ -112,6 +114,12 @@ article, so `url_pattern` doesn't apply.
 
 The profile is set through the existing business-profile create/update routes,
 where `blog_profile` is optional and nullable.
+
+The same routes validate `url_pattern` when it is saved (422 with the reason): it
+must be an absolute `http(s)` URL with a host or a path starting with `/` (not
+`//`), with a `{slug}` or `{id}` token, no `#` fragment and no whitespace. A blank
+value clears it. The response model doesn't re-validate, so a legacy stored
+pattern still reads back unchanged.
 
 ### Powabase seed (`scripts/seed_powabase_blog_profile.py`)
 

@@ -68,6 +68,12 @@ class HubPage(_Strict):
         # protocol-relative: the link would leave the brand's site.
         if v.startswith(("//", "/\\")):
             raise ValueError("hub path must be a path on the brand's site, not a host")
+        # Browsers drop tabs/newlines and read '\\' as '/', so '/\t/evil.com' is
+        # '//evil.com' in disguise; no legitimate site path needs either.
+        if any(c.isspace() or c == "\\" or ord(c) < 32 or ord(c) == 127 for c in v):
+            raise ValueError(
+                "hub path must not contain whitespace, control characters or '\\'"
+            )
         return v
 
     @field_validator("topics")

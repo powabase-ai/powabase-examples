@@ -242,3 +242,56 @@ def test_update_still_validates_the_blog_profile_strictly():
     )
     assert resp.status_code == 422
     db.fetch_one.assert_not_called()
+
+
+# --- url_pattern is validated when saved (PR #26 review round 2) ---
+_BAD_PATTERNS = {
+    "blog.acme.com/{slug}": "http(s)",  # no scheme and not a site path
+    "//acme.com/{slug}": "http(s)",  # protocol-relative
+    "ftp://acme.com/{slug}": "http(s)",
+    "https:///{slug}": "http(s)",  # no host
+    "https://acme.com/blog/": "{slug}",  # no token
+    "https://acme.com/blog/{slug}#top": "#",
+    "https://acme.com/blog/ {slug}": "whitespace",
+}
+
+
+def test_create_rejects_a_bad_url_pattern_with_a_clear_422():
+    for pattern, hint in _BAD_PATTERNS.items():
+        db = MagicMock()
+        resp = make_client(db).post(
+            "/api/business-profiles", json={"name": "Acme", "url_pattern": pattern}
+        )
+        assert resp.status_code == 422, pattern
+        msg = " ".join(e["msg"] for e in resp.json()["detail"])
+        assert "url_pattern" in msg and hint in msg, (pattern, msg)
+        db.fetch_one.assert_not_called()
+
+
+def test_update_rejects_a_bad_url_pattern():
+    db = MagicMock()
+    resp = make_client(db).patch(
+        f"/api/business-profiles/{ROW['id']}",
+        json={"url_pattern": "https://acme.com/blog/{slug}#top"},
+    )
+    assert resp.status_code == 422
+    db.fetch_one.assert_not_called()
+
+
+def test_good_url_patterns_are_accepted():
+    from rankforge_backend.models.business import BusinessProfileUpdate as U
+
+    for pattern in ["https://blog.acme.com/{slug}", "http://acme.com/p/{id}/",
+                    "/blog/{slug}/", "https://acme.com/blog/{slug}?ref=rf"]:
+        assert U(url_pattern=pattern).url_pattern == pattern
+    assert U(url_pattern="  /blog/{slug}  ").url_pattern == "/blog/{slug}"
+    assert U(url_pattern=None).url_pattern is None
+    assert U(url_pattern="  ").url_pattern is None  # blank clears it
+
+
+def test_list_still_reads_a_legacy_url_pattern():
+    db = MagicMock()
+    db.fetch_all.return_value = [{**ROW, "url_pattern": "blog/{slug}#x"}]
+    resp = make_client(db).get("/api/business-profiles")
+    assert resp.status_code == 200
+    assert resp.json()[0]["url_pattern"] == "blog/{slug}#x"
