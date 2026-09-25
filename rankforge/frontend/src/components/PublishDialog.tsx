@@ -84,6 +84,15 @@ export function PublishDialog({
     () => setUrlValue(article?.canonical_url || computed || ""),
     [article?.canonical_url, computed]
   );
+
+  // Clear a stale issues list from a previous export/publish attempt each time the
+  // dialog is (re)opened, so it doesn't show outdated results on the next visit.
+  useEffect(() => {
+    if (open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setIssues(null);
+    }
+  }, [open]);
   // "Dirty" means the field differs from the auto-derived value, so Save is disabled
   // when urlValue equals the brand-pattern URL — that's intentional, not a bug. The
   // derived URL is ephemeral by design: there's no need to persist it to canonical_url
@@ -112,9 +121,14 @@ export function PublishDialog({
 
   function fixAutomatically() {
     generateFrontmatter.mutate(undefined, {
-      onSuccess: () => {
-        setIssues(null);
-        toast.success("Fixed — try again");
+      onSuccess: ({ export_issues }) => {
+        if (export_issues.length > 0) {
+          setIssues(export_issues);
+          toast.warning("Some issues remain");
+        } else {
+          setIssues(null);
+          toast.success("Fixed — try again");
+        }
       },
       onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
     });

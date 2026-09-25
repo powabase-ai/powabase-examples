@@ -33,9 +33,19 @@ export function PostPanel({
 
   const before = (article.progress as { before?: Record<string, number | null> })
     ?.before;
+  // Set (with generation_status "done") when the last instructed refine/rework
+  // produced nothing usable — the article body is unchanged. Shown until the next
+  // run's progress no longer carries it, rather than a one-shot error toast.
+  const refineError =
+    article.generation_status === "done" ? article.progress?.refine_error : null;
 
   return (
     <div className="space-y-4">
+      {refineError && (
+        <div className="rounded-md border border-[rgb(var(--ember))]/40 bg-[rgb(var(--ember))]/5 p-2.5 text-xs text-muted-foreground">
+          Refine didn&apos;t apply: {refineError}. Your article is unchanged.
+        </div>
+      )}
       <div>
         <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Refine with instructions

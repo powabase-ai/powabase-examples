@@ -143,7 +143,7 @@ export function useGenerateFrontmatter(id: string) {
   return useMutation({
     mutationFn: () => articlesApi.generateFrontmatter(id),
     onSuccess: (data) => {
-      qc.setQueryData(["article", id], data);
+      qc.setQueryData(["article", id], data.article);
       qc.invalidateQueries({ queryKey: ["versions", id] });
     },
   });
