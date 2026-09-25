@@ -103,7 +103,9 @@ Validation:
   rules switched off.
 - `min ≤ max` everywhere.
 - `hub_pages[].path` starts with `/` and is rejected if it starts with `//` or
-  `/\` (protocol-relative — the link would leave the brand's site).
+  `/\` (protocol-relative — the link would leave the brand's site), or if it
+  contains whitespace, a control character or a backslash anywhere (browsers
+  drop tabs and newlines, so `/\t/evil.com` would be `//evil.com`).
 - `topics` holds 1–10 phrases, each 4–80 characters. The same minimum as the
   linker's `_MIN_ANCHOR_LEN` keeps generic matches out.
 
@@ -112,6 +114,12 @@ article, so `url_pattern` doesn't apply.
 
 The profile is set through the existing business-profile create/update routes,
 where `blog_profile` is optional and nullable.
+
+The same routes validate `url_pattern` when it is saved (422 with the reason): it
+must be an absolute `http(s)` URL with a host or a path starting with `/` (not
+`//`), with a `{slug}` or `{id}` token, no `#` fragment and no whitespace. A blank
+value clears it. The response model doesn't re-validate, so a legacy stored
+pattern still reads back unchanged.
 
 ### Powabase seed (`scripts/seed_powabase_blog_profile.py`)
 
@@ -308,6 +316,10 @@ mandatory.
   `links.min`, the linker stages gap suggestions for the top remaining candidates
   from `link_candidates`. Gaps reuse the existing LLM contextual-sentence path
   (opt-in on accept, as today).
+  - Links already in the body count, and so does every target that already has a
+    `pending` suggestion (anchored or gap), whether this run or an earlier one
+    staged it. Such a target never gets a second (gap) row, so re-running suggest
+    or the relink sweep stages nothing new once the minimum is covered.
 - **Trailing slash:** `canonical_url` and hub rendering append `/` to the path
   when `trailing_slash` is on and the path has no file extension.
   - Link check and relink use the same functions, so they stay consistent.
@@ -370,8 +382,9 @@ dialog shows the list, with a "Fix automatically" action that calls
 `POST /frontmatter`.
 
 **Invalid stored profile:** if `blog_profile` fails `BlogProfile` validation (a
-hand-edited row, or a schema change), `blog_rules.profile_of` logs a warning and
-returns `None` everywhere else (generation, scoring, linking — legacy behavior).
+hand-edited row, or a schema change), `blog_rules.profile_of` logs a warning
+(once per brand and reason per process, not once per call) and returns `None`
+everywhere else (generation, scoring, linking — legacy behavior).
 Export and publish are the exception: they call `invalid_profile_reason` and
 raise `ExportBlocked(["blog profile is invalid: …"])` for markdown/publish rather
 than silently falling through to legacy mode, which would also switch the export

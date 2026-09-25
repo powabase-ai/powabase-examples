@@ -105,3 +105,85 @@ def test_accept_revision_scores_resolved_bodies_with_the_profile(monkeypatch):
     revise._accept_revision(body + "See [x](rf:article/x).", body + "See x.", "t",
                             None, {}, db=MagicMock(), article={"business_id": "b"})
     assert [s["explanation"].split()[0] for s in seen] == ["1", "0"]
+
+
+# --- round 2: branches of _norm_url / _is_internal_target / seo_brand_kwargs and
+# the profile-driven limits that mutation testing found unpinned (S3/S5/S9) ---
+def _il(seo):
+    return next(s for s in seo["signals"] if s["key"] == "internal_links")
+
+
+def test_norm_url_strips_space_scheme_www_query_and_case():
+    assert scoring._norm_url("  https://WWW.PowaBase.ai/blog/a/?x=1#f ") == (
+        "powabase.ai/blog/a/"
+    )
+    assert scoring._norm_url(" https://acme.com/a ") == "acme.com/a"
+
+
+def test_uppercase_host_still_counts():
+    assert _count("[a](https://PowaBase.AI/blog/a/)", _brand()) == 1
+
+
+def test_hub_link_with_trailing_slash_counts_outside_the_blog_prefix():
+    assert scoring._is_internal_target(
+        "https://powabase.ai/vector-database/", ["powabase.ai/blog/"],
+        {"powabase.ai/vector-database"},
+    )
+    assert _count("[hub](https://powabase.ai/vector-database/)", _brand()) == 1
+
+
+def test_id_pattern_sets_the_blog_prefix():
+    brand = _brand("https://acme.com/posts/{id}", "acme.com")
+    assert scoring.seo_brand_kwargs(brand)["internal_prefixes"] == ["acme.com/posts/"]
+    assert _count("[a](https://acme.com/posts/123)", brand) == 1
+
+
+def test_relative_pattern_without_a_leading_slash_is_rooted():
+    kw = scoring.seo_brand_kwargs(_brand("blog/{slug}", "acme.com"))
+    assert kw["internal_prefixes"] == ["acme.com/blog/"]
+
+
+def test_pattern_that_starts_with_the_token_uses_the_domain_root():
+    kw = scoring.seo_brand_kwargs(_brand("{slug}", "acme.com"))
+    assert kw["internal_prefixes"] == ["acme.com/"]
+
+
+def test_no_domain_means_no_internal_hosts():
+    kw = scoring.seo_brand_kwargs(_brand(pattern="", domain=""))
+    assert kw["internal_hosts"] == set() and "internal_prefixes" not in kw
+    assert _count("[rel](/pricing)", _brand(pattern="", domain="")) == 0
+
+
+def test_internal_hosts_match_ignoring_www():
+    s = scoring.score_seo("[x](https://acme.com/a)", "t", "m", {},
+                          profile=BlogProfile.model_validate(_PROF),
+                          internal_hosts={"www.acme.com"})
+    assert _il(s)["explanation"].startswith("1 internal link")
+
+
+def test_internal_links_fixes_below_at_and_above_the_band():
+    prof = BlogProfile.model_validate({**_PROF, "links": {**_PROF["links"],
+                                                          "min": 2, "max": 3}})
+
+    def fixes(n: int) -> list[str]:
+        md = " ".join(f"[a{i}](https://acme.com/a{i})" for i in range(n))
+        s = scoring.score_seo(md, "t", "m", {}, profile=prof,
+                              internal_hosts={"acme.com"})
+        return _il(s)["fixes"]
+
+    assert fixes(1) == ["Add 1 more contextual link(s) to the brand's own articles "
+                        "or hub pages."]
+    assert fixes(2) == [] and fixes(3) == []
+    assert fixes(4) == ["Cut to at most 3 internal links."]
+
+
+def test_meta_length_band_follows_the_profile_description_max():
+    prof = BlogProfile.model_validate({**_PROF, "meta": {"title_max": 60,
+                                                         "description_max": 130}})
+
+    def meta_sig(n: int) -> dict:
+        s = scoring.score_seo("body", "t", "m" * n, {}, profile=prof)
+        return next(x for x in s["signals"] if x["key"] == "meta_length")
+
+    assert meta_sig(115)["fixes"] == []  # 110-130 band: 120 is not the floor
+    assert meta_sig(135)["fixes"] == ["Target 110–130 characters."]

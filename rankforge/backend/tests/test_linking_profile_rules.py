@@ -42,23 +42,42 @@ def _row(tid: str, title: str, kw: list[str], cat: str = "rag") -> dict[str, Any
 
 class FakeDB:
     """Just enough of Database for suggest_links: published rows, cluster pillar
-    lookups, and an insert that echoes its params back as the staged row."""
+    lookups, and a link_suggestions table that keeps its pending rows and CONFLICTS
+    (returns None, like ON CONFLICT DO NOTHING) on a duplicate of the unique keys
+    (target article or hub URL, lower(coalesce(anchor, '')))."""
 
     def __init__(self, rows: list[dict[str, Any]], pillar: dict | None = None):
         self.rows = rows
         self.pillar = pillar
-        self.inserts: list[tuple] = []
+        self.inserts: list[tuple] = []  # every insert attempted
+        self.pending: list[dict[str, Any]] = []  # rows actually stored
+        self.library_fetches = 0  # published-library reads (_link_targets)
+
+    @staticmethod
+    def _key(r: dict[str, Any]) -> tuple:
+        tid = r["target_article_id"]
+        return (str(tid) if tid else None, None if tid else r["target_url"],
+                (r["anchor_text"] or "").lower())
 
     def fetch_all(self, q: str, p: Any = None) -> list[dict[str, Any]]:
+        if "from public.link_suggestions" in q:
+            # Scoped to the article AND its brand (defence in depth).
+            assert "business_id = %s" in q and tuple(map(str, p)) == (AID, BID)
+            return [dict(r) for r in self.pending]
         if "cluster_role = 'member'" in q:
             return []
+        self.library_fetches += 1
         return list(self.rows)
 
     def fetch_one(self, q: str, p: Any = None) -> dict[str, Any] | None:
         if "insert into public.link_suggestions" in q:
             self.inserts.append(p)
-            return {"target_article_id": p[2], "anchor_text": p[3],
-                    "target_url": p[4], "kind": p[7]}
+            row = {"target_article_id": p[2], "anchor_text": p[3],
+                   "target_url": p[4], "kind": p[7]}
+            if any(self._key(r) == self._key(row) for r in self.pending):
+                return None  # on conflict do nothing
+            self.pending.append(row)
+            return dict(row)
         if "content_clusters" in q:
             return {"pillar_article_id": self.pillar["id"]} if self.pillar else None
         if "status = 'published'" in q:
@@ -72,7 +91,7 @@ class FakeDB:
 
 
 def _run(monkeypatch, body: str, rows, brand=None, *, cluster=None, pillar=None,
-         brief=None):
+         brief=None, db=None):
     brand = brand or _brand()
     art = {"id": AID, "business_id": BID, "content_md": body,
            "cluster_id": cluster, "cluster_role": "member" if cluster else None,
@@ -80,7 +99,7 @@ def _run(monkeypatch, body: str, rows, brand=None, *, cluster=None, pillar=None,
     monkeypatch.setattr(lk.gen_svc, "get_article", lambda d, aid: art)
     monkeypatch.setattr(lk.gen_svc, "get_brief", lambda d, bid: brief)
     monkeypatch.setattr(lk.brands, "get_profile", lambda d, bid: brand)
-    db = FakeDB(rows, pillar)
+    db = db or FakeDB(rows, pillar)
     out = lk.suggest_links(db, BID, AID)
     return db, out
 
@@ -111,6 +130,92 @@ def test_no_gap_to_a_target_already_linked_in_the_body(monkeypatch):
     db, _ = _run(monkeypatch, body, rows)
     assert _to(db, T1) == []
     assert [p for p in db.inserts if p[4] == MVP] == []
+
+
+# --- N1 (round 2): pending rows from EARLIER runs count, even when the re-insert
+# of the anchored suggestion conflicts and returns None ---
+def test_rerun_with_conflicting_anchor_stages_no_gap_to_that_target(monkeypatch):
+    rows = [_row(T1, "Tech One", ["tech one guide"])]
+    db = FakeDB(rows)
+    db.pending.append({"target_article_id": T1, "anchor_text": "tech one guide",
+                       "target_url": "https://powabase.ai/blog/tech-one",
+                       "kind": "mention"})  # staged by an earlier run
+    _, out = _run(monkeypatch, "We compare the tech one guide approach.", rows,
+                  db=db)
+    assert out == []  # the anchored re-insert conflicted
+    assert [p[3] for p in _to(db, T1)] == ["tech one guide"]  # no gap attempted
+    assert [r for r in db.pending if r["anchor_text"] is None] == []
+
+
+def test_rerun_with_pending_hub_anchor_stages_no_hub_gap(monkeypatch):
+    brief = {"primary_keyword": "pgvector", "secondary_keywords": []}
+    db = FakeDB([])
+    db.pending.append({"target_article_id": None, "anchor_text": "pgvector",
+                       "target_url": VDB, "kind": "mention"})
+    _run(monkeypatch, "We rely on pgvector for retrieval.", [], brief=brief, db=db)
+    assert [p[3] for p in db.inserts if p[4] == VDB] == ["pgvector"]
+
+
+def test_two_runs_stage_the_same_suggestions_once(monkeypatch):
+    """min=3: run 1 stages one anchor (T1) and two gaps. Run 2 re-finds the same
+    anchor (conflict) — it must neither gap T1 nor top up with gaps to new targets,
+    because the three pending suggestions already reach the minimum."""
+    rows = [_row(T1, "Tech One", ["tech one guide"]), _row(T2, "Tech Two", []),
+            _row(T3, "Tech Three", [], "agents"), _row(T5, "Tech Five", [], "agents")]
+    body = "We compare the tech one guide approach."
+    db, first = _run(monkeypatch, body, rows, _brand(min=3, max=10))
+    assert len(first) == 3 and len(db.pending) == 3
+    before = list(db.pending)
+    _, second = _run(monkeypatch, body, rows, _brand(min=3, max=10), db=db)
+    assert second == []
+    assert db.pending == before  # nothing new: no T1 gap, no fourth target
+    assert [r["anchor_text"] for r in db.pending
+            if str(r["target_article_id"]) == T1] == ["tech one guide"]
+
+
+def test_pending_target_already_linked_in_the_body_counts_once(monkeypatch):
+    """A pending suggestion to T1, which the body already links, must not count
+    twice: the body link counts (have=1), the pending row doesn't → need=2."""
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", []),
+            _row(T3, "Tech Three", [], "agents"), _row(T5, "Tech Five", [], "agents")]
+    db = FakeDB(rows)
+    db.pending.append({"target_article_id": T1, "anchor_text": "old anchor",
+                       "target_url": "https://powabase.ai/blog/tech-one",
+                       "kind": "mention"})
+    _run(monkeypatch, f"See [one](rf:article/{T1}).", rows,
+         _brand(min=3, max=10), db=db)
+    assert len([p for p in db.inserts if p[3] is None]) == 2
+
+
+# --- step 4 reuses the library and skips ranking when nothing is needed ---
+def test_per_article_path_fetches_the_library_once(monkeypatch):
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", [])]
+    db, out = _run(monkeypatch, "Nothing matching here.", rows)
+    assert sorted(str(p[2]) for p in db.inserts) == [T1, T2]  # both gaps staged
+    assert db.library_fetches == 1  # step 2 only; link_candidates reuses it
+
+
+def test_relink_candidates_are_reused_for_the_minimum(monkeypatch):
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", [])]
+    art = {"id": AID, "business_id": BID, "content_md": "Nothing here.",
+           "cluster_id": None, "cluster_role": None, "brief_id": None}
+    monkeypatch.setattr(lk.gen_svc, "get_article", lambda d, aid: art)
+    monkeypatch.setattr(lk.brands, "get_profile", lambda d, bid: _brand())
+    db = FakeDB(rows)
+    lk.suggest_links(db, BID, AID, candidates=[*rows, {**_row(AID, "Me", [])}])
+    assert sorted(str(p[2]) for p in db.inserts) == [T1, T2]
+    assert db.library_fetches == 0
+
+
+def test_no_candidate_ranking_when_the_minimum_is_met(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("link_candidates must not run when need <= 0")
+
+    monkeypatch.setattr(lk, "link_candidates", boom)
+    rows = [_row(T1, "Tech One", []), _row(T2, "Tech Two", [])]
+    body = f"[a](rf:article/{T3}) [b](rf:article/{T4}) [c]({MVP})"
+    db, _ = _run(monkeypatch, body, rows)  # min=3, already met
+    assert db.inserts == [] and db.library_fetches == 1
 
 
 # --- hub gap-fill writes the hub URL, never a bogus article ref ---
@@ -197,3 +302,17 @@ def test_canonical_override_gets_the_trailing_slash_on_profile_brands():
     assert lk.canonical_url(_brand(), art) == "https://powabase.ai/guides/a/"
     legacy = {**_brand(), "blog_profile": None}
     assert lk.canonical_url(legacy, art) == "https://powabase.ai/guides/a"
+
+
+def test_link_candidates_list_a_target_once(monkeypatch):
+    """L6: the pillar is both a structural target and a technical article in the
+    ranked pool — it is offered once (as the structural link), not twice."""
+    pillar = _row(PILLAR, "Pillar Guide", ["pgvector"])
+    db = FakeDB([pillar, _row(T1, "Other", ["pgvector"])], pillar)
+    art = {"id": AID, "business_id": BID, "cluster_id": "c1",
+           "cluster_role": "member"}
+    brief = {"primary_keyword": "pgvector", "secondary_keywords": []}
+    targets = [x["target"] for x in lk.link_candidates(db, _brand(), art, brief)]
+    assert targets.count(f"rf:article/{PILLAR}") == 1
+    assert targets[0] == f"rf:article/{PILLAR}"
+    assert f"rf:article/{T1}" in targets

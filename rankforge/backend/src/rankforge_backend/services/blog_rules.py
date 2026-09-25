@@ -35,16 +35,25 @@ def _parse(brand: dict[str, Any] | None) -> tuple[BlogProfile | None, str | None
         return None, f"{loc}: {msg}" if loc else msg
 
 
+# (brand id, reason) pairs already warned about: profile_of runs per link on every
+# render, so an invalid profile is logged once per process, not once per call.
+_WARNED: set[tuple[str, str]] = set()
+
+
 def profile_of(brand: dict[str, Any] | None) -> BlogProfile | None:
     """The brand's parsed blog profile, or None when absent or invalid. An invalid
-    stored profile is logged; export and publish refuse it instead (see
-    invalid_profile_reason), so it never silently exports in legacy mode."""
+    stored profile is logged (once per brand and reason); export and publish
+    refuse it instead (see invalid_profile_reason), so it never silently exports
+    in legacy mode."""
     prof, reason = _parse(brand)
     if reason:
-        log.warning(
-            "brand %s has an invalid blog_profile (%s); treating it as absent",
-            (brand or {}).get("id"), reason,
-        )
+        key = (str((brand or {}).get("id")), reason)
+        if key not in _WARNED:
+            _WARNED.add(key)
+            log.warning(
+                "brand %s has an invalid blog_profile (%s); treating it as absent",
+                key[0], reason,
+            )
     return prof
 
 

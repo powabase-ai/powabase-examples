@@ -650,7 +650,10 @@ def test_suggest_links_stages_min_gaps(monkeypatch):
         {"id": "aaaaaaaa-0000-0000-0000-000000000002", "title": "Tech2",
          "slug": "tech2", "keywords": [], "canonical_url": None, "category": "rag"},
     ]
-    db.fetch_all.return_value = tech_rows
+    # No pending suggestions yet; every other list query is the published library.
+    db.fetch_all.side_effect = lambda q, p=(): (
+        [] if "from public.link_suggestions" in q else tech_rows
+    )
 
     def _fetch_one(query, params=()):
         if "insert into public.link_suggestions" in query:
@@ -731,3 +734,6 @@ async def test_gap_fill_on_profile_brand_rescores_with_internal_links(monkeypatc
     monkeypatch.setattr(linking.gen_svc, "_update", lambda d, aid, **f: updates.update(f))
     await linking.generate_gap_link(client, db, BID, SID)
     assert "internal_links" in _signal_keys(updates["seo_score"])
+    # A hub gap has no target article: the body keeps the hub URL, never a ref.
+    assert "rf:article/None" not in updates["content_md"]
+    assert "[RAG](https://acme.com/blog/category/rag/)" in updates["content_md"]
