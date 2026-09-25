@@ -126,7 +126,11 @@ async def _attempt(
     clean, flags = blog_rules.validate_frontmatter(
         raw or {}, profile, cluster_category=cluster_category
     )
-    # validate_frontmatter flags start with the field name; keep the requested ones.
+    keys = {c.key for c in profile.categories}
+    if cluster_category not in keys and (raw or {}).get("category") not in keys:
+        # Neither the cluster nor the model named a real key: the fallback was used.
+        flags.append(f"category defaulted to {clean['category']}")
+    # These flags start with the field name; keep the requested ones.
     flags = [f for f in flags if f.split(" ", 1)[0] in fields]
     if raw is None:
         flags.insert(0, _UNPARSEABLE)
@@ -175,6 +179,15 @@ async def generate(
         k: clean[k] for k in FM_FIELDS
         if k in fields and field_ok(k, clean.get(k), profile)
     }
+    stored = article.get("category")
+    defaulted = f"category defaulted to {clean.get('category')}"
+    if defaulted in flags and field_ok("category", stored, profile):
+        # A forced run never swaps a valid stored category for the fallback.
+        write.pop("category", None)
+        flags = [
+            f"category kept as {stored} (the model's was not a listed key)"
+            if f == defaulted else f for f in flags
+        ]
     if write:
         if before_write:
             before_write()
@@ -206,15 +219,18 @@ def enforce_meta(
 
 
 async def complete(
-    client: PowabaseClient, db: Database, article_id: UUID
+    client: PowabaseClient, db: Database, article_id: UUID, *,
+    force: bool = False,
 ) -> list[str]:
     """Bring the frontmatter within the blog rules, touching only what fails them:
     meta (model, then clamp) only when the title/meta exceed the limits; category /
     summary / FAQ only for the fields that currently fail; and drop a body FAQ
-    section (the FAQ lives in frontmatter). Used after generation and by the
-    "Generate summary & FAQ" / "Fix automatically" actions. The prior state is
-    versioned once, just before the first write (no write, no version), so hand
-    edits it overwrites can be reverted. Returns the frontmatter step's flags."""
+    section (the FAQ lives in frontmatter). Used after generation and by "Fix
+    automatically". `force` ("Generate summary & FAQ") also regenerates a passing
+    summary and FAQ, and the category unless the cluster fixes it; a new value is
+    still written only when it passes the rules. The prior state is versioned once,
+    just before the first write (no write, no version), so hand edits it
+    overwrites can be reverted. Returns the frontmatter step's flags."""
     from . import brief as brief_svc
     from . import revise
 
@@ -225,6 +241,14 @@ async def complete(
     if not profile:
         return []
     failing = failing_fields(article, profile)
+    if force:
+        if profile.summary.enabled:
+            failing.add("summary")
+        if profile.faq.enabled:
+            failing.add("faq")
+        keys = {c.key for c in profile.categories}
+        if _cluster_category(db, article) not in keys:
+            failing.add("category")
     fix_meta = meta_over_limits(article, profile)
     body_faq = profile.faq.enabled and bool(
         blog_rules.BODY_FAQ_RE.search(article.get("content_md") or "")

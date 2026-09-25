@@ -1188,6 +1188,47 @@ def _profile_rules(profile: Any, brand_name: str) -> str:
 _MD_FENCE_RE = re.compile(r"^```(?:markdown)?\s*\n(.*)\n```$", re.S)
 
 
+def _checked_frontmatter(
+    incoming: dict[str, Any], profile: Any, cluster_category: str | None,
+    fields: dict[str, Any],
+) -> list[str]:
+    """Add to `fields` each incoming category/summary/FAQ value that passes the
+    blog's rules (`frontmatter.field_ok`); a value that fails keeps the stored
+    one and is flagged. A category must be a profile key as the model sent it
+    (never mapped to the fallback); the cluster's category still wins over a
+    valid one. Returns the flags."""
+    from . import blog_rules, frontmatter
+
+    clean, vflags = blog_rules.validate_frontmatter(
+        incoming, profile, cluster_category=cluster_category
+    )
+    keys = {c.key for c in profile.categories}
+    flags: list[str] = []
+    kept = "kept the stored one"
+    if "category" in incoming:
+        if incoming["category"] in keys:
+            fields["category"] = clean["category"]
+        else:
+            flags.append(f'model\'s category "{incoming["category"]}" is not one '
+                         f"of this blog's keys — {kept}")
+    if "summary" in incoming and profile.summary.enabled:
+        rule = profile.summary
+        if frontmatter.field_ok("summary", clean["summary"], profile):
+            fields["summary"] = clean["summary"]
+            flags += [f for f in vflags if f.startswith("summary trimmed")]
+        else:
+            n = blog_rules.word_count(clean["summary"])
+            flags.append(f"model's summary was {n} words "
+                         f"(needs {rule.min_words}-{rule.max_words}) — {kept}")
+    if "faq" in incoming and profile.faq.enabled:
+        if frontmatter.field_ok("faq", clean["faq"], profile):
+            fields["faq"] = clean["faq"]
+        else:
+            flags.append(f"model's FAQ had {len(clean['faq'])} item(s) "
+                         f"(needs {profile.faq.min}-{profile.faq.max}) — {kept}")
+    return flags
+
+
 async def instructed_pass(
     client: PowabaseClient, db: Database, article_id: UUID, *,
     instructions: str, mode: str,
@@ -1289,14 +1330,9 @@ async def instructed_pass(
     if blog_rules.clean_faq(fm_in.get("faq")):
         incoming["faq"] = fm_in["faq"]
     if profile and incoming:
-        merged = {k: incoming.get(k, article.get(k))
-                  for k in ("category", "summary", "faq")}
-        # The cluster's category wins over the model's (spec).
-        clean, fm_flags = blog_rules.validate_frontmatter(
-            merged, profile,
-            cluster_category=frontmatter._cluster_category(db, article),
+        fm_flags = _checked_frontmatter(
+            incoming, profile, frontmatter._cluster_category(db, article), fields
         )
-        fields.update({k: clean[k] for k in incoming if clean.get(k) is not None})
         if fm_flags:
             log.warning("instructed pass frontmatter flags for %s: %s",
                         article_id, fm_flags)

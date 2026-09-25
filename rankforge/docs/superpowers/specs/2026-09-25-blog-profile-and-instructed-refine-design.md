@@ -135,7 +135,10 @@ given id, so it can never silently update zero or several brands.
 ## 2. Generation
 
 All of the changes below apply **only when the brand has a `blog_profile`**.
-Without one, the pipeline is unchanged.
+Without one, the pipeline is unchanged. A stored profile that fails validation
+counts as none for the rules, but generation still reports it: the final
+`progress.frontmatter_flags` includes `"blog profile is invalid: <reason>"`
+(`blog_rules.invalid_profile_reason`), so the UI shows why the rules were off.
 
 ### Writer prompt (`generation.py`)
 
@@ -190,8 +193,12 @@ problems named) when that attempt has flags. It keeps whichever of the two
 attempts has **fewer** flags (the first on a tie), and — per field — writes only
 values that pass the rules (`field_ok`). An unparseable reply, or a retry that's
 worse than the first attempt, never overwrites a stored value. `failing_fields()`
-limits a call to the fields that currently fail, so "Generate summary & FAQ" and
-the post-generation step never touch a field that already passes.
+limits a call to the fields that currently fail, so "Fix automatically" and the
+post-generation step never touch a field that already passes. When neither the
+cluster nor the model names a real key, the fallback category is written (if the
+category is being regenerated) with the flag `category defaulted to <key>` — but
+a valid stored category is never swapped for the fallback: it is kept and
+flagged `category kept as <key> (the model's was not a listed key)`.
 
 A flagged field shows as a warning on the article and **blocks export** (§4). It
 never blocks generation.
@@ -201,7 +208,10 @@ FAQ" / "Fix automatically": it touches only what's wrong — `fix_meta` +
 `enforce_meta` when the title/meta exceed the profile's limits, `generate()` for
 `failing_fields()`, and stripping a body FAQ section when one exists under an
 FAQ-enabled profile — and snapshots the article once, right before its first
-write, so the whole fix is one undo point.
+write, so the whole fix is one undo point. With `force=True` ("Generate summary
+& FAQ") it also regenerates the summary and FAQ (when enabled) even if they pass,
+and the category unless the cluster's category (a profile key) fixes it; a new
+value is still written only when it passes the rules.
 
 ### Meta (`revise.fix_meta` + `frontmatter.enforce_meta`)
 
@@ -382,15 +392,24 @@ step and `fix_meta` on demand. This is the "Generate summary & FAQ" button; see
   - `targets` together with `instructions` → **422**.
   - Uses the same `try_begin_refine` claim (409 when busy), `article:refine` rate
     limit, background task, progress steps and post-refine link check as today.
-- `POST /api/articles/{id}/frontmatter` (profile brands only; 409 if no profile):
-  claims the article (`try_begin_refine(total=1)`, 409 if a generation/refine is
-  already running), runs `frontmatter.complete()`, releases the claim in a
-  `finally` (a previously `failed` article stays `failed`, so "Retry generation"
-  is still offered for an empty draft), and returns
-  `{ "article": <Article>, "export_issues": [str, ...] }` — the issues still
-  open **after** the fix, computed from the fresh row, so the UI never claims
-  "fixed" over a step that left problems. This is the "Generate summary & FAQ" /
-  "Fix automatically" action.
+- `POST /api/articles/{id}/frontmatter` (profile brands only): 409
+  `"brand has no blog profile"` when the brand has none, 409
+  `"blog profile is invalid: <reason>"` when the stored profile fails
+  validation (`blog_rules.invalid_profile_reason`). Optional JSON body
+  `{ "force": bool }` (default `false`; an empty/absent body is `false`; a
+  non-boolean such as `"yes"` or `1` is a **422**):
+  `false` is "Fix automatically" (only failing fields), `true` is "Generate
+  summary & FAQ" (`complete(force=True)`, §2). It claims the article
+  (`try_begin_refine(total=1)`, 409 if a generation/refine is already
+  running), runs `frontmatter.complete()`, releases the claim in a `finally`
+  (a previously `failed` article stays `failed`, so "Retry generation" is
+  still offered for an empty draft), and returns
+  `{ "article": <Article>, "export_issues": [str, ...], "changed": [str, ...] }`
+  — the issues still open **after** the fix, computed from the fresh row, so
+  the UI never claims "fixed" over a step that left problems; and the fields
+  whose value actually changed (compared by value, a subset of `category`,
+  `summary`, `faq`, `meta_title`, `meta_description`, `content_md`). An empty
+  `changed` means the UI says "Nothing changed".
 - `POST /api/articles/{id}/revert`:
   - Restores the newest `article_versions` row whose body **or** frontmatter
     (title, meta, category, summary, FAQ — nulls included) differs from the
@@ -454,10 +473,18 @@ This is a single pass, not a loop:
    - under an FAQ-enabled profile, a body FAQ section is removed.
 6. **Frontmatter overwrite protection:** a blank `category`, an empty `""`
    `summary`, or an empty `faq` list in the model's reply is **ignored** — it
-   never overwrites a stored value. Only non-blank incoming fields are merged
-   with what's currently stored and run through `blog_rules.validate_frontmatter`
-   (which — per the cluster's `category` wins) prefers the cluster's category
-   over anything the model returned.
+   never overwrites a stored value. A non-blank `title`, `meta_title` or
+   `meta_description` is written stripped. Each non-blank incoming
+   category/summary/FAQ is run through `blog_rules.validate_frontmatter` (an
+   over-long summary is trimmed, extra FAQ items dropped) and written **only if
+   it then passes the rules** (`frontmatter.field_ok`):
+   - `category` must be a profile key **as the model sent it** — an unknown
+     one (`"AI agents"`) is dropped, never mapped to the fallback; the
+     cluster's category still wins over a valid one;
+   - a summary or FAQ out of bounds keeps the stored value.
+   Each dropped field adds a flag (e.g. `model's summary was 3 words (needs
+   40-60) — kept the stored one`); a trimmed summary keeps
+   `summary trimmed to fit; review it`.
 7. **Write:** the article is versioned first (so the whole pass is one undo
    point), then body + any validated frontmatter fields are written together,
    `enforce_meta` clamps meta to the profile's limits, and fact-check, GEO and

@@ -466,4 +466,7 @@ async def test_refine_and_finish_carries_frontmatter_flags(monkeypatch):
     )
     monkeypatch.setattr(art_routes.linkcheck_svc, "check_article", AsyncMock())
     await art_routes._refine_and_finish(MagicMock(), MagicMock(), UUID(ARTICLE["id"]))
-    assert updates[-1]["progress"]["frontmatter_flags"] == ["faq has 1 item(s)"]
+    assert updates[-1]["progress"] == {
+        "phase": "done", "word_count": 2, "before": {"seo": 1}, "mode": "refine",
+        "frontmatter_flags": ["faq has 1 item(s)"],
+    }

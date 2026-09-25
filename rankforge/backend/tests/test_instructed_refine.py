@@ -102,6 +102,9 @@ async def test_frontmatter_changes_validated(env):
     written = {k: v for c in upd.call_args_list for k, v in c.kwargs.items()}
     assert len(written["summary"].split()) <= 60
     assert len(written["faq"]) == 6
+    prog = [c.kwargs["progress"] for c in upd.call_args_list
+            if "progress" in c.kwargs]
+    assert prog[-1]["frontmatter_flags"] == ["summary trimmed to fit; review it"]
 
 
 async def test_body_faq_removed_under_profile(env):
@@ -231,4 +234,108 @@ async def test_frontmatter_flags_stored_in_progress(env):
                                  MagicMock(), "a", instructions="x", mode="refine")
     prog = [c.kwargs["progress"] for c in upd.call_args_list
             if "progress" in c.kwargs]
-    assert prog and "summary is 2 words (needs 40-60)" in prog[-1]["frontmatter_flags"]
+    assert prog and prog[-1]["frontmatter_flags"] == [
+        "model's summary was 2 words (needs 40-60) — kept the stored one"
+    ]
+
+
+# --- review r2 N5: an invalid incoming value never replaces the stored one ---
+PROF2 = BlogProfile.model_validate({"categories": [
+    {"key": "rag", "label": "R"}, {"key": "agents", "label": "A"}]})
+S45 = " ".join(["word"] * 44) + " end."
+FAQ4 = [{"q": f"Q{i}?", "a": "A."} for i in range(4)]
+STORED = dict(ART, category="agents", summary=S45, faq=FAQ4)
+
+
+async def _pass_with(fm_in):
+    with patch.object(revise.gen_svc, "get_article", return_value=dict(STORED)), \
+         patch.object(revise.brands, "get_profile",
+                      return_value={"name": "B", "blog_profile": PROF2.model_dump()}), \
+         patch.object(revise.gen_svc, "_update") as upd:
+        await revise.instructed_pass(
+            _client({"content_md": BODY, "frontmatter": fm_in}),
+            MagicMock(), "a", instructions="x", mode="refine")
+    written = {k: v for c in upd.call_args_list for k, v in c.kwargs.items()}
+    prog = [c.kwargs["progress"] for c in upd.call_args_list if "progress" in c.kwargs]
+    return written, (prog[-1].get("frontmatter_flags") if prog else [])
+
+
+async def test_unknown_model_category_keeps_the_stored_one(env):
+    written, flags = await _pass_with({"category": "AI agents"})
+    assert "category" not in written  # not mapped to the fallback "rag"
+    assert flags == ['model\'s category "AI agents" is not one of this blog\'s '
+                     "keys — kept the stored one"]
+
+
+async def test_short_model_summary_keeps_the_stored_one(env):
+    written, flags = await _pass_with({"summary": "Too short here."})
+    assert "summary" not in written
+    assert flags == [
+        "model's summary was 3 words (needs 40-60) — kept the stored one"
+    ]
+
+
+async def test_one_item_model_faq_keeps_the_stored_one(env):
+    written, flags = await _pass_with({"faq": [{"q": "Only?", "a": "One."}]})
+    assert "faq" not in written
+    assert flags == [
+        "model's FAQ had 1 item(s) (needs 3-6) — kept the stored one"
+    ]
+
+
+async def test_valid_model_frontmatter_is_written(env):
+    new_s = " ".join(["fresh"] * 45)
+    written, flags = await _pass_with(
+        {"category": "rag", "summary": new_s, "faq": FAQ4[:3]})
+    assert written["category"] == "rag" and written["summary"] == new_s
+    assert written["faq"] == FAQ4[:3] and not flags
+
+
+# --- review r2 G3: the refine floor is 60% of the current body ---
+async def test_refine_mode_rejects_a_body_at_half_length(env):
+    _snap, upd = env
+    half = BODY[: len(BODY) // 2]
+    with pytest.raises(revise.InstructedRefineError, match="60%"):
+        await revise.instructed_pass(_client({"content_md": half}), MagicMock(),
+                                     "a", instructions="x", mode="refine")
+    assert not any("content_md" in c.kwargs for c in upd.call_args_list)
+
+
+async def test_refine_mode_accepts_a_body_at_two_thirds(env):
+    _snap, upd = env
+    body = BODY[: len(BODY) * 2 // 3]
+    await revise.instructed_pass(_client({"content_md": body}), MagicMock(),
+                                 "a", instructions="x", mode="refine")
+    assert any("content_md" in c.kwargs for c in upd.call_args_list)
+
+
+# --- review r2 G14: instructed title / meta changes are written (stripped) ---
+async def test_instructed_title_and_meta_are_written(env):
+    _snap, upd = env
+    fm_in = {"title": "  New title ", "meta_title": " New meta ",
+             "meta_description": " New description. "}
+    await revise.instructed_pass(
+        _client({"content_md": BODY, "frontmatter": fm_in}), MagicMock(), "a",
+        instructions="x", mode="refine")
+    first = next(c.kwargs for c in upd.call_args_list if "content_md" in c.kwargs)
+    assert first["title"] == "New title" and first["meta_title"] == "New meta"
+    assert first["meta_description"] == "New description."
+
+
+async def test_instructed_blank_title_and_meta_are_ignored(env):
+    _snap, upd = env
+    fm_in = {"title": "  ", "meta_title": "", "meta_description": 5}
+    await revise.instructed_pass(
+        _client({"content_md": BODY, "frontmatter": fm_in}), MagicMock(), "a",
+        instructions="x", mode="refine")
+    written = {k for c in upd.call_args_list for k in c.kwargs}
+    assert not written & {"title", "meta_title", "meta_description"}
+
+
+async def test_refine_mode_rejects_a_body_at_55_percent(env):
+    _snap, upd = env
+    body = BODY[: len(BODY) * 55 // 100]
+    with pytest.raises(revise.InstructedRefineError, match="60%"):
+        await revise.instructed_pass(_client({"content_md": body}), MagicMock(),
+                                     "a", instructions="x", mode="refine")
+    assert not any("content_md" in c.kwargs for c in upd.call_args_list)

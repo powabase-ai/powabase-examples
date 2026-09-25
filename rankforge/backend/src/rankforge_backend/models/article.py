@@ -4,7 +4,13 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 from .blog import FaqItem
 
@@ -112,12 +118,28 @@ class ArticleVersion(BaseModel):
     word_count: int | None = None
 
 
+class FrontmatterRequest(BaseModel):
+    """POST /api/articles/{id}/frontmatter body (optional). `force` ("Generate
+    summary & FAQ") regenerates the summary and FAQ even when they pass the rules;
+    false ("Fix automatically") touches only failing fields."""
+
+    # Strict: "yes"/1/"true" are a 422, not silently coerced to a forced run.
+    force: StrictBool = False
+
+
+FRONTMATTER_CHANGE_FIELDS = (
+    "category", "summary", "faq", "meta_title", "meta_description", "content_md",
+)
+
+
 class FrontmatterResult(BaseModel):
-    """POST /api/articles/{id}/frontmatter: the article after the fix, plus the
-    export issues still open (`blog_rules.export_issues`; [] = exportable)."""
+    """POST /api/articles/{id}/frontmatter: the article after the fix, the export
+    issues still open (`blog_rules.export_issues`; [] = exportable), and the fields
+    the fix actually changed (subset of FRONTMATTER_CHANGE_FIELDS; [] = nothing)."""
 
     article: Article
     export_issues: list[str]
+    changed: list[str] = Field(default_factory=list)
 
 
 class RemoveLinkResult(BaseModel):

@@ -123,10 +123,8 @@ async def _run_complete(monkeypatch, art):
     monkeypatch.setattr(fm.gen_svc, "snapshot_version", _snap)
     from rankforge_backend.services import revise
 
-    async def _fix_meta(client, db, aid, article, brief, **k):
-        _upd(db, aid, meta_title="New meta")
-
-    monkeypatch.setattr(revise, "fix_meta", _fix_meta)
+    # The real fix_meta runs; only its agent is faked (review r2 over-mocking).
+    monkeypatch.setattr(revise, "ensure_meta_agent", AsyncMock(return_value="m"))
     await fm.complete(_client(GOOD), MagicMock(), "a")
     return state, calls
 
@@ -218,10 +216,11 @@ async def test_complete_noop_when_everything_passes(monkeypatch):
 async def test_complete_long_title_fixes_meta_only(monkeypatch):
     art = {**ART, "title": "t" * 80, "summary": S45, "faq": GOOD["faq"],
            "category": "rag"}
-    c = _client()
+    c = _client({"meta_title": "New meta"})
     state, calls = await _run_complete_with(monkeypatch, art, c)
-    c.run_agent.assert_not_called()  # summary/FAQ are not regenerated
+    c.run_agent.assert_awaited_once()  # the meta model only: no summary/FAQ call
     assert calls[0][0] == "snapshot" and ("update", ["meta_title"]) in calls
+    assert state["art"]["meta_title"] == "New meta"
 
 
 async def test_complete_no_snapshot_when_the_model_writes_nothing(monkeypatch):
@@ -262,18 +261,17 @@ async def _run_complete_with(monkeypatch, art, client):
     )
     from rankforge_backend.services import revise
 
-    async def _fix_meta(client, db, aid, article, brief, *, before_write=None, **k):
-        if before_write:
-            before_write()
-        _upd(db, aid, meta_title="New meta")
-
-    monkeypatch.setattr(revise, "fix_meta", _fix_meta)
+    # The real fix_meta runs; only its agent is faked (review r2 over-mocking).
+    monkeypatch.setattr(revise, "ensure_meta_agent", AsyncMock(return_value="m"))
     await fm.complete(client, MagicMock(), "a")
     return state, calls
 
 
 # --- review r1 I4 / K1: POST /frontmatter returns the remaining export issues and
 # claims the article for the duration of the fix ---
+_ROUTE: dict = {}  # the last _fm_route's article state, for fake complete()s
+
+
 def _fm_route(monkeypatch, art, *, claim=True, complete=None):
     from rankforge_backend.services import generation as g
 
@@ -281,6 +279,7 @@ def _fm_route(monkeypatch, art, *, claim=True, complete=None):
                      "created_at": "2026-09-25T00:00:00Z",
                      "updated_at": "2026-09-25T00:00:00Z",
                      **art, "id": AID, "business_id": BID}}
+    _ROUTE["state"] = state
     updates: list = []
     monkeypatch.setattr(g, "get_article", lambda d, a: dict(state["art"]))
     monkeypatch.setattr(brands_svc, "get_profile", lambda d, b: BRAND)
@@ -329,3 +328,252 @@ def test_frontmatter_route_keeps_a_failed_article_failed(monkeypatch):
     )
     assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 200
     assert updates[-1]["generation_status"] == "failed"
+
+
+# --- review r2: the REAL fix_meta / enforce_meta version the article before their
+# first write (only the agent and the DB are faked) ---
+async def _run_complete_real(monkeypatch, art, client, brand=BRAND, **kw):
+    from rankforge_backend.services import revise
+
+    state = {"art": dict(art)}
+    calls: list = []
+    monkeypatch.setattr(fm.gen_svc, "get_article", lambda d, a: dict(state["art"]))
+    monkeypatch.setattr(fm.brands, "get_profile", lambda d, b: brand)
+    monkeypatch.setattr(fm, "ensure_agent", AsyncMock(return_value="agent"))
+    monkeypatch.setattr(revise, "ensure_meta_agent", AsyncMock(return_value="meta"))
+
+    def _upd(d, a, **f):
+        calls.append(("update", sorted(f)))
+        state["art"].update(f)
+
+    monkeypatch.setattr(fm.gen_svc, "_update", _upd)
+    monkeypatch.setattr(
+        fm.gen_svc, "snapshot_version",
+        lambda d, article: calls.append(("snapshot", article.get("meta_title"))),
+    )
+    flags = await fm.complete(client, MagicMock(), "a", **kw)
+    return state, calls, flags
+
+
+VALID = {**ART, "summary": S45, "faq": GOOD["faq"], "category": "rag"}
+
+
+async def test_real_fix_meta_snapshots_before_its_write(monkeypatch):
+    art = {**VALID, "title": "t" * 80, "meta_title": "m" * 70}
+    c = _client({"meta_title": "Short meta", "meta_description": "A description."})
+    state, calls, _ = await _run_complete_real(monkeypatch, art, c)
+    assert calls[0] == ("snapshot", "m" * 70)
+    assert ("update", ["meta_description", "meta_title"]) in calls
+    assert state["art"]["meta_title"] == "Short meta"
+
+
+async def test_real_enforce_meta_snapshots_before_its_write(monkeypatch):
+    # The meta model gives nothing usable, so only the deterministic clamp writes.
+    art = {**VALID, "title": "t" * 80, "meta_title": None}
+    c = _raw_client("not json")
+    state, calls, _ = await _run_complete_real(monkeypatch, art, c)
+    assert calls == [("snapshot", None), ("update", ["meta_title"])]
+    assert 0 < len(state["art"]["meta_title"]) <= 60
+
+
+FAQ_BODY = "# T\n\n## Intro\n\ntext\n\n## Frequently asked questions\n\n### Q?\n\nA."
+NO_FAQ_BRAND = {**BRAND, "blog_profile": {**PROF, "faq": {"enabled": False}}}
+
+
+async def test_complete_keeps_body_faq_when_profile_faq_is_disabled(monkeypatch):
+    art = {**VALID, "content_md": FAQ_BODY, "faq": None}
+    c = _client()
+    state, calls, _ = await _run_complete_real(monkeypatch, art, c, NO_FAQ_BRAND)
+    assert calls == [] and state["art"]["content_md"] == FAQ_BODY
+    c.run_agent.assert_not_called()
+
+
+async def test_complete_body_faq_only_snapshots_before_writing(monkeypatch):
+    art = {**VALID, "content_md": FAQ_BODY}
+    state, calls, _ = await _run_complete_real(monkeypatch, art, _client())
+    assert calls == [("snapshot", None), ("update", ["content_md"])]
+    assert "Frequently asked" not in state["art"]["content_md"]
+
+
+# --- review r2: rule boundaries ---
+P = BlogProfile.model_validate(PROF)
+
+
+@pytest.mark.parametrize("art,over", [
+    ({"title": "t" * 60}, False),
+    ({"title": "t" * 61}, True),
+    ({"title": "t" * 61, "meta_title": "m" * 60}, False),
+    ({"title": "T", "meta_title": "m" * 60}, False),
+    ({"title": "T", "meta_title": "m" * 61}, True),
+    ({"title": "T", "meta_description": "d" * 160}, False),
+    ({"title": "T", "meta_description": "d" * 161}, True),
+])
+def test_meta_over_limits_boundaries(art, over):
+    assert fm.meta_over_limits(art, P) is over
+
+
+def _faq(n):
+    return [{"q": f"Q{i}?", "a": "A."} for i in range(n)]
+
+
+@pytest.mark.parametrize("field,value,fails", [
+    ("faq", _faq(2), True), ("faq", _faq(3), False), ("faq", _faq(6), False),
+    ("faq", _faq(7), True), ("faq", _faq(9), True),
+    ("category", "AI agents", True), ("category", None, True),
+    ("category", "agents", False),
+    ("summary", " ".join(["w"] * 39), True), ("summary", " ".join(["w"] * 40), False),
+    ("summary", " ".join(["w"] * 60), False), ("summary", " ".join(["w"] * 61), True),
+])
+def test_failing_fields_boundaries(field, value, fails):
+    art = {**VALID, field: value}
+    assert (field in fm.failing_fields(art, P)) is fails
+    assert fm.failing_fields(art, P) <= {field}
+
+
+# --- review r2 N4 / K8: force regenerates summary + FAQ even when they pass ---
+NEW_S = " ".join(["fresh"] * 44) + " end."
+NEW = {"category": "agents", "summary": NEW_S, "faq": _faq(5)}
+
+
+async def test_complete_without_force_leaves_valid_fields(monkeypatch):
+    c = _client(NEW)
+    state, calls, _ = await _run_complete_real(monkeypatch, VALID, c)
+    assert calls == [] and state["art"]["summary"] == S45
+    c.run_agent.assert_not_called()
+
+
+async def test_complete_force_regenerates_valid_summary_and_faq(monkeypatch):
+    c = _client(NEW)
+    state, calls, flags = await _run_complete_real(
+        monkeypatch, VALID, c, force=True
+    )
+    assert flags == []
+    assert state["art"]["summary"] == NEW_S and state["art"]["faq"] == _faq(5)
+    assert state["art"]["category"] == "agents"  # no cluster: category too
+    assert calls[0][0] == "snapshot"
+
+
+async def test_complete_force_never_writes_invalid_values(monkeypatch):
+    bad = {"category": "AI agents", "summary": "too short", "faq": _faq(1)}
+    art = {**VALID, "category": "agents"}  # the fallback key would be "rag"
+    state, calls, flags = await _run_complete_real(
+        monkeypatch, art, _client(bad, bad), force=True
+    )
+    assert calls == []  # nothing passed the rules: no write, no version
+    assert state["art"]["summary"] == S45 and state["art"]["faq"] == GOOD["faq"]
+    assert state["art"]["category"] == "agents"  # never swapped for the fallback
+    assert "category kept as agents (the model's was not a listed key)" in flags
+
+
+async def test_complete_force_leaves_category_to_the_cluster(monkeypatch):
+    monkeypatch.setattr(fm.clusters_svc, "get_cluster",
+                        lambda d, cid: {"id": cid, "category": "rag"})
+    c = _client(NEW)
+    art = {**VALID, "cluster_id": "c1"}
+    state, calls, _ = await _run_complete_real(monkeypatch, art, c, force=True)
+    assert state["art"]["category"] == "rag"
+    assert ("update", ["faq", "summary"]) in calls
+
+
+# --- review r2 minor: a defaulted category is flagged ---
+async def test_generate_flags_a_defaulted_category(deps):
+    flags = await fm.generate(_raw_client("nope", "still nope"), MagicMock(), "a")
+    key = fm.blog_rules.fallback_category(P, None)
+    assert f"category defaulted to {key}" in flags
+    assert _written(deps)["category"] == key
+
+
+# --- review r2 N4 / K8: the route takes {"force": bool} and reports `changed` ---
+def test_frontmatter_route_force_defaults_to_false(monkeypatch):
+    complete = AsyncMock(return_value=[])
+    client, _ = _fm_route(monkeypatch, VALID, complete=complete)
+    assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 200
+    assert complete.await_args.kwargs.get("force") is False
+    resp = client.post(f"/api/articles/{AID}/frontmatter", json={})
+    assert resp.status_code == 200
+    assert complete.await_args.kwargs.get("force") is False
+
+
+def test_frontmatter_route_passes_force(monkeypatch):
+    complete = AsyncMock(return_value=[])
+    client, _ = _fm_route(monkeypatch, VALID, complete=complete)
+    resp = client.post(f"/api/articles/{AID}/frontmatter", json={"force": True})
+    assert resp.status_code == 200
+    assert complete.await_args.kwargs.get("force") is True
+
+
+def test_frontmatter_route_reports_changed_fields(monkeypatch):
+    async def _complete(pb, db, aid, *, force=False):
+        # Rewrite the summary; re-save the same FAQ (keys in jsonb order) and the
+        # same category — neither is a change.
+        art = _ROUTE["state"]["art"]
+        art.update(summary=NEW_S, category=art["category"],
+                   faq=[{"a": x["a"], "q": x["q"]} for x in art["faq"]])
+        return []
+
+    client, _ = _fm_route(monkeypatch, VALID, complete=_complete)
+    resp = client.post(f"/api/articles/{AID}/frontmatter")
+    assert resp.status_code == 200
+    assert resp.json()["changed"] == ["summary"]
+
+
+def test_frontmatter_route_changed_is_empty_when_nothing_moved(monkeypatch):
+    client, _ = _fm_route(monkeypatch, VALID)
+    resp = client.post(f"/api/articles/{AID}/frontmatter")
+    assert resp.status_code == 200 and resp.json()["changed"] == []
+
+
+# --- review r2 N2 / K9: an invalid stored profile is not "no profile" ---
+def test_frontmatter_route_409_names_the_invalid_profile(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        "id": AID, "business_id": BID, "org_id": UUID(ADMIN_ORG),
+    }
+    bad = {**PROF, "link": {"min": 1}}  # misspelled key
+    monkeypatch.setattr(
+        brands_svc, "get_profile", lambda d, bid: {"id": BID, "blog_profile": bad}
+    )
+    resp = _route_client(db).post(f"/api/articles/{AID}/frontmatter")
+    assert resp.status_code == 409
+    assert resp.json()["detail"].startswith("blog profile is invalid: ")
+    assert "link" in resp.json()["detail"]
+
+
+def test_frontmatter_route_409_without_profile_says_so(monkeypatch):
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        "id": AID, "business_id": BID, "org_id": UUID(ADMIN_ORG),
+    }
+    monkeypatch.setattr(
+        brands_svc, "get_profile", lambda d, bid: {"blog_profile": None}
+    )
+    resp = _route_client(db).post(f"/api/articles/{AID}/frontmatter")
+    assert resp.json()["detail"] == "brand has no blog profile"
+
+
+# --- coordinator r2 follow-ups ---
+def test_frontmatter_route_releases_claim_when_the_before_read_fails(monkeypatch):
+    from rankforge_backend.services import generation as g
+
+    client, updates = _fm_route(monkeypatch, VALID)
+    n = {"calls": 0}
+
+    def _get(d, a):
+        n["calls"] += 1
+        if n["calls"] == 2:  # 1 = the guard; 2 = the read right after the claim
+            raise RuntimeError("db hiccup")
+        return dict(_ROUTE["state"]["art"])
+
+    monkeypatch.setattr(g, "get_article", _get)
+    client = TestClient(client.app, raise_server_exceptions=False)
+    assert client.post(f"/api/articles/{AID}/frontmatter").status_code == 500
+    assert updates and updates[-1]["generation_status"] == "done"
+
+
+@pytest.mark.parametrize("force", ["yes", 1, "true"])
+def test_frontmatter_route_rejects_a_non_bool_force(monkeypatch, force):
+    complete = AsyncMock(return_value=[])
+    client, _ = _fm_route(monkeypatch, VALID, complete=complete)
+    resp = client.post(f"/api/articles/{AID}/frontmatter", json={"force": force})
+    assert resp.status_code == 422
+    complete.assert_not_awaited()
