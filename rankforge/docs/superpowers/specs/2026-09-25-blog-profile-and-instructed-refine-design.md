@@ -1,7 +1,7 @@
 # Per-brand blog profile + instruction-driven refine — Design
 
 **Date:** 2026-09-25
-**Status:** Approved (design); awaiting spec review
+**Status:** Implemented (PR #26)
 **Repo:** `example-apps/rankforge`
 
 ## Problem
@@ -75,7 +75,7 @@ alter table public.article_versions
 No new tables, so RLS is unchanged. `_ARTICLE_COLUMNS` and the article models gain
 the three new fields.
 
-### `blog_profile` shape (Pydantic `BlogProfile`, `models/business.py`)
+### `blog_profile` shape (Pydantic `BlogProfile`, `models/blog.py`)
 
 ```jsonc
 {
@@ -98,10 +98,14 @@ the three new fields.
 ```
 
 Validation:
+- Every model is `extra="forbid"` (`_Strict` base): a misspelled key (`link` for
+  `links`) raises instead of silently falling back to defaults with the export
+  rules switched off.
 - `min ≤ max` everywhere.
-- `hub_pages[].path` starts with `/`.
-- `topics` holds 1–10 phrases, each at least 4 characters. The same minimum as
-  the linker's `_MIN_ANCHOR_LEN` keeps generic matches out.
+- `hub_pages[].path` starts with `/` and is rejected if it starts with `//` or
+  `/\` (protocol-relative — the link would leave the brand's site).
+- `topics` holds 1–10 phrases, each 4–80 characters. The same minimum as the
+  linker's `_MIN_ANCHOR_LEN` keeps generic matches out.
 
 Hub paths render against the brand's `domain`. A hub is a site page, not an
 article, so `url_pattern` doesn't apply.
@@ -111,9 +115,10 @@ where `blog_profile` is optional and nullable.
 
 ### Powabase seed (`scripts/seed_powabase_blog_profile.py`)
 
-A script that writes the Powabase profile to the named brand:
+`uv run python scripts/seed_powabase_blog_profile.py --brand-id <uuid>` writes the
+Powabase profile to exactly one brand, by id (names aren't unique across orgs):
 - the six website categories, with `rag`, `agents`, `backend` and `coding-agents`
-  marked `technical`;
+  marked `technical`, `models` and `enterprise` not;
 - the ten hub pages: `/supabase-alternative/`, `/firebase-alternative/`,
   `/convex-alternative/`, `/neon-alternative/`, `/pinecone-alternative/`,
   `/langchain-alternative/`, `/backend-as-a-service/`, `/self-hosted-supabase/`,
@@ -121,7 +126,11 @@ A script that writes the Powabase profile to the named brand:
 - summary 40–60 words, FAQ 3–6, meta 60/160, links 3–5 with a trailing slash;
 - stance `favor_brand`.
 
-It is idempotent: it overwrites only `blog_profile`.
+It validates the profile through `BlogProfile` and stores the validated
+`model_dump()` (defaults filled in), not the raw literal. It also sets
+`url_pattern` to `https://powabase.ai/blog/{slug}/` if the brand's is empty. One
+transaction: it rolls back and exits non-zero unless exactly one row matched the
+given id, so it can never silently update zero or several brands.
 
 ## 2. Generation
 
@@ -143,12 +152,12 @@ Without one, the pipeline is unchanged.
   The competitor no-hyperlink rule stays.
 - **Internal-link block:** see §3.
 
-### Frontmatter step (new `services/frontmatter.py`)
+### Frontmatter step (`services/frontmatter.py`)
 
 This runs after the body is written and before fact-check and GEO, as one agent
-call (`rankforge-frontmatter`, Sonnet-class, JSON output). It receives the title,
-body, brand name, stance, profile categories, and the cluster category if one
-exists. It returns:
+call (`rankforge-frontmatter`, Sonnet-class, JSON output). `generate()` asks for
+the title, body, brand name, stance, profile categories, and the cluster category
+if one exists, and gets back:
 
 ```json
 { "category": "rag", "summary": "…", "faq": [{ "q": "…", "a": "…" }] }
@@ -161,10 +170,11 @@ Prompt rules:
   "How does {brand} handle X?". Answers are ≤60 words.
 - Under `favor_brand`, no brand limitation appears in the summary or FAQ.
 
-Category: **the cluster's `category` wins** when set. Otherwise the agent picks a
-key from the profile.
+Category: **the cluster's `category` wins** when set (`blog_rules.validate_frontmatter`
+checks it ahead of the model's own answer). Otherwise the agent picks a key from
+the profile.
 
-**Checks and repair** (`validate_frontmatter`, pure, unit-tested):
+**Checks and repair** (`blog_rules.validate_frontmatter`, pure, unit-tested):
 
 1. `category` must be a known key. If not, use the cluster category, then the
    first `technical` category.
@@ -175,17 +185,36 @@ key from the profile.
    retry once, then flag.
 4. Items with an empty `q` or `a` are dropped before counting.
 
+**Retry safety:** `generate()` asks once, and only retries (with the specific
+problems named) when that attempt has flags. It keeps whichever of the two
+attempts has **fewer** flags (the first on a tie), and — per field — writes only
+values that pass the rules (`field_ok`). An unparseable reply, or a retry that's
+worse than the first attempt, never overwrites a stored value. `failing_fields()`
+limits a call to the fields that currently fail, so "Generate summary & FAQ" and
+the post-generation step never touch a field that already passes.
+
 A flagged field shows as a warning on the article and **blocks export** (§4). It
 never blocks generation.
 
-### Meta (`revise.fix_meta`)
+`complete()` is the entry point used after generation and by "Generate summary &
+FAQ" / "Fix automatically": it touches only what's wrong — `fix_meta` +
+`enforce_meta` when the title/meta exceed the profile's limits, `generate()` for
+`failing_fields()`, and stripping a body FAQ section when one exists under an
+FAQ-enabled profile — and snapshots the article once, right before its first
+write, so the whole fix is one undo point.
+
+### Meta (`revise.fix_meta` + `frontmatter.enforce_meta`)
 
 - `fix_meta` receives the profile's `title_max` and `description_max` and treats
-  them as hard limits.
+  them as hard limits. `refine()` (§5) now passes the same limits when the
+  brand has a profile, instead of falling back to the 60/160 defaults.
 - When the H1 `title` exceeds `title_max`, it writes `meta_title` of at most
   `title_max` characters and leaves `title` as is.
-- A deterministic backstop truncates at a word boundary if the model still
-  overruns.
+- `enforce_meta` is the deterministic backstop, run right after `fix_meta` at
+  every call site (generation, `complete()`, refine): it clamps `meta_title` /
+  `meta_description` to the limits at a word boundary if the model still
+  overran, and always derives a `meta_title` when the H1 is long and the model
+  gave none.
 - Lengths are counted in code points, matching `check-meta.ts`.
 
 ### GEO (`geo_optimize.py`)
@@ -196,20 +225,33 @@ never blocks generation.
 
 ### Scorer (`scoring.py`)
 
-- **`_sentences` fix:** before splitting on `[.!?]`, also split on newlines that
-  begin a table row (`|`), a list item (`-`, `*`, `+`, `\d+.`) or a heading
-  (`#`). Table separator rows are dropped.
+- **`_sentences` fix:** splits on `[.!?]+` **and every newline**, not only ones
+  that open a table row, list item or heading. This is deliberate, not an
+  under-scoping: after `_clean` strips markdown, a table row, list item or
+  heading is already its own line with no terminal punctuation, and an LLM's
+  markdown prose doesn't hard-wrap — so a bare newline inside a real paragraph
+  is rare enough that splitting on every newline is the simpler, equally safe
+  rule.
   - Fixes: comparison tables currently cost about 10 readability points.
   - Applies to every brand. It is a bug fix.
 - **Title/meta length signals:** the upper bound comes from the profile when
   present, and the defaults (60/160) stay.
-- **New `internal_links` SEO signal** (profile brands only):
-  - It counts links in the body that resolve to the brand's own articles or hub
-    pages. `rf:article/{id}` tokens are resolved first, the same way the existing
-    link resolution in `score_and_store` does.
+- **New `internal_links` SEO signal** (profile brands only, `seo_kwargs_for` /
+  `seo_brand_kwargs` in `scoring.py`):
+  - It counts links whose target falls under the brand's blog URL prefix
+    (derived from `url_pattern`) or exactly matches a hub page URL — by
+    **target**, not by host, so `/pricing` on the brand's own domain doesn't
+    count and a blog on a subdomain still scores. A brand with no `url_pattern`
+    falls back to counting by host. `rf:article/{id}` tokens are resolved to
+    real URLs first, the same resolution `score_and_store` uses everywhere else.
   - Score band: `links.min`–`links.max`.
   - Weight is taken proportionally from the other SEO signals, so totals stay
     comparable.
+  - `scoring.score_seo_for(db, article, resolved_md, *, brief=None)` is the
+    entry point that assembles these brand-derived kwargs and scores an
+    article's resolved body; it's used by full scoring, the revise commit gate
+    (`revise._det_scores`), and the per-link-accept rescore (§3), so all three
+    agree on what counts as an internal link.
 
 ## 3. Linking
 
@@ -264,13 +306,18 @@ mandatory.
 
 ### Relink patch notes
 
-`GET /api/relink/{brand_id}/patch-notes` returns the brand's pending suggestions
-as Markdown, grouped by article slug:
+`GET /api/business-profiles/{business_id}/relink/patch-notes` returns the pending
+suggestions on **published** articles only (drafts are excluded — the site repo
+only has published posts to patch), as Markdown grouped by article:
 
 ```
-### /blog/<slug>/
+### <canonical URL>
 - "<anchor>" → <url>  (in: "…sentence containing the anchor…")
 ```
+
+Each heading is the article's real canonical URL (`linking.canonical_url`, built
+from the brand's `url_pattern`), falling back to `/blog/<slug>/` only when no
+canonical URL can be resolved — not a hardcoded `/blog/{slug}/` for every brand.
 
 A "Copy as patch notes" button on the relink UI calls it. Suggestions stay staged,
 and nothing is written to published content.
@@ -297,19 +344,32 @@ draft: false
 - Strings are JSON-quoted, as today.
 - Brands without a profile get today's exact output.
 
-**Pre-export check** (`validate_for_export(article, profile) -> list[str]`):
+**Pre-export check** (`blog_rules.export_issues(article, profile) -> list[str]`):
 - category missing or unknown;
 - title and meta over limits (checking `metaTitle` when present);
 - summary or FAQ outside the bounds when enabled;
 - the body contains an `## FAQ`- or `## Frequently asked`-style heading while FAQ
   is enabled.
 
-Export and publish return **422 with the list** when it's non-empty. The publish
-dialog shows the list, with a "Fix automatically" action that runs the
-frontmatter step plus `fix_meta`.
+Export and publish return **422** (`{"export_issues": [...]}`) when the list is
+non-empty. `export()` only runs this gate for the `markdown` format — an HTML
+export is never blocked, since it isn't going into the target blog's build.
+`publish()` runs it unconditionally (any target type), before any side effect
+(webhook delivery, flipping status), regardless of export format. The publish
+dialog shows the list, with a "Fix automatically" action that calls
+`POST /frontmatter`.
+
+**Invalid stored profile:** if `blog_profile` fails `BlogProfile` validation (a
+hand-edited row, or a schema change), `blog_rules.profile_of` logs a warning and
+returns `None` everywhere else (generation, scoring, linking — legacy behavior).
+Export and publish are the exception: they call `invalid_profile_reason` and
+raise `ExportBlocked(["blog profile is invalid: …"])` for markdown/publish rather
+than silently falling through to legacy mode, which would also switch the export
+rules off. HTML export is unaffected either way.
 
 **Existing articles:** `POST /api/articles/{id}/frontmatter` runs the frontmatter
-step and `fix_meta` on demand. This is the "Generate summary & FAQ" button.
+step and `fix_meta` on demand. This is the "Generate summary & FAQ" button; see
+§5 for its response shape.
 
 ## 5. Instructed refine / rework
 
@@ -322,67 +382,128 @@ step and `fix_meta` on demand. This is the "Generate summary & FAQ" button.
   - `targets` together with `instructions` → **422**.
   - Uses the same `try_begin_refine` claim (409 when busy), `article:refine` rate
     limit, background task, progress steps and post-refine link check as today.
+- `POST /api/articles/{id}/frontmatter` (profile brands only; 409 if no profile):
+  claims the article (`try_begin_refine(total=1)`, 409 if a generation/refine is
+  already running), runs `frontmatter.complete()`, releases the claim in a
+  `finally` (a previously `failed` article stays `failed`, so "Retry generation"
+  is still offered for an empty draft), and returns
+  `{ "article": <Article>, "export_issues": [str, ...] }` — the issues still
+  open **after** the fix, computed from the fresh row, so the UI never claims
+  "fixed" over a step that left problems. This is the "Generate summary & FAQ" /
+  "Fix automatically" action.
 - `POST /api/articles/{id}/revert`:
-  - Restores the most recent `article_versions` row whose content differs from
-    the current body. The current body is versioned first, so a revert can itself
-    be reverted.
-  - Then re-runs fact-check, GEO, scoring and link check.
-  - Returns 409 if a refine is running, 404 if there is no earlier version.
-  - Frontmatter fields (title, meta, summary, FAQ) are **not** versioned today.
-    `article_versions` gains a nullable `frontmatter jsonb` snapshot, written with
-    each version, so revert restores them too.
+  - Restores the newest `article_versions` row whose body **or** frontmatter
+    (title, meta, category, summary, FAQ — nulls included) differs from the
+    current article. The current state is versioned first, so a revert can
+    itself be reverted — and reverting twice in a row **toggles**: the second
+    revert's newest-differing row is the snapshot the first revert just took.
+  - Only the most recent 20 versions are scanned; an older differing version is
+    not reached.
+  - Then re-runs fact-check, GEO, scoring and link check in the background
+    (the route returns as soon as the version is restored).
+  - Returns 409 if a refine is running, 404 if none of the scanned versions
+    differs.
+  - `article_versions.frontmatter jsonb` (migration `0036`) is written with
+    every version — including a version taken for a plain frontmatter edit
+    (`PATCH /api/articles/{id}` changing category/summary/FAQ/meta), not only
+    body rewrites — so revert restores frontmatter, not just the body.
+- `PATCH /api/articles/{id}`: `category`, `summary`, `faq` and `meta_title` are
+  **clearable** — an explicit `null` for one of these writes `NULL`, instead of
+  being dropped like every other omitted-vs-`null` field. This is what lets the
+  frontmatter editor's "— none —" category and an emptied summary/FAQ actually
+  save.
 
-### Service (`revise._instructed_pass`)
+### Service (`revise.instructed_pass`)
 
 This is a single pass, not a loop:
 
-1. Load the article, brief, blog profile, and grounding excerpts
-   (`_diverse_excerpts`).
+1. Load the article, its brand's blog profile, the brief, and grounding
+   excerpts (`_article_context` + `_diverse_excerpts`). Mask any `rf:article/…`
+   refs already in the body (`linking.mask_refs`) so a full-body LLM rewrite
+   can't mangle or drop them; they're restored (`restore_refs`) after.
 2. Call the reviser agent with:
-   - brand name and stance, and the profile's link and frontmatter rules;
+   - the mode rule and the profile's link/meta/summary/FAQ/stance rules
+     (`_profile_rules`);
+   - the sources it may cite;
    - the current frontmatter `{title, meta_title, meta_description, summary, faq}`;
-   - the current body;
-   - excerpts;
-   - the mode rule and your instructions, delimited as data.
+   - the editor's instructions, delimited `<<< … >>>` and never interpolated
+     anywhere else in the prompt (they're untrusted user text);
+   - the masked body.
 3. **Mode rules:**
-   - `refine`: "Apply only what the instructions ask. Keep the outline, heading
-     text, and existing links unless the instruction targets them."
+   - `refine`: "Apply ONLY what the instructions ask. Keep the outline, the
+     heading text and the existing links unless the instructions target them."
    - `rework`: "You may restructure, re-outline, change the angle or rewrite
-     sections. Keep every factual claim supported by the excerpts. Keep internal
-     links within the link rules."
-4. **Output:** JSON
-   `{ "content_md": str, "frontmatter"?: { changed fields only } }`.
-5. **Checks** (failure → no write, and the refine reports an error):
-   - `content_md` is non-empty.
-   - In `refine` mode it is ≥60% of the current length. `rework` has no floor.
-   - Returned frontmatter goes through `validate_frontmatter` and the meta
-     backstop.
-   - Competitor links are stripped deterministically (`strip_competitor_links`).
-   - Under an FAQ-enabled profile, a body FAQ section is removed.
-6. **Write:** body and frontmatter together (versioned). Then fact-check, GEO,
-   scoring, and link check. **No score veto.** The previous scores are stored on
-   the progress record so the UI can show the change.
-7. **Failure semantics** match `_targeted_loop`:
-   - an infrastructure failure before the agent responds raises, and the article
-     is marked with a refine error;
-   - a failure after the write restores the previous body and score snapshot.
+     sections. Keep every factual claim supported by the sources. Keep
+     internal links within the link rules." — and it explicitly overrides the
+     reviser's own system-prompt instinct to preserve structure, for this pass
+     only, while still holding the brand's stance and the no-competitor-link
+     rule.
+4. **Output:** JSON `{ "content_md": str, "frontmatter"?: { changed fields
+   only } }`. If the reply isn't that JSON shape but looks like a full article
+   (starts with `#`, optionally fenced), it's accepted as `content_md` with no
+   frontmatter change — the reviser's own system prompt sometimes wins out over
+   the JSON ask, and a good revision shouldn't be discarded for a formatting
+   miss.
+5. **Checks** (failure → `InstructedRefineError`, article left unchanged):
+   - the agent errored, or the stream had no `complete` event (cut off) — this
+     catches a truncated `rework` reply, which has no length floor to catch it
+     otherwise;
+   - `content_md` is non-empty after unwrapping;
+   - in `refine` mode it is ≥60% of the current length; `rework` has no floor;
+   - competitor links are stripped deterministically (`strip_competitor_links`);
+   - under an FAQ-enabled profile, a body FAQ section is removed.
+6. **Frontmatter overwrite protection:** a blank `category`, an empty `""`
+   `summary`, or an empty `faq` list in the model's reply is **ignored** — it
+   never overwrites a stored value. Only non-blank incoming fields are merged
+   with what's currently stored and run through `blog_rules.validate_frontmatter`
+   (which — per the cluster's `category` wins) prefers the cluster's category
+   over anything the model returned.
+7. **Write:** the article is versioned first (so the whole pass is one undo
+   point), then body + any validated frontmatter fields are written together,
+   `enforce_meta` clamps meta to the profile's limits, and fact-check, GEO and
+   scoring re-run. **No score veto.** A snapshot of body, frontmatter and scores
+   taken before the write is restored, and the exception re-raised, if anything
+   in that post-write pipeline fails. The scores from before the pass are
+   carried on `progress.before` so the UI can show the change; any frontmatter
+   flags land in `progress.frontmatter_flags`.
+8. **Failure semantics** (`routes/articles.py:_refine_and_finish`):
+   - `InstructedRefineError` (nothing usable came back) → the article is
+     **unchanged**, `generation_status` becomes `"done"`, and
+     `progress = {"phase": "done", "refine_error": "<reason>", "mode": …,
+     "word_count": …}`. The UI reports the reason and never offers "Retry
+     generation" over an article that's actually fine.
+   - Any other exception (an infrastructure failure before the agent could even
+     respond) sets `generation_status = "failed"`.
+   - "Retry generation" itself only makes sense when there's nothing to lose:
+     the button is shown only when `generation_status === "failed"` **and**
+     `content_md` is empty/whitespace, and `run_generation_task`'s re-draft
+     path now versions a non-empty `content_md` before overwriting it either
+     way, so a stray retry can't destroy hand edits or an earlier refine.
 
 ## 6. Frontend
 
-- **Article page:** a "Refine with instructions" card with:
-  - a textarea (4000-character counter);
-  - a Refine/Rework segmented toggle with one-line help for each;
-  - a Run button, disabled while a refine is running.
-
-  After a run, a banner shows score changes (SEO/GEO/Readability before → after)
-  and a **Revert to previous version** button.
-- **Article page, frontmatter panel** (profile brands only):
-  - category select;
-  - summary textarea with a live word count against the bounds;
-  - FAQ list editor (add, remove, reorder, 3–6);
-  - `metaTitle` field with a character count;
-  - "Generate summary & FAQ" button;
-  - export warnings from `validate_for_export`.
+- **Article page, "Post" tab** (`PostPanel.tsx`) — a tab alongside Comments,
+  Links, SEO, GEO and Readability, always shown (not a card on the main body):
+  - "Refine with instructions": a textarea (4000-character counter), a
+    Refine/Rework segmented toggle with one-line help for each, and a Run
+    button, disabled while a refine or revert is in flight.
+  - After a run, a banner shows score changes (SEO/GEO/Readability before →
+    after) from `progress.before`.
+  - A **Revert to previous version** button (confirm dialog), always shown.
+  - The frontmatter editor (`PostFrontmatterEditor.tsx`), rendered inside the
+    same tab **only when the brand has a blog profile**:
+    - category select (with a "— none —" option that clears it);
+    - summary textarea with a live word count against the bounds;
+    - FAQ list editor (add, remove, reorder, capped at `faq.max`);
+    - meta title field with a character count against `meta.title_max`;
+    - "Generate summary & FAQ" button (calls `POST /frontmatter`);
+    - a client-side echo of the export-check warnings (length/count rules only
+      — the body-FAQ-heading check stays server-side, authoritative on 422);
+    - Save sends explicit `null` for an emptied category/summary/meta title so
+      the clear actually persists (§5).
+- **Article page, failed generation:** "Retry generation" is offered only when
+  `generation_status === "failed"` **and** `content_md` is empty/whitespace —
+  never over a draft that already has content, instructed-refine failure or not.
 - **Brand settings → "Blog profile":** a structured form with category rows
   (key, label, description, technical), hub-page rows (path, title, topics),
   summary and FAQ toggles with bounds, meta limits, link bounds and trailing
@@ -393,7 +514,27 @@ This is a single pass, not a loop:
 - **Publish dialog:** shows the pre-export check list and a "Fix automatically"
   action.
 
-## 7. Testing
+## 7. No-profile brands
+
+Goal 2 is that a brand with no `blog_profile` behaves exactly as before this
+work — legacy `render_markdown` output is byte-identical, and every prior test
+passes unchanged. A few small, deliberate exceptions apply to every brand,
+profile or not, because they're general fixes or shared machinery:
+
+- `restore_version` / revert now also restore frontmatter (title, meta,
+  category, summary, FAQ) from a version that recorded it, not only the body.
+- A version is now also taken on a plain frontmatter edit (`PATCH` changing
+  category/summary/FAQ/meta), not only on a body change.
+- The per-link-accept rescore (§3, `apply_suggestion`) now scores the
+  link-resolved body and includes competitor-host detection
+  (`scoring.score_seo_for`), where it previously scored the raw body with no
+  brand context.
+- A re-draft (`run_generation_task` re-running over an existing article, e.g.
+  via "Retry generation") now versions a non-empty `content_md` first.
+- The `_sentences` readability fix (§2) and the linking-suggestion de-duplication
+  fix (§3) apply to every brand — they're bug fixes, not profile behavior.
+
+## 8. Testing
 
 Hermetic `uv run pytest`, mocking at the `Database` / Powabase client boundary as
 existing tests do:
@@ -406,29 +547,37 @@ existing tests do:
   - profile vs. no-profile golden outputs;
   - `metaTitle` emission rules;
   - YAML quoting of summary/FAQ containing `:` or `#`.
-- `validate_for_export`: each rule, including the body-FAQ heading detection.
-- `link_candidates`: ordering, per-category cap of 2, non-technical exclusion,
-  hub topic match.
+- `export_issues`: each rule, including the body-FAQ heading detection.
+- `link_candidates`: ordering, per-category cap of 2, non-technical exclusion
+  (except structural), hub topic match.
 - Trailing-slash rendering: with and without an extension, idempotence.
 - Mention layer with hubs: `target_article_id` null, cap from profile.
-- `_sentences`: table rows, lists and headings as boundaries. A regression test
-  that a table-heavy fixture no longer loses readability points.
-- `internal_links` signal: counts resolved `rf:` tokens and hub URLs, ignores
-  external links.
+- `_sentences`: table rows, lists and headings (every newline) as boundaries. A
+  regression test that a table-heavy fixture no longer loses readability points.
+- `internal_links` signal: counts links by blog-prefix/hub target, not host;
+  ignores external links.
+- Frontmatter step (`generate`/`complete`): retry only on flags, keep the
+  attempt with fewer flags, write only fields that pass, `failing_fields` scope.
 - Instructed refine:
-  - both modes;
+  - both modes, including the `rework` structure-override wording;
   - `targets`+`instructions` → 422, and mode without instructions → 422;
-  - refine length floor, rework no floor;
-  - frontmatter changes validated;
+  - refine length floor, rework's incomplete-stream check instead of a floor;
+  - a blank/empty model frontmatter value never overwrites a stored one; the
+    cluster's category wins over the model's;
   - rollback on a failure after the write;
-  - raise on agent failure before any work.
-- Revert: restores body and frontmatter, versions current first, 404 with no
-  earlier version, 409 when busy.
-- No-profile brands: existing tests pass unchanged, which is the regression guard
-  for goal 2.
+  - raise on agent failure before any work;
+  - `POST /frontmatter` response shape and article-claiming (409 when busy).
+- Revert: restores body and frontmatter (including explicit nulls), versions
+  current first, chooses the newest differing version among the last 20, 404
+  with no differing version, 409 when busy.
+- No-profile brands: existing tests pass unchanged (the regression guard for
+  goal 2), except the handful of shared-machinery differences in §7.
+
+**Deploy order:** migration `0036_blog_profile.sql` applies before the backend
+that reads/writes the new columns.
 
 **End-to-end acceptance (manual, before PR):**
-1. Seed the Powabase profile.
+1. Seed the Powabase profile (`--brand-id <uuid>`).
 2. Generate 2–3 articles.
 3. Export them into a website worktree's `content/blog/`.
 4. Run `npm run build`. This runs the website's own `parsePost` validation and
