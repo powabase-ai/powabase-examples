@@ -130,12 +130,15 @@ async def update_cluster(
     cluster = _guard_cluster(db, cluster_id, user)
     category_given = "category" in payload.model_fields_set
     if category_given and payload.category is not None:
-        profile = blog_rules.profile_of(brands.get_profile(db, cluster["business_id"]))
-        if profile is None or payload.category not in {c.key for c in profile.categories}:
+        brand = brands.get_profile(db, cluster["business_id"])
+        profile = blog_rules.profile_of(brand)
+        keys = {c.key for c in profile.categories} if profile else set()
+        if payload.category not in keys:
             raise HTTPException(_UNPROCESSABLE, "unknown category")
     category = payload.category if category_given else svc._UNSET
     row = await svc.update_cluster(
-        pb, db, cluster_id, label=payload.label, theme=payload.theme, category=category
+        pb, db, cluster_id,
+        label=payload.label, theme=payload.theme, category=category,
     )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")
