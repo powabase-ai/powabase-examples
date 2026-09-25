@@ -837,3 +837,38 @@ async def test_refine_meta_without_profile_keeps_defaults(monkeypatch):
                         targets=["seo:title_length"])
     assert "title_max" not in fm.await_args.kwargs
     enforce.assert_not_called()
+
+
+async def test_editorial_loop_gates_with_the_db_and_article(monkeypatch):
+    """The voice-rewrite gate must be profile-aware: _editorial_loop hands the db
+    and the article to _accept_revision, which resolves links and scores with the
+    brand's blog profile (a rewrite that drops an internal link then regresses)."""
+    art = {"content_md": "Body here.", "readability_score": None, "title": "T",
+           "meta_title": None, "meta_description": None, "business_id": "b1"}
+    monkeypatch.setattr(revise.gen_svc, "get_article", lambda db, aid: art)
+    monkeypatch.setattr(revise, "ensure_editor_agent", AsyncMock(return_value="ed"))
+    monkeypatch.setattr(revise, "ensure_reviser_agent", AsyncMock(return_value="rv"))
+    monkeypatch.setattr(
+        revise, "_editor_review",
+        AsyncMock(return_value={
+            "verdict": "revise", "reads_human": 40,
+            "notes": [{"quote": "x", "problem": "p", "fix": "f"}],
+        }),
+    )
+    monkeypatch.setattr(revise, "_diverse_excerpts", AsyncMock(return_value="(none)"))
+    monkeypatch.setattr(
+        revise, "_revise_for_voice", AsyncMock(return_value="Body here, reworded.")
+    )
+    seen: dict = {}
+
+    def _gate(cur, new, title, meta, brief, **kw):
+        seen.update(kw)
+        return False  # rejected → the loop stops without writing
+
+    monkeypatch.setattr(revise, "_accept_revision", _gate)
+    upd = MagicMock()
+    monkeypatch.setattr(revise.gen_svc, "_update", upd)
+    db = MagicMock()
+    await revise._editorial_loop(MagicMock(), db, UUID(int=1), {}, None, None, {})
+    assert seen.get("db") is db and seen.get("article") is art
+    assert not any("content_md" in c.kwargs for c in upd.call_args_list)
