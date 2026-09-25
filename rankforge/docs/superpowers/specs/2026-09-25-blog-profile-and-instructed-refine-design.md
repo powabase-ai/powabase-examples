@@ -117,8 +117,9 @@ where `blog_profile` is optional and nullable.
 
 The same routes validate `url_pattern` when it is saved (422 with the reason): it
 must be an absolute `http(s)` URL with a host or a path starting with `/` (not
-`//`), with a `{slug}` or `{id}` token, no `#` fragment and no whitespace. A blank
-value clears it. The response model doesn't re-validate, so a legacy stored
+`//`), with a `{slug}` or `{id}` token, no `#` fragment, no whitespace or control
+characters, and no `\` anywhere (browsers read it as `/`, so `/\evil.com/{slug}`
+would link off-site). A blank value clears it. The response model doesn't re-validate, so a legacy stored
 pattern still reads back unchanged.
 
 ### Powabase seed (`scripts/seed_powabase_blog_profile.py`)

@@ -253,6 +253,9 @@ _BAD_PATTERNS = {
     "https://acme.com/blog/": "{slug}",  # no token
     "https://acme.com/blog/{slug}#top": "#",
     "https://acme.com/blog/ {slug}": "whitespace",
+    # Browsers read '\\' as '/': these render as off-site links (round 3, F2).
+    "/\\evil.com/{slug}": "'\\'",
+    "https://acme.com/\\evil/{slug}": "'\\'",
 }
 
 
