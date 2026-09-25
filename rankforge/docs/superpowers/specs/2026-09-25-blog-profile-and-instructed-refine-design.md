@@ -593,6 +593,8 @@ This is a single pass, not a loop:
   profile is invalid" with "Reset to defaults" and "Start from stored values"
   (the raw object deep-merged onto the defaults, keeping only known, correctly
   typed keys) instead of the form, and Save is disabled until one is chosen.
+  A 422 on save is shown with each error's location (`lib/validationMessage.ts`,
+  e.g. "blog_profile.links.hub_pages.2.path: hub path must start with '/'").
   The profile editor is seeded once per brand id, not on every refetch, so
   unsaved profile edits survive saving the brand card.
 - **Clusters page:** a category select per cluster, from the profile's

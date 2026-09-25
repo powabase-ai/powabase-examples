@@ -4,6 +4,7 @@
  */
 
 import { getAccessToken, getSession, refresh } from "./auth/session";
+import { validationMessage } from "./validationMessage";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -40,20 +41,10 @@ function exportIssuesFrom(body: unknown): string[] | null {
   return Array.isArray(issues) ? (issues as string[]) : null;
 }
 
-/** A FastAPI/pydantic 422 `detail` is a list of `{loc, msg, type}` errors (e.g. a
- *  brand's `url_pattern` failing its validator). Join their `msg`s — minus
- *  pydantic's "Value error, " prefix — with "; ". Null if `detail` isn't that shape,
- *  so the caller falls back to the raw body. */
-export function validationMessage(detail: unknown): string | null {
-  if (!Array.isArray(detail) || detail.length === 0) return null;
-  const msgs: string[] = [];
-  for (const e of detail) {
-    const msg = (e as { msg?: unknown } | null)?.msg;
-    if (typeof msg !== "string") return null;
-    msgs.push(msg.replace(/^Value error, /, ""));
-  }
-  return msgs.join("; ");
-}
+// A FastAPI/pydantic 422 `detail` ({loc, msg} errors) → "location: message; …".
+// Lives in lib/validationMessage.ts so it can be tested without this module's
+// runtime imports.
+export { validationMessage };
 
 /** Turn a backend error into a user-facing message. The expensive AI routes can
  * now return 429 (rate limited) and 409 (a generation/refine already running);
