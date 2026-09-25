@@ -452,6 +452,22 @@ def _insert_suggestion(
     )
 
 
+def _suggestion_key(row: dict[str, Any]) -> str | None:
+    """A suggestion's target key: the `rf:article/<id>` ref, or a hub's URL."""
+    if row.get("target_article_id"):
+        return link_ref(row["target_article_id"])
+    return row.get("target_url")
+
+
+def _pending(db: Database, article_id: UUID) -> list[dict[str, Any]]:
+    """The article's pending suggestions (anchored and gaps) from any run."""
+    return db.fetch_all(
+        "select target_article_id, target_url, anchor_text "
+        "from public.link_suggestions where article_id = %s and status = 'pending'",
+        (article_id,),
+    )
+
+
 def suggest_links(
     db: Database,
     business_id: UUID,
@@ -535,15 +551,16 @@ def suggest_links(
         have = len(_LINK_REF_RE.findall(md)) + sum(
             1 for h in hub_targets(brand) if h["url"] in md
         )
-        need = prof.links.min - have - len([r for r in out if r.get("anchor_text")])
         brief = gen_svc.get_brief(db, art["brief_id"]) if art.get("brief_id") else {}
-        # Targets already covered this run: article candidates are keyed by their
-        # `rf:article/<id>` ref (compare target ids, not rendered URLs), hubs by URL.
+        # Targets that already have a PENDING suggestion — staged this run (`out`) or
+        # by an earlier run (a re-insert of those hits ON CONFLICT and returns None,
+        # so `out` alone would miss them). Article targets are keyed by their
+        # `rf:article/<id>` ref (compare ids, not rendered URLs), hubs by URL. Each
+        # one counts toward the minimum once, and never gets a second (gap) row.
         staged = {
-            link_ref(r["target_article_id"]) if r.get("target_article_id")
-            else r.get("target_url")
-            for r in out
+            k for k in map(_suggestion_key, [*out, *_pending(db, article_id)]) if k
         }
+        need = prof.links.min - have - len([k for k in staged if k not in md])
         for c in link_candidates(db, brand, art, brief or {}):
             if need <= 0 or len(out) >= cap:
                 break

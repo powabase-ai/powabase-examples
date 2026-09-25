@@ -650,7 +650,10 @@ def test_suggest_links_stages_min_gaps(monkeypatch):
         {"id": "aaaaaaaa-0000-0000-0000-000000000002", "title": "Tech2",
          "slug": "tech2", "keywords": [], "canonical_url": None, "category": "rag"},
     ]
-    db.fetch_all.return_value = tech_rows
+    # No pending suggestions yet; every other list query is the published library.
+    db.fetch_all.side_effect = lambda q, p=(): (
+        [] if "from public.link_suggestions" in q else tech_rows
+    )
 
     def _fetch_one(query, params=()):
         if "insert into public.link_suggestions" in query:

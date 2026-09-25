@@ -298,6 +298,10 @@ mandatory.
   `links.min`, the linker stages gap suggestions for the top remaining candidates
   from `link_candidates`. Gaps reuse the existing LLM contextual-sentence path
   (opt-in on accept, as today).
+  - Links already in the body count, and so does every target that already has a
+    `pending` suggestion (anchored or gap), whether this run or an earlier one
+    staged it. Such a target never gets a second (gap) row, so re-running suggest
+    or the relink sweep stages nothing new once the minimum is covered.
 - **Trailing slash:** `canonical_url` and hub rendering append `/` to the path
   when `trailing_slash` is on and the path has no file extension.
   - Link check and relink use the same functions, so they stay consistent.
