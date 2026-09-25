@@ -81,7 +81,9 @@ def fallback_category(profile: BlogProfile, cluster_category: str | None) -> str
     return (tech or keys)[0]
 
 
-def _clean_faq(raw: Any) -> list[dict[str, str]]:
+def clean_faq(raw: Any) -> list[dict[str, str]]:
+    """The FAQ items the target blog accepts: dicts with a non-blank q and a,
+    stripped. Shared by the export check and the renderer so they agree."""
     out = []
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, dict):
@@ -123,7 +125,7 @@ def validate_frontmatter(
 
     faq = None
     if profile.faq.enabled:
-        faq = _clean_faq(raw.get("faq"))[: profile.faq.max]
+        faq = clean_faq(raw.get("faq"))[: profile.faq.max]
         if len(faq) < profile.faq.min:
             flags.append(
                 f"faq has {len(faq)} item(s) (needs {profile.faq.min}-{profile.faq.max})"
@@ -141,7 +143,10 @@ def export_issues(article: dict[str, Any], profile: BlogProfile) -> list[str]:
     elif cat not in keys:
         issues.append(f'unknown category "{cat}"')
     title = article.get("title") or ""
-    shown = article.get("meta_title") if len(title) > profile.meta.title_max else None
+    # Stripped exactly as render_markdown strips it: a blank meta_title emits no
+    # metaTitle, so the plain title is what the site checks.
+    meta_title = (article.get("meta_title") or "").strip()
+    shown = meta_title if len(title) > profile.meta.title_max else None
     effective = shown or title
     if len(effective) > profile.meta.title_max:
         issues.append(
@@ -161,7 +166,7 @@ def export_issues(article: dict[str, Any], profile: BlogProfile) -> list[str]:
                 f"{profile.summary.max_words})"
             )
     if profile.faq.enabled:
-        n = len(_clean_faq(article.get("faq")))
+        n = len(clean_faq(article.get("faq")))
         if not (profile.faq.min <= n <= profile.faq.max):
             issues.append(f"faq has {n} item(s) (needs {profile.faq.min}-{profile.faq.max})")
         if BODY_FAQ_RE.search(article.get("content_md") or ""):

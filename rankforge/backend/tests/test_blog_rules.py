@@ -157,3 +157,21 @@ def test_strip_body_faq_removes_section_until_next_h2():
     assert "## FAQ" not in out and "### Q?" not in out
     assert "## A" in out and "## Conclusion" in out
     assert br.strip_body_faq("# T\n\n## FAQs\n\n### Q\n\nA") == "# T"
+
+
+def test_export_issues_strips_whitespace_meta_title():
+    # render_markdown strips meta_title and emits no metaTitle for "   ", so the
+    # 70-char title is what the site checks: the gate must see the same.
+    issues = br.export_issues(_art(title="x" * 70, meta_title="   "), P)
+    assert any("title is 70" in i for i in issues)
+
+
+def test_export_issues_ignores_blank_faq_items():
+    faq = [{"q": "Q?", "a": "A."}] * 2 + [{"q": "  ", "a": "A."}]
+    issues = br.export_issues(_art(faq=faq), P)
+    assert any("faq has 2" in i for i in issues)
+
+
+def test_clean_faq_is_public_and_drops_blank_items():
+    raw = [{"q": " Q? ", "a": " A. "}, {"q": " ", "a": "x"}, "junk"]
+    assert br.clean_faq(raw) == [{"q": "Q?", "a": "A."}]

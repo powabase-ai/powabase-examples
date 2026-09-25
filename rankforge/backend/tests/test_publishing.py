@@ -570,3 +570,11 @@ def test_refine_route_instructed_pass_spawns(monkeypatch):
     # spawn is mocked, so the coroutine it was handed is never awaited — close it
     # explicitly to avoid a "coroutine was never awaited" warning from the real one.
     spawned.call_args.args[0].close()
+
+
+def test_render_markdown_omits_blank_faq_items():
+    faq = _FAQ + [{"q": "  ", "a": " "}]
+    out = svc.render_markdown(_pa(faq=faq), _BP)
+    fm = out.split("---")[1]
+    assert fm.count("  - q:") == 3
+    assert '"  "' not in fm

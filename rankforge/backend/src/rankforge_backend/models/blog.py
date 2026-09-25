@@ -6,7 +6,7 @@ post passes the target blog's build unedited."""
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _KEY = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 
@@ -100,5 +100,9 @@ class BlogProfile(BaseModel):
 
 
 class FaqItem(BaseModel):
+    # Stripped before the length check, so a whitespace-only q/a is rejected
+    # instead of being stored and breaking the target blog's build.
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     q: str = Field(min_length=1, max_length=300)
     a: str = Field(min_length=1, max_length=1200)

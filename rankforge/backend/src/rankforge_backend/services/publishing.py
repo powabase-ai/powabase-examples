@@ -165,9 +165,10 @@ def render_markdown(
     if profile is not None:
         if profile.summary.enabled and article.get("summary"):
             fm.append(f"summary: {json.dumps(article['summary'])}")
-        if profile.faq.enabled and article.get("faq"):
+        faq = blog_rules.clean_faq(article.get("faq")) if profile.faq.enabled else []
+        if faq:
             fm.append("faq:")
-            for it in article["faq"]:
+            for it in faq:
                 fm.append(f"  - q: {json.dumps(it['q'])}")
                 fm.append(f"    a: {json.dumps(it['a'])}")
     is_draft = article.get("status") not in _PUBLISHABLE_STATUSES

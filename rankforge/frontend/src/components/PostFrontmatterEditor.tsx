@@ -67,7 +67,9 @@ export function PostFrontmatterEditor({
       {
         category: category || null,
         summary: summary || null,
-        faq,
+        // Fully empty rows are dropped; a half-filled row is still sent so the
+        // server rejects it rather than silently losing the typed half.
+        faq: faq.filter((f) => f.q.trim() || f.a.trim()),
         meta_title: metaTitle,
       },
       {
@@ -104,8 +106,8 @@ export function PostFrontmatterEditor({
   // the regex-based body-FAQ check is left to the server's authoritative 422.
   const warnings: string[] = [];
   const effectiveTitle =
-    article.title.length > profile.meta.title_max && metaTitle
-      ? metaTitle
+    article.title.length > profile.meta.title_max && metaTitle.trim()
+      ? metaTitle.trim()
       : article.title;
   if (effectiveTitle.length > profile.meta.title_max) {
     warnings.push(
@@ -125,9 +127,14 @@ export function PostFrontmatterEditor({
         `${profile.summary.max_words})`
     );
   }
-  if (profile.faq.enabled && (faq.length < profile.faq.min || faq.length > profile.faq.max)) {
+  // Count only complete rows, as the server's clean_faq does.
+  const faqCount = faq.filter((f) => f.q.trim() && f.a.trim()).length;
+  if (
+    profile.faq.enabled &&
+    (faqCount < profile.faq.min || faqCount > profile.faq.max)
+  ) {
     warnings.push(
-      `faq has ${faq.length} item(s) (needs ${profile.faq.min}-${profile.faq.max})`
+      `faq has ${faqCount} item(s) (needs ${profile.faq.min}-${profile.faq.max})`
     );
   }
 

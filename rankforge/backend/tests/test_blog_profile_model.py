@@ -66,3 +66,14 @@ def test_requires_at_least_one_category():
 def test_update_accepts_null_to_disable():
     u = BusinessProfileUpdate.model_validate({"blog_profile": None})
     assert "blog_profile" in u.model_fields_set and u.blog_profile is None
+
+
+def test_faq_item_strips_and_rejects_whitespace():
+    from rankforge_backend.models.blog import FaqItem
+
+    item = FaqItem(q="  Why?  ", a=" Because. ")
+    assert item.q == "Why?" and item.a == "Because."
+    with pytest.raises(ValidationError):
+        FaqItem(q="  ", a="A.")
+    with pytest.raises(ValidationError):
+        FaqItem(q="Q?", a="   ")
