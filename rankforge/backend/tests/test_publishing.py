@@ -232,6 +232,45 @@ async def test_publish_webhook_delivery_failure_does_not_go_live(monkeypatch):
     assert "status = 'published'" not in update_sql
 
 
+async def test_publish_webhook_payload_carries_the_frontmatter(monkeypatch):
+    """Review r3 X5: the webhook payload's category/summary/faq are the article's."""
+    from rankforge_backend.services import business_profiles as brands_svc
+
+    db = MagicMock()
+    db.fetch_one.return_value = {
+        "id": "p1", "article_id": AID, "target_type": "webhook",
+        "status": "success", "created_at": "2026-06-20T00:00:00Z",
+    }
+    art = {**ARTICLE, "business_id": BID, "category": "rag", "summary": "S.",
+           "faq": [{"q": "Q?", "a": "A."}]}
+    monkeypatch.setattr(svc.gen_svc, "get_article", lambda db, aid: art)
+    monkeypatch.setattr(brands_svc, "get_profile",
+                        lambda d, b: {"id": BID, "blog_profile": None})
+    monkeypatch.setattr(svc, "validate_webhook_url", lambda u: None)
+    monkeypatch.setattr(svc.linking, "resolve_links", lambda *a, **k: "# body")
+    monkeypatch.setattr(svc.linking, "canonical_url", lambda *a, **k: None)
+    sent: dict = {}
+
+    class _Ok:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            sent.update(json)
+            return MagicMock()
+
+    monkeypatch.setattr(svc.httpx, "AsyncClient", lambda *a, **k: _Ok())
+    await svc.publish(
+        db, AID, target_type="webhook",
+        config={"url": "https://example.com/hook"}, public_base_url="http://x",
+    )
+    assert sent["category"] == "rag" and sent["summary"] == "S."
+    assert sent["faq"] == [{"q": "Q?", "a": "A."}]
+
+
 def _brand_db() -> MagicMock:
     """db whose fetch_one yields an article in the caller's org (passes the
     gen_svc.get_article lookup + assert_brand_access in the publish routes)."""

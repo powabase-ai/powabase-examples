@@ -119,15 +119,20 @@ def rejected_flag(field: str, value: Any, profile: BlogProfile, stored: Any) -> 
     return f'model\'s category "{value}" is not one of this blog\'s keys — {tail}'
 
 
+def enabled_fields(profile: BlogProfile) -> set[str]:
+    """The frontmatter fields this blog uses: always the category, plus the
+    summary and FAQ unless the profile turns them off."""
+    return {"category"} | {
+        f for f in ("summary", "faq") if getattr(profile, f).enabled
+    }
+
+
 def failing_fields(article: dict, profile: BlogProfile) -> set[str]:
-    """The frontmatter fields whose stored value fails the rules (the only ones
-    the frontmatter step regenerates)."""
-    fields = ["category"]
-    if profile.summary.enabled:
-        fields.append("summary")
-    if profile.faq.enabled:
-        fields.append("faq")
-    return {f for f in fields if not field_ok(f, article.get(f), profile)}
+    """The enabled frontmatter fields whose stored value fails the rules (the only
+    ones the frontmatter step regenerates)."""
+    return {
+        f for f in enabled_fields(profile) if not field_ok(f, article.get(f), profile)
+    }
 
 
 def meta_over_limits(article: dict, profile: BlogProfile) -> bool:
@@ -180,11 +185,7 @@ async def generate(
     if not profile:
         return []
     if fields is None:
-        fields = {"category"}
-        if profile.summary.enabled:
-            fields.add("summary")
-        if profile.faq.enabled:
-            fields.add("faq")
+        fields = enabled_fields(profile)
     if not fields:
         return []
     name = (brand or {}).get("name") or "the brand"
@@ -278,10 +279,7 @@ async def complete(
     failing = failing_fields(article, profile)
     if force:
         # Summary and FAQ only: the category is regenerated when it fails (above).
-        if profile.summary.enabled:
-            failing.add("summary")
-        if profile.faq.enabled:
-            failing.add("faq")
+        failing |= enabled_fields(profile) - {"category"}
     fix_meta = meta_over_limits(article, profile)
     body_faq = profile.faq.enabled and bool(
         blog_rules.BODY_FAQ_RE.search(article.get("content_md") or "")

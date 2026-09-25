@@ -187,3 +187,22 @@ def test_meta_length_band_follows_the_profile_description_max():
 
     assert meta_sig(115)["fixes"] == []  # 110-130 band: 120 is not the floor
     assert meta_sig(135)["fixes"] == ["Target 110–130 characters."]
+
+
+# --- review r3 S8: the score falls off below `lo` (and above `hi`) ---
+def test_internal_links_score_and_fix_around_the_band():
+    prof = BlogProfile.model_validate({**_PROF, "links": {**_PROF["links"],
+                                                          "min": 3, "max": 5}})
+
+    def _il(n: int) -> dict:
+        md = " ".join(f"[a{i}](https://powabase.ai/blog/a{i}/)" for i in range(n))
+        s = scoring.score_seo(md, "t", "m", {}, profile=prof,
+                              internal_hosts={"powabase.ai"})
+        return next(x for x in s["signals"] if x["key"] == "internal_links")
+
+    assert [_il(n)["score"] for n in (0, 1, 2, 3, 5, 6, 8)] == [
+        0, 33, 67, 100, 100, 67, 0]
+    assert _il(1)["fixes"] == [
+        "Add 2 more contextual link(s) to the brand's own articles or hub pages."]
+    assert _il(6)["fixes"] == ["Cut to at most 5 internal links."]
+    assert _il(4)["fixes"] == []

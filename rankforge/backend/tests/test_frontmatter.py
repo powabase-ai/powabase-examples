@@ -698,3 +698,59 @@ async def test_complete_regenerates_a_failing_category_when_forced(monkeypatch):
 ])
 def test_rejected_flag_says_kept_only_when_something_was_stored(stored, tail):
     assert fm.rejected_flag("summary", "a b c", P, stored).endswith(f"— {tail}")
+
+
+# --- review r3 N13 / F2 / F3: disabled summary/FAQ are never failing or forced ---
+NO_SUMMARY_BRAND = {**BRAND, "blog_profile": {**PROF, "summary": {"enabled": False}}}
+
+
+@pytest.mark.parametrize("brand,off", [(NO_SUMMARY_BRAND, "summary"),
+                                       (NO_FAQ_BRAND, "faq")])
+def test_failing_fields_skips_a_disabled_field(brand, off):
+    prof = BlogProfile.model_validate(brand["blog_profile"])
+    art = {**VALID, "summary": None, "faq": None}
+    on = {"summary", "faq"} - {off}
+    assert fm.failing_fields(art, prof) == on
+
+
+@pytest.mark.parametrize("brand,off", [(NO_SUMMARY_BRAND, "summary"),
+                                       (NO_FAQ_BRAND, "faq")])
+async def test_force_leaves_a_disabled_field_alone(monkeypatch, brand, off):
+    art = {**VALID, off: None}
+    state, calls, flags = await _run_complete_real(
+        monkeypatch, art, _client(NEW), brand, force=True
+    )
+    on = ({"summary", "faq"} - {off}).pop()
+    assert state["art"][off] is None and state["art"][on] == NEW[on]
+    assert ("update", [on]) in calls and flags == []
+
+
+def test_enabled_fields_follow_the_profile():
+    both_off = BlogProfile.model_validate({
+        **PROF, "summary": {"enabled": False}, "faq": {"enabled": False}})
+    assert fm.enabled_fields(P) == {"category", "summary", "faq"}
+    assert fm.enabled_fields(both_off) == {"category"}
+
+
+async def test_force_with_summary_and_faq_disabled_calls_no_model(monkeypatch):
+    brand = {**BRAND, "blog_profile": {
+        **PROF, "summary": {"enabled": False}, "faq": {"enabled": False}}}
+    c = _client(NEW)
+    state, calls, flags = await _run_complete_real(
+        monkeypatch, {**VALID, "summary": None, "faq": None}, c, brand, force=True
+    )
+    c.run_agent.assert_not_called()
+    assert calls == [] and flags == []
+
+
+async def test_generate_never_flags_a_disabled_field(monkeypatch):
+    """Even when a caller asks for it, a disabled summary is neither written nor
+    flagged (the profile doesn't use it)."""
+    upd = MagicMock()
+    with patch.object(fm.gen_svc, "get_article", return_value=dict(ART)), \
+         patch.object(fm.brands, "get_profile", return_value=NO_SUMMARY_BRAND), \
+         patch.object(fm.gen_svc, "_update", upd), \
+         patch.object(fm, "ensure_agent", AsyncMock(return_value="agent")):
+        flags = await fm.generate(_client(GOOD), MagicMock(), "a",
+                                  fields={"summary", "faq"})
+    assert flags == [] and "summary" not in _written(upd)

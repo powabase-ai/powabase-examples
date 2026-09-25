@@ -120,6 +120,21 @@ async def test_body_faq_removed_under_profile(env):
     assert "## FAQ" not in written
 
 
+async def test_body_faq_kept_when_profile_faq_is_disabled(env):
+    """Review r3 G8: with faq.enabled false the body FAQ is the blog's own FAQ."""
+    _snap, upd = env
+    off = BlogProfile.model_validate({"categories": [{"key": "rag", "label": "R"}],
+                                      "faq": {"enabled": False}})
+    body = BODY + "\n\n## FAQ\n\n### Q?\n\nA."
+    with patch.object(revise.brands, "get_profile",
+                      return_value={"name": "B", "blog_profile": off.model_dump()}):
+        await revise.instructed_pass(_client({"content_md": body}), MagicMock(),
+                                     "a", instructions="x", mode="refine")
+    written = next(c.kwargs["content_md"] for c in upd.call_args_list
+                   if "content_md" in c.kwargs)
+    assert written == body
+
+
 async def test_rollback_when_rescore_fails(env):
     _snap, upd = env
     with patch("rankforge_backend.services.quality.reflect",
@@ -367,3 +382,23 @@ async def test_rejected_value_with_nothing_stored_says_left_empty(env):
 async def test_faq_within_max_is_not_flagged_as_cut(env):
     written, flags = await _pass_with({"faq": FAQ4 + [{"q": "Blank?", "a": " "}]})
     assert written["faq"] == FAQ4 and flags == []  # a dropped blank item isn't a cut
+
+
+# --- review r3 I5 / I9: a disabled summary/FAQ is never written by the pass ---
+@pytest.mark.parametrize("off", ["summary", "faq"])
+async def test_disabled_frontmatter_field_is_ignored(env, off):
+    prof = BlogProfile.model_validate({
+        "categories": [{"key": "rag", "label": "R"}], off: {"enabled": False}})
+    new_s = " ".join(["fresh"] * 45)
+    with patch.object(revise.gen_svc, "get_article", return_value=dict(STORED)), \
+         patch.object(revise.brands, "get_profile",
+                      return_value={"name": "B", "blog_profile": prof.model_dump()}), \
+         patch.object(revise.gen_svc, "_update") as upd:
+        await revise.instructed_pass(
+            _client({"content_md": BODY,
+                     "frontmatter": {"summary": new_s, "faq": FAQ4[:3]}}),
+            MagicMock(), "a", instructions="x", mode="refine")
+    written = {k: v for c in upd.call_args_list for k, v in c.kwargs.items()}
+    on = ({"summary", "faq"} - {off}).pop()
+    assert off not in written and on in written
+    assert not [c for c in upd.call_args_list if "progress" in c.kwargs]  # no flags
