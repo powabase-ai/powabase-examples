@@ -178,6 +178,12 @@ export function PostFrontmatterEditor({
     );
   }
 
+  // The onSuccess handlers above adopt the server's response as the new local
+  // state — so while either mutation is in flight, every editable control must be
+  // disabled, or a keystroke landing between "request sent" and "response applied"
+  // would get silently overwritten.
+  const formBusy = update.isPending || generate.isPending;
+
   return (
     <div className="space-y-4 border-t border-border pt-4">
       <div className="flex items-center justify-between gap-2">
@@ -188,13 +194,14 @@ export function PostFrontmatterEditor({
           size="sm"
           variant="outline"
           onClick={generateFrontmatter}
-          disabled={busy || generate.isPending}
+          disabled={busy || formBusy}
         >
           {generate.isPending ? <Loader2 className="animate-spin" /> : <Wand2 />}
           Generate summary &amp; FAQ
         </Button>
       </div>
 
+      <fieldset disabled={formBusy} className="space-y-4 border-0 p-0 m-0 min-w-0">
       <div className="space-y-1.5">
         <Label htmlFor="fm-category" className="text-xs">
           Category
@@ -203,7 +210,7 @@ export function PostFrontmatterEditor({
           id="fm-category"
           value={category}
           onChange={(e) => setCategory(e.target.value)}
-          className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm outline-none focus:ring-1 focus:ring-[rgb(var(--ember))]"
+          className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm outline-none focus:ring-1 focus:ring-[rgb(var(--ember))] disabled:cursor-not-allowed disabled:opacity-50"
         >
           <option value="">— none —</option>
           {profile.categories.map((c) => (
@@ -317,13 +324,14 @@ export function PostFrontmatterEditor({
           {metaTitle.length}/{profile.meta.title_max}
         </p>
       </div>
+      </fieldset>
 
       <Button
         size="sm"
         variant="gold"
         className="w-full"
         onClick={save}
-        disabled={update.isPending || !dirty}
+        disabled={formBusy || !dirty}
       >
         {update.isPending ? <Loader2 className="animate-spin" /> : <Save />}
         Save
